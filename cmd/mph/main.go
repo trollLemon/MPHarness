@@ -36,6 +36,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintf(w, "    disk: 20G\n")
 	fmt.Fprintf(w, "    ram: 4G\n")
 	fmt.Fprintf(w, "    cpu: 2\n")
+	fmt.Fprintf(w, "    image: noble       # optional, Ubuntu image (noble/jammy/focal/bionic or 22.04, release:noble, daily:resolute); default LTS\n")
 	fmt.Fprintf(w, "  model: <id>           # kronk model id, e.g. unsloth/Qwen3-0.6B-Q8_0 (kronk downloads it)\n")
 	fmt.Fprintf(w, "  prompt: \"do stuff in the VM\"\n")
 	fmt.Fprintf(w, "  allowed_commands:     # optional, restrict VM commands\n")
@@ -62,6 +63,7 @@ func run() error {
 		configPath  string
 		showVersion bool
 		verbose     bool
+		pretty      bool
 		needHelp    bool
 	)
 
@@ -70,6 +72,8 @@ func run() error {
 	flag.BoolVar(&showVersion, "version", false, "print version and exit")
 	flag.BoolVar(&verbose, "verbose", false, "verbose logging (debug)")
 	flag.BoolVar(&verbose, "v", false, "verbose logging (debug) shorthand")
+	flag.BoolVar(&pretty, "pretty", false, "pretty-print logs (human-readable console) instead of JSON")
+	flag.BoolVar(&pretty, "prettyprint", false, "alias for --pretty (pretty-print logs)")
 	flag.BoolVar(&needHelp, "help", false, "show help")
 	flag.BoolVar(&needHelp, "h", false, "show help (shorthand)")
 
@@ -82,7 +86,7 @@ func run() error {
 		return nil
 	}
 
-	setupLogger(verbose)
+	setupLogger(verbose, pretty)
 
 	if showVersion {
 		fmt.Printf("mph %s\n", version)
@@ -157,15 +161,20 @@ func run() error {
 	return nil
 }
 
-func setupLogger(verbose bool) {
+func setupLogger(verbose, pretty bool) {
 	zerolog.TimeFieldFormat = time.RFC3339
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	if verbose {
 		zerolog.SetGlobalLevel(zerolog.DebugLevel)
 	}
 
-	log.Logger = zerolog.New(zerolog.ConsoleWriter{
-		Out:        os.Stderr,
-		TimeFormat: "15:04:05",
-	}).With().Timestamp().Caller().Logger()
+	if pretty {
+		log.Logger = zerolog.New(zerolog.ConsoleWriter{
+			Out:        os.Stdout,
+			TimeFormat: "15:04:05",
+		}).With().Timestamp().Caller().Logger()
+		return
+	}
+
+	log.Logger = zerolog.New(os.Stdout).With().Timestamp().Caller().Logger()
 }

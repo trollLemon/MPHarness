@@ -3,6 +3,7 @@ vm:
   disk: 20G
   ram: 4G
   cpu: 2
+  image: noble # optional, Ubuntu series or image (e.g. noble, jammy, focal, bionic, 22.04, release:noble, daily:resolute). Omit for default LTS.
 
 model: unsloth/Qwen3-0.6B-Q8_0
 # model is a kronk-downloadable id (e.g. unsloth/Qwen3-0.6B-Q8_0),
@@ -31,11 +32,12 @@ llm:
 
 agent:
   max_iterations: 10
-  chat_timeout: 300s
+  chat_timeout: 30m # if running on CPU you may need to set this quite high
   total_timeout: 30m
 
 prompt: |
   Inside the Multipass VM, do the following:
   1. Update apt and install python3, pip, git
-  2. Clone https://github.com/example/repo and run its tests
+  2. run ls /etc
   3. Summarise the test results.
+  Create the VM if needed, when finished, remove the vm.
