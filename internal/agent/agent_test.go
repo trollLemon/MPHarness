@@ -125,12 +125,17 @@ func TestBuildUserPrompt(t *testing.T) {
 		{
 			name: "basic",
 			conf: config.Config{VM: config.VMConfig{Name: "test-vm", CPU: 2, RAM: "4G", Disk: "20G"}, Prompt: "do stuff"},
-			want: []string{"test-vm", "4G", "do stuff", "Allowed commands"},
+			want: []string{"do stuff", "Allowed commands"},
 		},
 		{
 			name: "with allowed commands",
 			conf: config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task", AllowedCommands: map[string]bool{"ls": true, "cat": true}},
 			want: []string{"ls", "cat"},
+		},
+		{
+			name: "no vm details leaked",
+			conf: config.Config{VM: config.VMConfig{Name: "secret-vm", CPU: 8, RAM: "16G", Disk: "100G", Image: "noble"}, Prompt: "task"},
+			want: []string{"task", "Allowed commands"},
 		},
 	}
 	for _, tt := range tests {
@@ -142,6 +147,13 @@ func TestBuildUserPrompt(t *testing.T) {
 			for _, w := range tt.want {
 				if !contains(p, w) {
 					t.Errorf("missing %q in %q", w, p)
+				}
+			}
+			if tt.name == "no vm details leaked" {
+				for _, leaked := range []string{"secret-vm", "16G", "100G", "noble", "CPUs", "Memory", "Disk", "VM Configuration"} {
+					if contains(p, leaked) {
+						t.Errorf("prompt should not contain VM detail %q, got %q", leaked, p)
+					}
 				}
 			}
 		})

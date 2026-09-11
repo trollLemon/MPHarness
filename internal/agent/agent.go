@@ -83,12 +83,13 @@ func (a *Agent) Execute(conf config.Config) error {
 			topK = 1
 		}
 		req := model.D{
-			"messages":    conversation,
-			"temperature": a.llmConfig.Temperature,
-			"top_p":       a.llmConfig.TopP,
-			"top_k":       topK,
-			"tools":       toolDocs,
-			"tool_choice": a.llmConfig.ToolChoice,
+			"messages":            conversation,
+			"temperature":         a.llmConfig.Temperature,
+			"top_p":               a.llmConfig.TopP,
+			"top_k":               topK,
+			"tools":               toolDocs,
+			"tool_choice":         a.llmConfig.ToolChoice,
+			"parallel_tool_calls": false,
 		}
 
 		resp, err := a.callChat(ctx, req, iter)
@@ -315,13 +316,12 @@ func buildToolDocuments() []model.D {
 
 func buildUserPrompt(conf config.Config) string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("VM Configuration:\n- Name: %s\n- CPUs: %d\n- Memory: %s\n- Disk: %s\n", conf.VM.Name, conf.VM.CPU, conf.VM.RAM, conf.VM.Disk))
 	if len(conf.AllowedCommands) > 0 {
-		b.WriteString(fmt.Sprintf("- Allowed commands: %s\n", strings.Join(conf.AllowedCommandsList(), ", ")))
+		b.WriteString(fmt.Sprintf("Allowed commands: %s\n\n", strings.Join(conf.AllowedCommandsList(), ", ")))
 	} else {
-		b.WriteString("- Allowed commands: (all)\n")
+		b.WriteString("Allowed commands: (all)\n\n")
 	}
-	b.WriteString("\nTask:\n")
+	b.WriteString("Task:\n")
 	b.WriteString(strings.TrimSpace(conf.Prompt))
 	b.WriteString("\n")
 	return b.String()

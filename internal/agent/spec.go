@@ -2,8 +2,8 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/trollLemon/MPHarness/internal/config"
 	"github.com/trollLemon/MPHarness/internal/multipass"
@@ -26,6 +26,7 @@ Guidelines:
 - When a tool succeeds you will receive JSON with status SUCCESS and data; when it fails you will receive status FAILED with an error. Use that to decide next steps.
 - After completing the task, summarize what you did and the observed command outputs.
 - Prefer small, verifiable steps. If a command fails, explain why and try an alternative if appropriate.
+- Do not delete the VM until all tasks are verifiably complete; launching and deleting in the same turn is never correct.
 
 Reasoning: high
 `
@@ -63,17 +64,17 @@ func Specs() []Spec {
 		},
 		{
 			Name:        "multipass_exec",
-			Description: "Run a command inside the configured Multipass VM and return combined stdout/stderr.",
+			Description: "Run a command inside the configured Multipass VM and return combined stdout/stderr. Provide the binary as `command` and each argument separately in `args` (e.g. command=\"ls\", args=[\"/etc\"] not command=\"ls /etc\"). For shell pipelines, use command=\"bash\" with args=[\"-c\", \"<script>\"] .",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"command": map[string]any{
 						"type":        "string",
-						"description": "Binary or command to execute inside the VM (e.g. \"ls\", \"bash\").",
+						"description": "Binary to execute inside the VM (e.g. \"ls\", \"bash\", \"apt\", \"cat\") — must be a single executable name, not a full shell line.",
 					},
 					"args": map[string]any{
 						"type":        "array",
-						"description": "Optional arguments for the command.",
+						"description": "Arguments for the command, each as a separate string (e.g. [\"/etc\"] or [\"-c\", \"apt update && apt install -y python3\"]).",
 						"items": map[string]any{
 							"type": "string",
 						},
@@ -156,9 +157,18 @@ func callLaunch(ctx context.Context, cli *multipass.Client, cfg config.Config) (
 
 func callExec(ctx context.Context, cli *multipass.Client, cfg config.Config, args map[string]any) (string, error) {
 	command, _ := args["command"].(string)
+	command = strings.TrimSpace(command)
+
+	if strings.Contains(command, " ") {
+		return "", fmt.Errorf("command %q must be a single binary (e.g. \"ls\"), not a shell lineput arguments in `args` (e.g. command=\"ls\", args=[\"/etc\"]) or use command=\"bash\" with args=[\"-c\", %q]", command, command)
+	}
 
 	if !cfg.IsCommandAllowed(command) {
-		return "", errors.New("Command not in allowed list")
+		allowed := cfg.AllowedCommandsList()
+		if len(allowed) == 0 {
+			allowed = []string{"(all)"}
+		}
+		return "", fmt.Errorf("command %q not in allowed list %v, allowed_commands=%v; if you need shell features (&&, pipes) use command=\"bash\" with args=[\"-c\", \"...\"]", command, allowed, allowed)
 	}
 
 	var execArgs []string
