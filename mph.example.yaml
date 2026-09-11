@@ -1,0 +1,41 @@
+vm:
+  name: mph-demo
+  disk: 20G
+  ram: 4G
+  cpu: 2
+
+model: unsloth/Qwen3-0.6B-Q8_0
+# model is a kronk-downloadable id (e.g. unsloth/Qwen3-0.6B-Q8_0),
+# not a local file path — kronk will download it if needed.
+
+# Optional: restrict which commands the agent may run inside the VM.
+# If omitted or empty, all commands are allowed.
+# Each entry is a binary or prefix (e.g. "git" allows "git clone ...",
+# "apt-get update" allows "apt-get update -y").
+allowed_commands:
+  - apt
+  - apt-get
+  - python3
+  - pip
+  - pip3
+  - git
+  - ls
+  - cat
+
+llm:
+  temperature: 0.2
+  top_p: 0.95
+  top_k: 40
+  tool_choice: auto   # auto | required | none
+  context_window: 8192  # 0 = auto-tune
+
+agent:
+  max_iterations: 10
+  chat_timeout: 300s
+  total_timeout: 30m
+
+prompt: |
+  Inside the Multipass VM, do the following:
+  1. Update apt and install python3, pip, git
+  2. Clone https://github.com/example/repo and run its tests
+  3. Summarise the test results.
