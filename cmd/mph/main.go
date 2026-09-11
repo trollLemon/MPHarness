@@ -26,7 +26,7 @@ func main() {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintf(w, "mph - Multipass Harness (kronk + zerolog)\n\n")
+	fmt.Fprintf(w, "mph - Multipass Harness (LLM + zerolog)\n\n")
 	fmt.Fprintf(w, "Usage: %s [flags] <config.yaml>\n\n", os.Args[0])
 	fmt.Fprintf(w, "Flags:\n")
 	flag.PrintDefaults()
@@ -37,7 +37,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintf(w, "    ram: 4G\n")
 	fmt.Fprintf(w, "    cpu: 2\n")
 	fmt.Fprintf(w, "    image: noble       # optional, Ubuntu image (noble/jammy/focal/bionic or 22.04, release:noble, daily:resolute); default LTS\n")
-	fmt.Fprintf(w, "  model: <id>           # kronk model id, e.g. unsloth/Qwen3-0.6B-Q8_0 (kronk downloads it)\n")
+	fmt.Fprintf(w, "  model: <id>           # LLM, e.g. unsloth/Qwen3-0.6B-Q8_0 (downloaded on first run)\n")
 	fmt.Fprintf(w, "  prompt: \"do stuff in the VM\"\n")
 	fmt.Fprintf(w, "  allowed_commands:     # optional, restrict VM commands\n")
 	fmt.Fprintf(w, "    - apt\n")
@@ -134,7 +134,7 @@ func run() error {
 	}
 	defer func() {
 		if err := krn.Unload(ctx); err != nil {
-			log.Warn().Err(err).Msg("kronk unload failed")
+			log.Warn().Err(err).Msg("LLM unload failed")
 		}
 	}()
 

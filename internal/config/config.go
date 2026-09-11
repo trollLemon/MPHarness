@@ -15,7 +15,7 @@ var (
 	ErrVMDiskRequired = errors.New("vm.disk is required (e.g. \"20G\")")
 	ErrVMRAMRequired  = errors.New("vm.ram is required (e.g. \"4G\")")
 	ErrVMCPURequired  = errors.New("vm.cpu must be > 0")
-	ErrModelRequired  = errors.New("model is required (kronk model id, e.g. \"unsloth/Qwen3-0.6B-Q8_0\")")
+	ErrModelRequired  = errors.New("model is required (LLM, e.g. \"unsloth/Qwen3-0.6B-Q8_0\")")
 	ErrPromptRequired = errors.New("prompt is required")
 )
 
