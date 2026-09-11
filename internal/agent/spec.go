@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/trollLemon/MPHarness/internal/config"
@@ -115,74 +116,97 @@ func Specs() []Spec {
 
 // Call dispatches one tool invocation by name against the Multipass client,
 // returning the result text a model should see next.
-func Call(ctx context.Context, cli *multipass.Client, vmCfg config.VMConfig, name string, args map[string]any) (string, error) {
+func Call(ctx context.Context, cli *multipass.Client, cfg config.Config, name string, args map[string]any) (string, error) {
 	switch name {
 	case "multipass_exists":
-		exists, err := cli.Exists(ctx, vmCfg.Name)
-		if err != nil {
-			return "", err
-		}
-		if exists {
-			return fmt.Sprintf("VM %q exists: true", vmCfg.Name), nil
-		}
-		return fmt.Sprintf("VM %q exists: false", vmCfg.Name), nil
-
+		return callExists(ctx, cli, cfg)
 	case "multipass_launch":
-		vm := vmCfg
-		if err := cli.Launch(ctx, vm); err != nil {
-			return "", err
-		}
-		return fmt.Sprintf("VM %q launched (cpus=%d memory=%s disk=%s)", vm.Name, vm.CPU, vm.RAM, vm.Disk), nil
-
+		return callLaunch(ctx, cli, cfg)
 	case "multipass_exec":
-		command, _ := args["command"].(string)
-		var execArgs []string
-		if raw, ok := args["args"]; ok && raw != nil {
-			switch v := raw.(type) {
-			case []string:
-				execArgs = v
-			case []any:
-				for _, e := range v {
-					if s, ok := e.(string); ok {
-						execArgs = append(execArgs, s)
-					}
-				}
-			case string:
-				execArgs = []string{v}
-			}
-		}
-		out, execErr := cli.Exec(ctx, vmCfg.Name, command, execArgs...)
-		if execErr != nil {
-			return "", execErr
-		}
-		if out == "" {
-			return "(no output)", nil
-		}
-		return out, nil
-
+		return callExec(ctx, cli, cfg, args)
 	case "multipass_stop":
-		if err := cli.Stop(ctx, vmCfg.Name); err != nil {
-			return "", err
-		}
-		return fmt.Sprintf("VM %q stopped", vmCfg.Name), nil
-
+		return callStop(ctx, cli, cfg)
 	case "multipass_start":
-		if err := cli.Start(ctx, vmCfg.Name); err != nil {
-			return "", err
-		}
-		return fmt.Sprintf("VM %q started", vmCfg.Name), nil
-
+		return callStart(ctx, cli, cfg)
 	case "multipass_delete":
-		purge, _ := args["purge"].(bool)
-		if err := cli.Delete(ctx, vmCfg.Name, purge); err != nil {
-			return "", err
-		}
-		if purge {
-			return fmt.Sprintf("VM %q deleted (purged)", vmCfg.Name), nil
-		}
-		return fmt.Sprintf("VM %q deleted", vmCfg.Name), nil
-
+		return callDelete(ctx, cli, cfg, args)
 	default:
 		return "", fmt.Errorf("unknown tool %q", name)
 	}
+}
+
+func callExists(ctx context.Context, cli *multipass.Client, cfg config.Config) (string, error) {
+	exists, err := cli.Exists(ctx, cfg.VM.Name)
+	if err != nil {
+		return "", err
+	}
+	if exists {
+		return fmt.Sprintf("VM %q exists: true", cfg.VM.Name), nil
+	}
+	return fmt.Sprintf("VM %q exists: false", cfg.VM.Name), nil
+}
+
+func callLaunch(ctx context.Context, cli *multipass.Client, cfg config.Config) (string, error) {
+	vm := cfg.VM
+	if err := cli.Launch(ctx, vm); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("VM %q launched (cpus=%d memory=%s disk=%s)", vm.Name, vm.CPU, vm.RAM, vm.Disk), nil
+}
+
+func callExec(ctx context.Context, cli *multipass.Client, cfg config.Config, args map[string]any) (string, error) {
+	command, _ := args["command"].(string)
+
+	if !cfg.IsCommandAllowed(command) {
+		return "", errors.New("Command not in allowed list")
+	}
+
+	var execArgs []string
+	if raw, ok := args["args"]; ok && raw != nil {
+		switch v := raw.(type) {
+		case []string:
+			execArgs = v
+		case []any:
+			for _, e := range v {
+				if s, ok := e.(string); ok {
+					execArgs = append(execArgs, s)
+				}
+			}
+		case string:
+			execArgs = []string{v}
+		}
+	}
+	out, execErr := cli.Exec(ctx, cfg.VM.Name, command, execArgs...)
+	if execErr != nil {
+		return "", execErr
+	}
+	if out == "" {
+		return "(no output)", nil
+	}
+	return out, nil
+}
+
+func callStop(ctx context.Context, cli *multipass.Client, cfg config.Config) (string, error) {
+	if err := cli.Stop(ctx, cfg.VM.Name); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("VM %q stopped", cfg.VM.Name), nil
+}
+
+func callStart(ctx context.Context, cli *multipass.Client, cfg config.Config) (string, error) {
+	if err := cli.Start(ctx, cfg.VM.Name); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("VM %q started", cfg.VM.Name), nil
+}
+
+func callDelete(ctx context.Context, cli *multipass.Client, cfg config.Config, args map[string]any) (string, error) {
+	purge, _ := args["purge"].(bool)
+	if err := cli.Delete(ctx, cfg.VM.Name, purge); err != nil {
+		return "", err
+	}
+	if purge {
+		return fmt.Sprintf("VM %q deleted (purged)", cfg.VM.Name), nil
+	}
+	return fmt.Sprintf("VM %q deleted", cfg.VM.Name), nil
 }
