@@ -1,0 +1,169 @@
+package multipass
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os/exec"
+	"strings"
+
+	"github.com/rs/zerolog"
+	"github.com/trollLemon/MPHarness/internal/config"
+)
+
+const (
+	MultipassBin = "multipass"
+)
+
+var (
+	ErrAlreadyExists  = errors.New("VM already exists")
+	ErrFailedToLaunch = errors.New("VM failed to launch")
+)
+
+// Client is a thin wrapper around the multipass cli application.
+type Client struct {
+	log zerolog.Logger
+	bin string
+}
+
+func New(log zerolog.Logger) *Client {
+	return &Client{
+		log: log.With().Str("component", MultipassBin).Logger(),
+		bin: MultipassBin,
+	}
+}
+
+// Exists returns true if a multipass instance exists, whether it be started or stopped.
+func (c *Client) Exists(ctx context.Context, name string) (bool, error) {
+	if strings.TrimSpace(name) == "" {
+		return false, fmt.Errorf("instance name is required")
+	}
+
+	cmd := exec.CommandContext(ctx, c.bin, "info", name)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return true, nil
+	}
+
+	msg := strings.TrimSpace(string(out))
+	lower := strings.ToLower(msg)
+
+	if strings.Contains(lower, "does not exist") {
+		return false, nil
+	}
+
+	return false, fmt.Errorf("multipass info %q failed: %w: %s", name, err, msg)
+}
+
+// Launch creates a multipas VM if one doesn't exist already.
+func (c *Client) Launch(ctx context.Context, vm config.VMConfig) error {
+	exists, err := c.Exists(ctx, vm.Name)
+	if err != nil {
+		return fmt.Errorf("check exists: %w", err)
+	}
+	if exists {
+		return ErrAlreadyExists
+	}
+
+	args := []string{
+		"launch",
+		"--name", vm.Name,
+		"--cpus", fmt.Sprintf("%d", vm.CPU),
+		"--memory", vm.RAM,
+		"--disk", vm.Disk,
+	}
+
+	cmd := exec.CommandContext(ctx, c.bin, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		c.log.Debug().Err(err).Str("vm", vm.Name).Str("output", msg).Msg("failed to launch VM")
+		return fmt.Errorf("%w: %s", ErrFailedToLaunch, msg)
+	}
+
+	c.log.Info().Str("vm", vm.Name).Msg("VM launched")
+	return nil
+}
+
+// Exec runs a command inside the multipass VM and returns the combined stdout and stderr.
+func (c *Client) Exec(ctx context.Context, name string, command string, args ...string) (string, error) {
+	if strings.TrimSpace(name) == "" {
+		return "", fmt.Errorf("instance name is required")
+	}
+	if strings.TrimSpace(command) == "" {
+		return "", fmt.Errorf("command is required")
+	}
+
+	execArgs := []string{"exec", name, "--", command}
+	execArgs = append(execArgs, args...)
+
+	cmd := exec.CommandContext(ctx, c.bin, execArgs...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		c.log.Debug().Err(err).Str("vm", name).Str("command", command).Str("output", msg).Msg("multipass exec failed")
+		return "", fmt.Errorf("multipass exec %q %q failed: %w: %s", name, command, err, msg)
+	}
+
+	return string(out), nil
+}
+
+// Delete deletes a multipass VM
+func (c *Client) Delete(ctx context.Context, name string, purge bool) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("instance name is required")
+	}
+
+	args := []string{"delete"}
+	if purge {
+		args = append(args, "--purge")
+	}
+	args = append(args, name)
+
+	cmd := exec.CommandContext(ctx, c.bin, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		c.log.Debug().Err(err).Str("vm", name).Bool("purge", purge).Str("output", msg).Msg("multipass delete failed")
+		return fmt.Errorf("multipass delete %q failed: %w: %s", name, err, msg)
+	}
+
+	c.log.Info().Str("vm", name).Bool("purge", purge).Msg("VM deleted")
+	return nil
+}
+
+// Stop stops a multipass VM but doesn't delete it.
+func (c *Client) Stop(ctx context.Context, name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("instance name is required")
+	}
+
+	cmd := exec.CommandContext(ctx, c.bin, "stop", name)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		c.log.Debug().Err(err).Str("vm", name).Str("output", msg).Msg("multipass stop failed")
+		return fmt.Errorf("multipass stop %q failed: %w: %s", name, err, msg)
+	}
+
+	c.log.Info().Str("vm", name).Msg("VM stopped")
+	return nil
+}
+
+// Start starts a multipass vm
+func (c *Client) Start(ctx context.Context, name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("instance name is required")
+	}
+
+	cmd := exec.CommandContext(ctx, c.bin, "start", name)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		c.log.Debug().Err(err).Str("vm", name).Str("output", msg).Msg("multipass start failed")
+		return fmt.Errorf("multipass start %q failed: %w: %s", name, err, msg)
+	}
+
+	c.log.Info().Str("vm", name).Msg("VM started")
+	return nil
+}
