@@ -46,6 +46,7 @@ func NewAgent(log zerolog.Logger, krn Kronk, maxIterations int, chatTimeout time
 	if llmConfig.ToolChoice == "" {
 		llmConfig.ToolChoice = "auto"
 	}
+	log = log.With().Str("component", "agent").Logger()
 	return &Agent{
 		log:           log,
 		krn:           krn,
@@ -73,7 +74,10 @@ func (a *Agent) Execute(conf config.Config) error {
 	var commandOutputs []string
 	var lastAssistantContent string
 
+	a.log.Info().Msg("Starting inference")
+
 	for iter := 0; iter < a.maxIterations; iter++ {
+		a.log.Debug().Int("iteration", iter+1).Msg("running inference")
 		topK := a.llmConfig.TopK
 		if topK == 0 {
 			topK = 1
@@ -124,7 +128,7 @@ func (a *Agent) Execute(conf config.Config) error {
 		assistantMsg := buildAssistantMessage(msg, toolCallDocs)
 		conversation = appendToConversation(conversation, assistantMsg)
 
-		toolResponses, newOutputs := a.executeToolCalls(ctx, cli, conf.VM, toolCalls)
+		toolResponses, newOutputs := a.executeToolCalls(ctx, cli, conf, toolCalls)
 		commandOutputs = append(commandOutputs, newOutputs...)
 		conversation = appendToConversation(conversation, toolResponses...)
 
@@ -238,12 +242,12 @@ func appendToConversation(conversation []model.D, msgs ...model.D) []model.D {
 	return append(conversation, msgs...)
 }
 
-func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, vmCfg config.VMConfig, toolCalls []model.ResponseToolCall) ([]model.D, []string) {
+func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg config.Config, toolCalls []model.ResponseToolCall) ([]model.D, []string) {
 	var toolResponses []model.D
 	var commandOutputs []string
 
 	for _, tc := range toolCalls {
-		result, err := Call(ctx, cli, vmCfg, tc.Function.Name, map[string]any(tc.Function.Arguments))
+		result, err := Call(ctx, cli, cfg, tc.Function.Name, map[string]any(tc.Function.Arguments))
 		var content string
 		if err != nil {
 			a.log.Error().Err(err).Str("tool", tc.Function.Name).Str("id", tc.ID).Msg("tool execution failed")
@@ -313,7 +317,7 @@ func buildUserPrompt(conf config.Config) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("VM Configuration:\n- Name: %s\n- CPUs: %d\n- Memory: %s\n- Disk: %s\n", conf.VM.Name, conf.VM.CPU, conf.VM.RAM, conf.VM.Disk))
 	if len(conf.AllowedCommands) > 0 {
-		b.WriteString(fmt.Sprintf("- Allowed commands: %s\n", strings.Join(conf.AllowedCommands, ", ")))
+		b.WriteString(fmt.Sprintf("- Allowed commands: %s\n", strings.Join(conf.AllowedCommandsList(), ", ")))
 	} else {
 		b.WriteString("- Allowed commands: (all)\n")
 	}
