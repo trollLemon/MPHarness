@@ -129,8 +129,8 @@ func TestBuildUserPrompt(t *testing.T) {
 		},
 		{
 			name: "with allowed commands",
-			conf: config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task", AllowedCommands: []string{"ls", "cat"}},
-			want: []string{"ls, cat"},
+			conf: config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task", AllowedCommands: map[string]bool{"ls": true, "cat": true}},
+			want: []string{"ls", "cat"},
 		},
 	}
 	for _, tt := range tests {
