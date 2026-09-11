@@ -27,6 +27,14 @@ go.work.sum
 # env file
 .env
 
+# Build output
+/bin/
+/archive/
+
+# Env / local configs
+mph.yaml
+.mph.yaml
+
 # Editor/IDE
 # .idea/
 # .vscode/
