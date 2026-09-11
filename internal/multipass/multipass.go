@@ -72,6 +72,9 @@ func (c *Client) Launch(ctx context.Context, vm config.VMConfig) error {
 		"--memory", vm.RAM,
 		"--disk", vm.Disk,
 	}
+	if img := strings.TrimSpace(vm.Image); img != "" {
+		args = append(args, img)
+	}
 
 	cmd := exec.CommandContext(ctx, c.bin, args...)
 	out, err := cmd.CombinedOutput()

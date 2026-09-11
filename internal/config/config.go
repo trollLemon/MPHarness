@@ -20,10 +20,11 @@ var (
 )
 
 type VMConfig struct {
-	Disk string `yaml:"disk"`
-	RAM  string `yaml:"ram"`
-	CPU  int    `yaml:"cpu"`
-	Name string `yaml:"name"`
+	Disk  string `yaml:"disk"`
+	RAM   string `yaml:"ram"`
+	CPU   int    `yaml:"cpu"`
+	Name  string `yaml:"name"`
+	Image string `yaml:"image"`
 }
 
 func (v VMConfig) Validate() error {
