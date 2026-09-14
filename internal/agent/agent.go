@@ -121,6 +121,24 @@ func (a *Agent) Execute(conf config.Config) error {
 		}
 
 		toolCalls := msg.ToolCalls
+		if len(toolCalls) == 0 && finishReason == model.FinishReasonLength {
+			a.log.Warn().Int("iteration", iter+1).Str("finish_reason", finishReason).Msg("hit length limit without tool calls, injecting nudge and continuing")
+			if msg.Reasoning != "" || msg.Content != "" {
+				nudgedAssistant := model.D{"role": "assistant"}
+				if msg.Content != "" {
+					nudgedAssistant["content"] = truncate(msg.Content, 2000)
+				}
+				if msg.Reasoning != "" {
+					nudgedAssistant["reasoning_content"] = truncate(msg.Reasoning, 2000)
+				}
+				conversation = appendToConversation(conversation, nudgedAssistant)
+			}
+			conversation = appendToConversation(conversation, model.D{
+				"role":    "user",
+				"content": "Your previous response hit the token limit without making a tool call. Please be concise and try again and run a tool call if necessary",
+			})
+			continue
+		}
 		if a.shouldTerminateWithoutToolCalls(toolCalls, finishReason, iter) {
 			break
 		}
@@ -140,7 +158,7 @@ func (a *Agent) Execute(conf config.Config) error {
 
 	if len(commandOutputs) > 0 {
 		joined := strings.Join(commandOutputs, "\n---\n")
-		a.log.Info().Str("command_output", truncate(joined, 12000)).Msg("final command output")
+		a.log.Info().Str("command_output", truncate(joined, 600)).Msg("final command output")
 		fmt.Println(joined)
 	} else if lastAssistantContent != "" {
 		a.log.Info().Str("final_output", truncate(lastAssistantContent, 8000)).Msg("agent final answer (no command output)")
@@ -257,7 +275,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg
 			a.log.Info().Str("tool", tc.Function.Name).Str("id", tc.ID).Str("result", truncate(result, 4000)).Msg("tool succeeded")
 			if tc.Function.Name == "multipass_exec" {
 				commandOutputs = append(commandOutputs, result)
-				a.log.Info().Str("command_output", truncate(result, 8000)).Msg("command output")
+				a.log.Info().Str("command_output", truncate(result, 600)).Msg("command output")
 			}
 			content = buildToolSuccessContent(tc.Function.Name, result)
 		}

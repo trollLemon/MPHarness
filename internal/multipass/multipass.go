@@ -35,6 +35,8 @@ func New(log zerolog.Logger) *Client {
 
 // Exists returns true if a multipass instance exists, whether it be started or stopped.
 func (c *Client) Exists(ctx context.Context, name string) (bool, error) {
+	c.log.Info().Msgf("checking if VM %s exists", name)
+
 	if strings.TrimSpace(name) == "" {
 		return false, fmt.Errorf("instance name is required")
 	}
@@ -57,6 +59,8 @@ func (c *Client) Exists(ctx context.Context, name string) (bool, error) {
 
 // Launch creates a multipas VM if one doesn't exist already.
 func (c *Client) Launch(ctx context.Context, vm config.VMConfig) error {
+	c.log.Info().Msgf("Creating VM %s", vm.Name)
+
 	exists, err := c.Exists(ctx, vm.Name)
 	if err != nil {
 		return fmt.Errorf("check exists: %w", err)
@@ -89,7 +93,7 @@ func (c *Client) Launch(ctx context.Context, vm config.VMConfig) error {
 }
 
 // Exec runs a command inside the multipass VM and returns the combined stdout and stderr.
-func (c *Client) Exec(ctx context.Context, name string, command string, args ...string) (string, error) {
+func (c *Client) Exec(ctx context.Context, name string, command string) (string, error) {
 	if strings.TrimSpace(name) == "" {
 		return "", fmt.Errorf("instance name is required")
 	}
@@ -97,14 +101,15 @@ func (c *Client) Exec(ctx context.Context, name string, command string, args ...
 		return "", fmt.Errorf("command is required")
 	}
 
-	execArgs := []string{"exec", name, "--", command}
-	execArgs = append(execArgs, args...)
+	execArgs := []string{"exec", name, "--", "bash", "-c", command}
+
+	c.log.Info().Msgf("Running %s", command)
 
 	cmd := exec.CommandContext(ctx, c.bin, execArgs...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
-		c.log.Debug().Err(err).Str("vm", name).Str("command", command).Str("output", msg).Msg("multipass exec failed")
+		c.log.Debug().Err(err).Str("vm", name).Str("command", command).Str("args", strings.Join(execArgs, ",")).Msg("multipass exec failed")
 		return "", fmt.Errorf("multipass exec %q %q failed: %w: %s", name, command, err, msg)
 	}
 
@@ -116,6 +121,8 @@ func (c *Client) Delete(ctx context.Context, name string, purge bool) error {
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("instance name is required")
 	}
+
+	c.log.Info().Msgf("Deleting VM %s", name)
 
 	args := []string{"delete"}
 	if purge {
@@ -141,7 +148,10 @@ func (c *Client) Stop(ctx context.Context, name string) error {
 		return fmt.Errorf("instance name is required")
 	}
 
+	c.log.Info().Msgf("stopping vm %s", name)
+
 	cmd := exec.CommandContext(ctx, c.bin, "stop", name)
+
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
@@ -158,6 +168,8 @@ func (c *Client) Start(ctx context.Context, name string) error {
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("instance name is required")
 	}
+
+	c.log.Info().Msgf("starting vm %s", name)
 
 	cmd := exec.CommandContext(ctx, c.bin, "start", name)
 	out, err := cmd.CombinedOutput()

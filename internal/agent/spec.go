@@ -7,28 +7,51 @@ import (
 
 	"github.com/trollLemon/MPHarness/internal/config"
 	"github.com/trollLemon/MPHarness/internal/multipass"
+	"github.com/trollLemon/MPHarness/internal/validation"
 )
 
-const systemPrompt = `You are an autonomous agent that manages a Multipass VM to complete user tasks.
+const systemPrompt = `
+You are an autonomous execution agent responsible for managing a Multipass Virtual Machine (VM) to accomplish technical tasks efficiently and securely.
 
-You have access to tools for Multipass VM lifecycle and command execution:
-- multipass_exists: check whether the configured VM exists (running or stopped)
-- multipass_launch: create the configured VM. This tool will create the VM with the users desired parameters, you do not need to input them yourself. 
-- multipass_exec: run a shell command inside the VM (requires command, optional args) and return combined stdout/stderr
-- multipass_start: start the configured VM if stopped
-- multipass_stop: stop the running VM
-- multipass_delete: delete the configured VM (optional purge)
+### Context & Execution State
+- **Interaction Model:** You operate asynchronously without direct user interaction during execution. Task goals and environment variables are preconfigured.
+- **State Awareness:** Any past messages in the conversation history are logs from your own prior execution iterations, not user messages. Evaluate this context to determine if steps have already been completed before taking action.
 
-Guidelines:
-- Always check if the VM exists before launching. If it exists and is stopped, start it before executing commands.
-- Use multipass_exec to run commands one at a time and inspect output before proceeding.
-- Think step-by-step: plan, call tools, observe results, then continue.
-- When a tool succeeds you will receive JSON with status SUCCESS and data; when it fails you will receive status FAILED with an error. Use that to decide next steps.
-- After completing the task, summarize what you did and the observed command outputs.
-- Prefer small, verifiable steps. If a command fails, explain why and try an alternative if appropriate.
-- Do not delete the VM until all tasks are verifiably complete; launching and deleting in the same turn is never correct.
+### Available Tools
+- ` + "`" + `multipass_exists` + "`" + `: Check if the VM exists (returns if VM exists already).
+- ` + "`" + `multipass_launch` + "`" + `: Create the configured VM using preconfigured user parameters.
+- ` + "`" + `multipass_start` + "`" + `: Start the configured VM if it is currently stopped.
+- ` + "`" + `multipass_stop` + "`" + `: Stop the running VM.
+- ` + "`" + `multipass_delete` + "`" + `: Delete the configured VM (supports optional ` + "`" + `purge` + "`" + `).
+- ` + "`" + `multipass_exec` + "`" + `: Run a command inside the VM. Provide the full command string in the ` + "`" + `command` + "`" + ` field (e.g. ` + "`" + `df -h` + "`" + `, ` + "`" + `apt update && apt install -y curl` + "`" + `, ` + "`" + `ps aux | grep nginx` + "`" + `).
 
-Reasoning: high
+### Denial & Tool Failure Guardrails
+No Security Workarounds: If a tool call fails because it was denied, restricted by policy, or blocked due to insufficient permissions, STOP IMMEDIATELY. Do not attempt workarounds, alternative unauthorized commands, or privilege escalation tactics to bypass the restriction. The user is aware of this restriction and the policy of failing fast rather than working around the issue.
+
+Non-Recoverable Denial: If a tool or command returns a permission or authorization denial, mark the task step as blocked, report the error, and end the workflow.
+
+### Execution Workflow & Reasoning
+Reasoning Style: Maintain concise, direct reasoning ("medium depth"). Do not over-analyze simple actions.
+
+Environment Check: Always run ` + "`" + `multipass_exists` + "`" + ` first.
+
+If missing -> invoke ` + "`" + `multipass_launch` + "`" + `.
+
+If stopped -> invoke ` + "`" + `multipass_start` + "`" + `.
+
+One Action Per Turn: Emit exactly ONE tool call per turn and wait for its result before deciding the next step. Do NOT batch ` + "`" + `multipass_exists` + "`" + `, ` + "`" + `multipass_launch` + "`" + `, ` + "`" + `multipass_start` + "`" + `, and ` + "`" + `multipass_exec` + "`" + ` into a single turn — you cannot know whether the VM already exists or has started until you read each result. Chaining them blindly causes redundant launches, misread state, and confused reasoning.
+
+Step-by-Step Command Execution: Execute commands via ` + "`" + `multipass_exec` + "`" + ` sequentially. Inspect ` + "`" + `stdout` + "`" + `/` + "`" + `stderr` + "`" + ` from the JSON response (` + "`" + `status: SUCCESS` + "`" + ` or ` + "`" + `status: FAILED` + "`" + `) before proceeding.
+
+VM Lifecycle Discipline: Never delete the VM prematurely. Creating and deleting a VM within the same turn is invalid. Only call ` + "`" + `multipass_delete` + "`" + ` when all primary goals are completed or explicitly instructed to clean up.
+
+Mandatory Completion Summary: You MUST ALWAYS finish with a summary. Once ALL tasks are done (or you halt on a non-recoverable failure), send one final message that contains NO tool calls and consists only of a concise summary. The execution loop ends — and the summary is only surfaced to the user — when you produce this final tool-call-free message, so never stop after a tool call without following it with the summary. The summary must detail:
+
+Tasks attempted and completed.
+
+Observed outputs from relevant commands (e.g. the ` + "`" + `uname -a` + "`" + ` kernel string and notable ` + "`" + `ls /etc` + "`" + ` entries).
+
+Final status of the VM.
 `
 
 // Spec describes one tool's calling contract in a transport-neutral shape:
@@ -64,20 +87,13 @@ func Specs() []Spec {
 		},
 		{
 			Name:        "multipass_exec",
-			Description: "Run a command inside the configured Multipass VM and return combined stdout/stderr. Provide the binary as `command` and each argument separately in `args` (e.g. command=\"ls\", args=[\"/etc\"] not command=\"ls /etc\"). For shell pipelines, use command=\"bash\" with args=[\"-c\", \"<script>\"] .",
+			Description: "Run a command inside the configured Multipass VM and return combined stdout/stderr. Pass the full command as a single string in the `command` field (e.g. `df -h`, `apt update && apt install -y curl`, `ps aux | grep nginx`).",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"command": map[string]any{
 						"type":        "string",
-						"description": "Binary to execute inside the VM (e.g. \"ls\", \"bash\", \"apt\", \"cat\") — must be a single executable name, not a full shell line.",
-					},
-					"args": map[string]any{
-						"type":        "array",
-						"description": "Arguments for the command, each as a separate string (e.g. [\"/etc\"] or [\"-c\", \"apt update && apt install -y python3\"]).",
-						"items": map[string]any{
-							"type": "string",
-						},
+						"description": "Full command to execute inside the VM (e.g. \"df -h\", \"apt update && apt install -y curl\").",
 					},
 				},
 				"required": []string{"command"},
@@ -159,34 +175,15 @@ func callExec(ctx context.Context, cli *multipass.Client, cfg config.Config, arg
 	command, _ := args["command"].(string)
 	command = strings.TrimSpace(command)
 
-	if strings.Contains(command, " ") {
-		return "", fmt.Errorf("command %q must be a single binary (e.g. \"ls\"), not a shell lineput arguments in `args` (e.g. command=\"ls\", args=[\"/etc\"]) or use command=\"bash\" with args=[\"-c\", %q]", command, command)
+	if command == "" {
+		return "", fmt.Errorf("command is required")
 	}
 
-	if !cfg.IsCommandAllowed(command) {
-		allowed := cfg.AllowedCommandsList()
-		if len(allowed) == 0 {
-			allowed = []string{"(all)"}
-		}
-		return "", fmt.Errorf("command %q not in allowed list %v, allowed_commands=%v; if you need shell features (&&, pipes) use command=\"bash\" with args=[\"-c\", \"...\"]", command, allowed, allowed)
+	if err := validation.ValidateShellCommand(cfg.AllowedCommands, command); err != nil {
+		return "", err
 	}
 
-	var execArgs []string
-	if raw, ok := args["args"]; ok && raw != nil {
-		switch v := raw.(type) {
-		case []string:
-			execArgs = v
-		case []any:
-			for _, e := range v {
-				if s, ok := e.(string); ok {
-					execArgs = append(execArgs, s)
-				}
-			}
-		case string:
-			execArgs = []string{v}
-		}
-	}
-	out, execErr := cli.Exec(ctx, cfg.VM.Name, command, execArgs...)
+	out, execErr := cli.Exec(ctx, cfg.VM.Name, command)
 	if execErr != nil {
 		return "", execErr
 	}

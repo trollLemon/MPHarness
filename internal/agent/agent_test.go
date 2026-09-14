@@ -205,10 +205,10 @@ func TestBuildInitialConversation(t *testing.T) {
 
 func TestExtractAssistantMessage(t *testing.T) {
 	tests := []struct {
-		name       string
-		resp       model.ChatResponse
-		wantBreak  bool
-		wantFR     string
+		name        string
+		resp        model.ChatResponse
+		wantBreak   bool
+		wantFR      string
 		wantContent string
 		wantReason  string
 	}{
@@ -286,14 +286,14 @@ func TestShouldTerminateWithoutToolCalls(t *testing.T) {
 
 func TestBuildToolCallDocs(t *testing.T) {
 	tests := []struct {
-		name string
-		calls []model.ResponseToolCall
-		wantID string
+		name     string
+		calls    []model.ResponseToolCall
+		wantID   string
 		wantName string
 	}{
 		{
-			name: "single exec",
-			calls: []model.ResponseToolCall{{ID: "call-1", Type: "function", Function: model.ResponseToolCallFunction{Name: "multipass_exec", Arguments: model.ToolCallArguments{"command": "ls"}}}},
+			name:   "single exec",
+			calls:  []model.ResponseToolCall{{ID: "call-1", Type: "function", Function: model.ResponseToolCallFunction{Name: "multipass_exec", Arguments: model.ToolCallArguments{"command": "ls"}}}},
 			wantID: "call-1", wantName: "multipass_exec",
 		},
 	}
@@ -337,34 +337,40 @@ func TestBuildAssistantMessageAndAppend(t *testing.T) {
 
 func TestExecute(t *testing.T) {
 	tests := []struct {
-		name       string
-		mock       *mockKronk
-		maxIter    int
-		wantCalls  int
-		wantErr    bool
-		verifyReq  func(t *testing.T, reqs []model.D)
+		name      string
+		mock      *mockKronk
+		maxIter   int
+		wantCalls int
+		wantErr   bool
+		verifyReq func(t *testing.T, reqs []model.D)
 	}{
 		{
-			name: "no tool calls success",
-			mock: &mockKronk{responses: []model.ChatResponse{chatResp("final answer", "thinking", model.FinishReasonStop, nil, &model.Usage{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3, TokensPerSecond: 10})}},
+			name:    "no tool calls success",
+			mock:    &mockKronk{responses: []model.ChatResponse{chatResp("final answer", "thinking", model.FinishReasonStop, nil, &model.Usage{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3, TokensPerSecond: 10})}},
 			maxIter: 5, wantCalls: 1,
 			verifyReq: func(t *testing.T, reqs []model.D) {
-				if reqs[0]["temperature"] != 0.0 { t.Errorf("temperature %v", reqs[0]["temperature"]) }
-				if reqs[0]["top_p"] != 0.1 { t.Errorf("top_p %v", reqs[0]["top_p"]) }
-				if reqs[0]["tool_choice"] != "auto" { t.Errorf("tool_choice %v", reqs[0]["tool_choice"]) }
+				if reqs[0]["temperature"] != 0.0 {
+					t.Errorf("temperature %v", reqs[0]["temperature"])
+				}
+				if reqs[0]["top_p"] != 0.1 {
+					t.Errorf("top_p %v", reqs[0]["top_p"])
+				}
+				if reqs[0]["tool_choice"] != "auto" {
+					t.Errorf("tool_choice %v", reqs[0]["tool_choice"])
+				}
 			},
 		},
 		{
-			name: "uses LLMConfig",
-			mock: &mockKronk{responses: []model.ChatResponse{chatResp("ok", "", model.FinishReasonStop, nil, nil)}},
+			name:    "uses LLMConfig",
+			mock:    &mockKronk{responses: []model.ChatResponse{chatResp("ok", "", model.FinishReasonStop, nil, nil)}},
 			maxIter: 3, wantCalls: 1,
 			verifyReq: func(t *testing.T, reqs []model.D) {
 				// this case will be handled with custom LLMConfig below; placeholder
 			},
 		},
 		{
-			name: "empty choices breaks gracefully",
-			mock: &mockKronk{responses: []model.ChatResponse{{Choices: []model.Choice{}}}},
+			name:    "empty choices breaks gracefully",
+			mock:    &mockKronk{responses: []model.ChatResponse{{Choices: []model.Choice{}}}},
 			maxIter: 3, wantCalls: 1,
 		},
 		{
@@ -378,7 +384,9 @@ func TestExecute(t *testing.T) {
 		},
 		{
 			name: "handles chat error",
-			mock: &mockKronk{chatFunc: func(ctx context.Context, req model.D) (model.ChatResponse, error) { return model.ChatResponse{}, context.DeadlineExceeded }},
+			mock: &mockKronk{chatFunc: func(ctx context.Context, req model.D) (model.ChatResponse, error) {
+				return model.ChatResponse{}, context.DeadlineExceeded
+			}},
 			maxIter: 3, wantErr: true,
 		},
 	}
@@ -409,10 +417,18 @@ func TestExecute(t *testing.T) {
 			}
 			if tt.name == "uses LLMConfig" && len(tt.mock.captured) > 0 {
 				req := tt.mock.captured[0]
-				if req["temperature"] != 0.7 { t.Errorf("temperature %v want 0.7", req["temperature"]) }
-				if req["top_p"] != 0.9 { t.Errorf("top_p %v want 0.9", req["top_p"]) }
-				if req["top_k"] != 5 { t.Errorf("top_k %v want 5", req["top_k"]) }
-				if req["tool_choice"] != "required" { t.Errorf("tool_choice %v want required", req["tool_choice"]) }
+				if req["temperature"] != 0.7 {
+					t.Errorf("temperature %v want 0.7", req["temperature"])
+				}
+				if req["top_p"] != 0.9 {
+					t.Errorf("top_p %v want 0.9", req["top_p"])
+				}
+				if req["top_k"] != 5 {
+					t.Errorf("top_k %v want 5", req["top_k"])
+				}
+				if req["tool_choice"] != "required" {
+					t.Errorf("tool_choice %v want required", req["tool_choice"])
+				}
 			}
 		})
 	}
