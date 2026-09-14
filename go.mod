@@ -6,6 +6,7 @@ require (
 	github.com/ardanlabs/kronk v1.32.6
 	github.com/rs/zerolog v1.35.1
 	gopkg.in/yaml.v3 v3.0.1
+	mvdan.cc/sh/v3 v3.14.1
 )
 
 require (
@@ -63,7 +64,6 @@ require (
 	github.com/hybridgroup/yzma v1.26.2-0.20260906172259-ece48906649f // indirect
 	github.com/jupiterrider/ffi v0.7.0 // indirect
 	github.com/klauspost/compress v1.20.0 // indirect
-	github.com/kr/text v0.2.0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
