@@ -19,6 +19,29 @@ var (
 	ErrPromptRequired = errors.New("prompt is required")
 )
 
+// coreUtils is an array of the core utils commands, for when the user config specifies the meta command `coreUtils`.
+var coreUtils = [...]string{
+	// File utilities
+	"chgrp", "chmod", "chown", "cp", "dd", "df", "dir", "dircolors", "du",
+	"install", "ln", "ls", "mkdir", "mkfifo", "mknod", "mktemp", "mv",
+	"rm", "rmdir", "shred", "sync", "touch", "vdir",
+
+	// Text utilities
+	"base32", "base64", "cat", "cksum", "comm", "csplit", "cut", "expand",
+	"fmt", "fold", "head", "join", "md5sum", "nl", "od", "paste", "ptx",
+	"pr", "sha1sum", "sha224sum", "sha256sum", "sha384sum", "sha512sum",
+	"shuf", "sort", "split", "sum", "tac", "tail", "tr", "tsort",
+	"unexpand", "uniq", "wc",
+
+	// Shell & System utilities
+	"[", "arch", "basename", "chcon", "date", "dirname", "echo", "env",
+	"expr", "factor", "false", "groups", "hostid", "id", "link", "logname",
+	"nice", "nohup", "nproc", "numfmt", "pathchk", "pinky", "printenv",
+	"printf", "pwd", "readlink", "realpath", "runcon", "seq", "sleep",
+	"stat", "stty", "tee", "test", "timeout", "true", "tty", "uname",
+	"unlink", "uptime", "users", "who", "whoami", "yes",
+}
+
 type VMConfig struct {
 	Disk  string `yaml:"disk"`
 	RAM   string `yaml:"ram"`
@@ -85,12 +108,12 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 }
 
 type Config struct {
-	VM              VMConfig          `yaml:"vm"`
-	Model           string            `yaml:"model"`
-	Prompt          string            `yaml:"prompt"`
+	VM              VMConfig        `yaml:"vm"`
+	Model           string          `yaml:"model"`
+	Prompt          string          `yaml:"prompt"`
 	AllowedCommands map[string]bool `yaml:"-"`
-	LLM             LLMConfig         `yaml:"llm"`
-	Agent           AgentConfig       `yaml:"agent"`
+	LLM             LLMConfig       `yaml:"llm"`
+	Agent           AgentConfig     `yaml:"agent"`
 }
 
 func (c Config) Validate() error {
@@ -112,11 +135,11 @@ func (c Config) Validate() error {
 // It also lets us decode allowed_commands as []string then convert to
 // map[string]bool.
 type configRaw struct {
-	VM              VMConfig   `yaml:"vm"`
-	Model           string     `yaml:"model"`
-	Prompt          string     `yaml:"prompt"`
-	AllowedCommands []string   `yaml:"allowed_commands"`
-	LLM             LLMConfig  `yaml:"llm"`
+	VM              VMConfig    `yaml:"vm"`
+	Model           string      `yaml:"model"`
+	Prompt          string      `yaml:"prompt"`
+	AllowedCommands []string    `yaml:"allowed_commands"`
+	LLM             LLMConfig   `yaml:"llm"`
 	Agent           AgentConfig `yaml:"agent"`
 }
 
@@ -157,28 +180,18 @@ func normalizeAllowedCommands(cmds []string) map[string]bool {
 		if c == "" {
 			continue
 		}
+		if c == "coreUtils" {
+			for _, cu := range coreUtils {
+				set[cu] = true
+			}
+			continue
+		}
 		set[c] = true
 	}
 	if len(set) == 0 {
 		return nil
 	}
 	return set
-}
-
-func (c Config) IsCommandAllowed(cmd string) bool {
-	if len(c.AllowedCommands) == 0 {
-		return true
-	}
-	cmd = strings.TrimSpace(cmd)
-	if cmd == "" {
-		return false
-	}
-	if _, ok := c.AllowedCommands[cmd]; ok {
-		return true
-	}
-	base := strings.Fields(cmd)[0]
-	_, ok := c.AllowedCommands[base]
-	return ok
 }
 
 func LoadFile(path string) (Config, error) {
@@ -198,8 +211,6 @@ func Parse(data []byte) (Config, error) {
 	if cfg.VM.Name == "" {
 		cfg.VM.Name = "mph-vm"
 	}
-
-	cfg.AllowedCommands = normalizeAllowedCommands(cfg.AllowedCommandsList())
 
 	if cfg.LLM.ToolChoice == "" {
 		cfg.LLM.ToolChoice = "auto"

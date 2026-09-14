@@ -53,6 +53,30 @@ func TestConfig_Validate(t *testing.T) {
 	}
 }
 
+func TestAllowedCommandsList(t *testing.T) {
+	tests := []struct {
+		name string
+		set  map[string]bool
+		want []string
+	}{
+		{"nil", nil, nil},
+		{"empty", map[string]bool{}, nil},
+		{"sorted", map[string]bool{"z": true, "a": true, "m": true}, []string{"a", "m", "z"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := Config{AllowedCommands: tt.set}
+			got := c.AllowedCommandsList()
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("got %v want %v", got, tt.want)
+			}
+			if len(got) > 1 && !sort.StringsAreSorted(got) {
+				t.Fatalf("not sorted: %v", got)
+			}
+		})
+	}
+}
+
 func TestNormalizeAllowedCommands(t *testing.T) {
 	tests := []struct {
 		name string
@@ -75,55 +99,29 @@ func TestNormalizeAllowedCommands(t *testing.T) {
 	}
 }
 
-func TestAllowedCommandsList(t *testing.T) {
+func TestNormalizeAllowedCommandsCoreUtils(t *testing.T) {
 	tests := []struct {
 		name string
-		set  map[string]bool
-		want []string
+		in   []string
 	}{
-		{"nil", nil, nil},
-		{"empty", map[string]bool{}, nil},
-		{"sorted", map[string]bool{"z": true, "a": true, "m": true}, []string{"a", "m", "z"}},
+		{"meta expands to full set", []string{"coreUtils"}},
+		{"meta mixes with regular commands", []string{"coreUtils", "apt", "apt-get"}},
+		{"meta dedups against explicit entries", []string{"coreUtils", "ls"}},
+		{"meta trimmed", []string{"  coreUtils  "}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := Config{AllowedCommands: tt.set}
-			got := c.AllowedCommandsList()
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Fatalf("got %v want %v", got, tt.want)
+			got := normalizeAllowedCommands(tt.in)
+			for _, cu := range coreUtils {
+				if !got[cu] {
+					t.Fatalf("missing coreutils command %q in %v", cu, got)
+				}
 			}
-			// ensure sorted
-			if len(got) > 1 && !sort.StringsAreSorted(got) {
-				t.Fatalf("not sorted: %v", got)
+			if got["coreUtils"] {
+				t.Fatalf("meta command coreUtils was not expanded: %v", got)
 			}
-		})
-	}
-}
-
-func TestIsCommandAllowed(t *testing.T) {
-	tests := []struct {
-		name    string
-		allowed map[string]bool
-		cmd     string
-		want    bool
-	}{
-		{"allow all when empty", nil, "rm -rf /", true},
-		{"allow all when empty map", map[string]bool{}, "any", true},
-		{"exact match", map[string]bool{"ls": true}, "ls", true},
-		{"base match with args", map[string]bool{"ls": true}, "ls -la /tmp", true},
-		{"base match with tab", map[string]bool{"ls": true}, "ls\t-la", true},
-		{"not allowed", map[string]bool{"ls": true}, "rm -rf", false},
-		{"trimmed input", map[string]bool{"ls": true}, "  ls  ", true},
-		{"empty cmd", map[string]bool{"ls": true}, "  ", false},
-		{"subcommand allowed via base", map[string]bool{"git": true}, "git status", true},
-		{"different binary not allowed", map[string]bool{"apt": true}, "apt-get update", false},
-		{"case sensitive", map[string]bool{"LS": true}, "ls", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c := Config{AllowedCommands: tt.allowed}
-			if got := c.IsCommandAllowed(tt.cmd); got != tt.want {
-				t.Fatalf("IsCommandAllowed(%q)=%v want %v (set %v)", tt.cmd, got, tt.want, tt.allowed)
+			if len(got) < len(coreUtils) {
+				t.Fatalf("got %d commands, want at least %d", len(got), len(coreUtils))
 			}
 		})
 	}
@@ -161,11 +159,11 @@ func TestUnmarshalYAML_AllowedCommands(t *testing.T) {
 
 func TestParse(t *testing.T) {
 	tests := []struct {
-		name      string
-		yaml      string
-		wantName  string
-		wantSet   map[string]bool
-		wantErr   bool
+		name     string
+		yaml     string
+		wantName string
+		wantSet  map[string]bool
+		wantErr  bool
 	}{
 		{
 			name:     "valid with defaults",
@@ -194,7 +192,6 @@ func TestParse(t *testing.T) {
 			wantName: "mph-vm",
 			wantSet:  map[string]bool{"a": true, "z": true},
 		},
-
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
