@@ -26,7 +26,7 @@ func main() {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintf(w, "mph - Multipass Harness (LLM + zerolog)\n\n")
+	fmt.Fprintf(w, "mph - Multipass Harness\n\n")
 	fmt.Fprintf(w, "Usage: %s [flags] <config.yaml>\n\n", os.Args[0])
 	fmt.Fprintf(w, "Flags:\n")
 	flag.PrintDefaults()
