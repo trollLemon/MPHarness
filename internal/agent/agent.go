@@ -60,11 +60,9 @@ func NewAgent(log zerolog.Logger, krn Kronk, maxIterations int, chatTimeout time
 // Execute runs a chat session where the model completes the task defined in the VM config.
 // This call is blocking, and will exit when the LLM determines the task is complete, ran into a failure
 // it couldn't recover from, the totalTimeout fires, or if the max iterations was reached.
-func (a *Agent) Execute(conf config.Config) error {
+func (a *Agent) Execute(conf config.Config, cli *multipass.Client) error {
 	ctx, cancel := context.WithTimeout(context.Background(), a.totalTimeout)
 	defer cancel()
-
-	cli := multipass.New(a.log)
 
 	toolDocs := buildToolDocuments()
 	a.log.Info().Int("tools", len(toolDocs)).Msg("tool documents built")
