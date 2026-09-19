@@ -16,8 +16,8 @@ const (
 )
 
 var (
-	ErrAlreadyExists  = errors.New("VM already exists")
-	ErrFailedToLaunch = errors.New("VM failed to launch")
+	ErrFailedToLaunch   = errors.New("VM failed to launch")
+	ErrInstanceNotFound = errors.New("VM instance not found")
 )
 
 // Client is a thin wrapper around the multipass cli application.
@@ -33,41 +33,38 @@ func New(log zerolog.Logger) *Client {
 	}
 }
 
-// Exists returns true if a multipass instance exists, whether it be started or stopped.
-func (c *Client) Exists(ctx context.Context, name string) (bool, error) {
-	c.log.Info().Msgf("checking if VM %s exists", name)
-
+// Info runs `multipass info --format json` for the named VM and returns the
+// raw JSON response emitted by multipass.
+func (c *Client) Info(ctx context.Context, name string) (string, error) {
 	if strings.TrimSpace(name) == "" {
-		return false, fmt.Errorf("instance name is required")
+		return "", fmt.Errorf("instance name is required")
 	}
 
-	cmd := exec.CommandContext(ctx, c.bin, "info", name)
+	c.log.Info().Str("vm", name).Msg("fetching VM info")
+
+	cmd := exec.CommandContext(ctx, c.bin, "info", name, "--format", "json")
 	out, err := cmd.CombinedOutput()
-	if err == nil {
-		return true, nil
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		c.log.Debug().Err(err).Str("vm", name).Str("output", msg).Msg("multipass info failed")
+		if isInstanceNotFound(msg) {
+			return "", fmt.Errorf("%w: %s", ErrInstanceNotFound, name)
+		}
+		return "", fmt.Errorf("multipass info %q failed: %w: %s", name, err, msg)
 	}
 
-	msg := strings.TrimSpace(string(out))
-	lower := strings.ToLower(msg)
+	return string(out), nil
+}
 
-	if strings.Contains(lower, "does not exist") {
-		return false, nil
-	}
-
-	return false, fmt.Errorf("multipass info %q failed: %w: %s", name, err, msg)
+// isInstanceNotFound reports whether a multipass info error message indicates
+// that the named instance does not exist.
+func isInstanceNotFound(msg string) bool {
+	return strings.Contains(strings.ToLower(msg), "does not exist")
 }
 
 // Launch creates a multipas VM if one doesn't exist already.
 func (c *Client) Launch(ctx context.Context, vm config.VMConfig) error {
 	c.log.Info().Msgf("Creating VM %s", vm.Name)
-
-	exists, err := c.Exists(ctx, vm.Name)
-	if err != nil {
-		return fmt.Errorf("check exists: %w", err)
-	}
-	if exists {
-		return ErrAlreadyExists
-	}
 
 	args := []string{
 		"launch",

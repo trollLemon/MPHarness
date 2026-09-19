@@ -14,6 +14,8 @@ import (
 
 	"github.com/trollLemon/MPHarness/internal/agent"
 	"github.com/trollLemon/MPHarness/internal/config"
+	"github.com/trollLemon/MPHarness/internal/harness"
+	"github.com/trollLemon/MPHarness/internal/multipass"
 )
 
 var version = "dev"
@@ -60,11 +62,13 @@ func printUsage(w io.Writer) {
 
 func run() error {
 	var (
-		configPath  string
-		showVersion bool
-		verbose     bool
-		pretty      bool
-		needHelp    bool
+		configPath     string
+		showVersion    bool
+		verbose        bool
+		pretty         bool
+		needHelp       bool
+		ignoreExisting bool
+		keep           bool
 	)
 
 	flag.StringVar(&configPath, "config", "", "path to yaml config file (or positional arg)")
@@ -76,6 +80,8 @@ func run() error {
 	flag.BoolVar(&pretty, "prettyprint", false, "alias for --pretty (pretty-print logs)")
 	flag.BoolVar(&needHelp, "help", false, "show help")
 	flag.BoolVar(&needHelp, "h", false, "show help (shorthand)")
+	flag.BoolVar(&ignoreExisting, "i", false, "ignore that a VM with the given name exists already and run against that VM")
+	flag.BoolVar(&keep, "k", false, "keep the VM after execution rather than deleting it")
 
 	flag.Usage = func() { printUsage(os.Stderr) }
 
@@ -154,11 +160,9 @@ func run() error {
 		llmCfg,
 	)
 
-	if err := agt.Execute(cfg); err != nil {
-		return err
-	}
+	client := multipass.New(log.Logger)
 
-	return nil
+	return harness.Start(ctx, agt, client, cfg, ignoreExisting, keep)
 }
 
 func setupLogger(verbose, pretty bool) {
