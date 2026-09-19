@@ -54,8 +54,7 @@ func Start(ctx context.Context, agt *agent.Agent, client *multipass.Client, cfg 
 		for {
 			err := determineIfExistingVMIsOK(cfg.VM.Name)
 			if err == nil {
-				return client.Launch(ctx, cfg.VM)
-
+				break
 			}
 
 			if errors.Is(err, errInvalidInput) {
