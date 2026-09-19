@@ -9,6 +9,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/trollLemon/MPHarness/internal/config"
+	"github.com/trollLemon/MPHarness/internal/multipass"
 )
 
 type mockKronk struct {
@@ -182,7 +183,7 @@ func TestBuildToolDocuments(t *testing.T) {
 		name, _ := fn["name"].(string)
 		names[name] = true
 	}
-	for _, want := range []string{"multipass_exists", "multipass_launch", "multipass_exec", "multipass_start", "multipass_stop", "multipass_delete"} {
+	for _, want := range []string{"multipass_exec", "multipass_info"} {
 		if !names[want] {
 			t.Errorf("missing tool %q", want)
 		}
@@ -376,7 +377,7 @@ func TestExecute(t *testing.T) {
 		{
 			name: "respects maxIterations",
 			mock: func() *mockKronk {
-				tc := []model.ResponseToolCall{{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{Name: "multipass_exists", Arguments: model.ToolCallArguments{}}}}
+				tc := []model.ResponseToolCall{{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{Name: "multipass_info", Arguments: model.ToolCallArguments{}}}}
 				resp := chatResp("", "", model.FinishReasonTool, tc, nil)
 				return &mockKronk{responses: []model.ChatResponse{resp, resp, resp, resp, resp}}
 			}(),
@@ -405,7 +406,8 @@ func TestExecute(t *testing.T) {
 				conf.VM = config.VMConfig{Name: "test-vm", CPU: 2, RAM: "4G", Disk: "20G"}
 				conf.Prompt = "do nothing"
 			}
-			err := agent.Execute(conf)
+			cli := multipass.New(zerolog.Nop())
+			err := agent.Execute(conf, cli)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err %v wantErr %v", err, tt.wantErr)
 			}

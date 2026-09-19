@@ -20,7 +20,7 @@ You are an autonomous execution agent responsible for managing a Multipass Virtu
 	
 ### Available Tools
 - ` + "`" + `multipass_exec` + "`" + `: Run a command inside the VM. Provide the full command string in the ` + "`" + `command` + "`" + ` field (e.g. ` + "`" + `df -h` + "`" + `, ` + "`" + `apt update && apt install -y curl` + "`" + `, ` + "`" + `ps aux | grep nginx` + "`" + `).
-- multipass_info: returns information about the VM (CPU, Disk, Ram, Ubuntu Version)
+- ` + "`" + `multipass_info` + "`" + `: Fetch current VM information as the raw JSON payload from ` + "`" + `multipass info --format json` + "`" + ` (zone, state, release, image_release, cpu_count, load, memory and disk usage, ipv4, mounts). Takes no arguments. Use this to check resource headroom before running heavy commands.
 	
 ### Denial & Tool Failure Guardrails
 No Security Workarounds: If a tool call fails because it was denied, restricted by policy, or blocked due to insufficient permissions, STOP IMMEDIATELY. Do not attempt workarounds, alternative unauthorized commands, or privilege escalation tactics to bypass the restriction. The user is aware of this restriction and the policy of failing fast rather than working around the issue.
@@ -69,6 +69,14 @@ func Specs() []Spec {
 				"required": []string{"command"},
 			},
 		},
+		{
+			Name:        "multipass_info",
+			Description: "Returns the raw JSON payload from `multipass info --format json` for the configured VM: zone, state, release, image_release, cpu_count, load, memory and disk usage, ipv4, mounts. Takes no arguments. Use this to inspect configured limits and headroom before running heavy commands.",
+			Parameters: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
+		},
 	}
 }
 
@@ -78,9 +86,19 @@ func Call(ctx context.Context, cli *multipass.Client, cfg config.Config, name st
 	switch name {
 	case "multipass_exec":
 		return callExec(ctx, cli, cfg, args)
+	case "multipass_info":
+		return callInfo(ctx, cli, cfg)
 	default:
 		return "", fmt.Errorf("unknown tool %q", name)
 	}
+}
+
+func callInfo(ctx context.Context, cli *multipass.Client, cfg config.Config) (string, error) {
+	raw, err := cli.Info(ctx, cfg.VM.Name)
+	if err != nil {
+		return "", err
+	}
+	return raw, nil
 }
 
 func callExec(ctx context.Context, cli *multipass.Client, cfg config.Config, args map[string]any) (string, error) {
