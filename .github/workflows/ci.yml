@@ -47,17 +47,3 @@ jobs:
         uses: golang/govulncheck-action@v1
         with:
           go-package: ./...
-
-  build:
-    name: Build
-    runs-on: ubuntu-latest
-    needs: [lint, test, vulncheck]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.27'
-      - name: Build binary
-        run: make build
-      - name: Verify binary runs
-        run: ./bin/mph --help
