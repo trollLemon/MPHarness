@@ -27,7 +27,7 @@ allowed_commands:
   - apt      # allows: apt update, apt install -y ...
 ```
 
-Matching is case-sensitive and matches against the first token of each executed command.
+Matching is case-sensitive and matches against the **first token** of each executed command (the binary name). It does **not** do prefix matching — `apt` allows `apt update` but does **not** allow `apt-get` (different binary).
 
 ## Combinations inside a command
 
@@ -54,7 +54,7 @@ Because this is grammar-aware, things like command substitution (`$(...)`), back
 
 - `true` and `false` are always allowed and ignored by the check (they are noise tokens; `ls \; true` is fine).
 - The allowed list does not grant the agent `sudo` or `env` etc. unless you list those binaries too. To let the agent run `sudo apt update`, you need both `sudo` and `apt` in the list.
-- Prefix-only caveat: `apt` in the list does **not** allow `apt-get`. List `apt-get` explicitly if you want it.
+- First-token caveat: `apt` in the list does **not** allow `apt-get` (different binary name). List `apt-get` explicitly if you want it.
 - Untracked non-literal names fail closed (see above).
 
 ## The `coreUtils` meta command

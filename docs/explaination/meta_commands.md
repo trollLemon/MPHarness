@@ -35,7 +35,7 @@ The only cases you wouldn't need this is if you know the exact few commands the 
 ## Caveats
 
 - `coreUtils` does **not** include non-core utilities. `apt`, `pip`, `git`, `curl`, `python3`, `sudo` and friends must still be listed explicitly.
-- It does not expand nested inside a prefix string: `"coreUtils"` as a bare entry works; something like `"coreutils ls"` is treated as a literal command name and will not produce any meaningful output.
+- It does not expand nested inside a command string: `"coreUtils"` as a bare entry works; something like `"coreutils ls"` is treated as a literal command name and will not produce any meaningful output.
 - Trailing whitespace and duplicates are trimmed/deduplicated automatically, so mixing `coreUtils` with an explicit `ls` is fine.
 
 ## Related

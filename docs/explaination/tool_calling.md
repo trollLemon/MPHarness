@@ -9,11 +9,11 @@
 | Tool | What the model must supply | What it returns |
 |------|----------------------------|-----------------|
 | `multipass_exec` | `command` (string) | combined stdout/stderr |
-| `multipass_info` | n/a | a JSON payload describing the current VM state |
+| `multipass_info` | n/a | raw JSON from `multipass info --format json` |
 
 For `multipass_exec`, the `command` string can be several commands at once (such as `cat /proc/uptime | grep ...`), the input command is parsed into a shell AST and each command is validated against the allow list.
 
-`multipass_info` takes no arguments. It returns a JSON payload with the current state of the VM (name, status, IP address, resources, and so on), which the model can read before or between `multipass_exec` calls. Because the harness guarantees the VM is already running, `multipass_info` is for *orientation*, for example, determining correct parameters for some command given the VM specs.
+`multipass_info` takes no arguments. It returns the raw JSON output from `multipass info --format json` for the configured VM, which includes: zone, state, release, image_release, cpu_count, load, memory usage, disk usage, ipv4, mounts, and more. Because the harness guarantees the VM is already running, `multipass_info` is for *orientation*, for example, determining correct parameters for some command given the VM specs.
 
 ### How the tools are described to the model
 
@@ -66,6 +66,12 @@ sequenceDiagram
 
     Note over Harness,Model: ... (each round appends assistant + tool messages) ...
 
+    alt Length limit hit without tool call
+        Harness->>Model: appends nudge ("be concise, run a tool call")
+        Model->>Harness: assistant + tool_call
+    else Normal completion
+    end
+
     rect rgb(230, 255, 230)
     Note over Harness,Model: final round
     Model->>Harness: assistant: "Task complete." (no tool_call)
@@ -74,6 +80,8 @@ sequenceDiagram
 ```
 
 The loop restarts only when the model emits a message **without** tool calls; that message is its final summary, and the harness stops and prints the collected command output.
+
+**Length-limit recovery.** If the model's reply exhausts its token budget without a tool call (finish_reason = "length"), the harness appends a nudge ("Your previous response hit the token limit without making a tool call. Please be concise and try again and run a tool call if necessary") and retries rather than dying.
 
 ## Forcing and forbidding tool calls
 
@@ -95,10 +103,10 @@ Tool results are returned to the model as JSON and are status-tagged so the mode
 { "status": "SUCCESS", "data": { "output": "<combined stdout/stderr>" } }
 ```
 
-and `multipass_info` returns a JSON payload describing the current VM state:
+and `multipass_info` returns the raw multipass JSON:
 
 ```json
-{ "status": "SUCCESS", "data": { "vm_state": { "name": "mph-vm", "status": "Running", "ip": "10.0.0.1" } } }
+{ "status": "SUCCESS", "data": { "result": "<raw multipass info JSON>" } }
 ```
 
 or, on a failure (including a denied command):

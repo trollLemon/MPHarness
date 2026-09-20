@@ -18,16 +18,16 @@ llm:
   top_p: 0.95
   top_k: 40
   tool_choice: auto   # auto | required | none
-  context_window: 8192  # 0 = auto-tune
+  context_window: 0   # 0 = auto-tune
 ```
 
-| Key | Default | Effect |
-|-----|---------|--------|
-| `temperature` | (`0.2` in the example) | Randomness of sampling. Lower is more deterministic and reproducible. |
-| `top_p` | (`0.95` in the example) | Nucleus sampling threshold. |
-| `top_k` | ( `40` in the example) | Only sample from the top-k tokens. A value of `0` is treated as `1` at runtime. |
-| `tool_choice` | `auto` | `auto` lets the model decide whether to call a tool; `required` forces a tool call; `none` disables tool calling. |
-| `context_window` | `0` (auto-tune) | How many tokens of context the model gets. Set to `0` for the harness to tune it from the model metadata instead. |
+| Key | Default (zero value) | Example | Effect |
+|-----|----------------------|---------|--------|
+| `temperature` | `0.0` | `0.2` | Randomness of sampling. Lower is more deterministic. |
+| `top_p` | `0.0` | `0.95` | Nucleus sampling threshold (`0` = disabled). |
+| `top_k` | `0` | `40` | Only sample from top-k tokens (`0` = treated as `1` at runtime). |
+| `tool_choice` | `auto` | `auto` | `auto` lets model decide; `required` forces tool call; `none` disables. |
+| `context_window` | `0` (auto-tune) | `8192` | Max context tokens. `0` = auto-tune from model metadata. |
 
 ### Matching the settings to your goal
 
@@ -62,8 +62,10 @@ agent:
 | Key | Default | Effect |
 |-----|---------|--------|
 | `max_iterations` | `10` | Maximum agent loop turns. |
-| `chat_timeout` | `300s` | Per-inference-call timeout. It's reccomended to set this higher if running on a CPU. |
+| `chat_timeout` | `300s` | Per-inference-call timeout. It's recommended to set this higher if running on a CPU. |
 | `total_timeout` | `30m` | Overall run timeout for the whole task. |
+
+Timeout values accept **Go duration strings** (`"60s"`, `"10m"`, `"1h"`, `"300s"`) or raw integers (interpreted as seconds). For example, `chat_timeout: 600` = 600 seconds, `chat_timeout: "10m"` = 10 minutes.
 
 ## Related
 

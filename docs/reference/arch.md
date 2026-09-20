@@ -10,21 +10,21 @@ MPHarness is a local harness for running agent-driven technical tasks inside a [
 
 ```mermaid
 flowchart TD
-    CLI["cmd/mph (CLI entry)<br/>flags (-i, -k) -> config.LoadFile -> InitializeModelFiles -> NewKronk -><br/>NewAgent -> harness.Start"]
-    CONF["internal/config<br/>YAML -> Config, validation, defaults"]
-    AGENT["internal/agent (Agent loop)<br/>buildInitialConversation, buildToolDocuments<br/><-> kronk Chat (LLM) -> Call(tool, args)"]
+    CLI["cmd/mph (CLI entry)"]
+    CONF["internal/config<br/>YAML parsing, validation, defaults"]
+    AGENT["internal/agent<br/>Agent loop, LLM client, tool specs + dispatch"]
     HARNESS["internal/harness<br/>VM lifecycle: info, launch, prompt, delete"]
-    DISPATCH["internal/spec dispatch (agent.Call)<br/>multipass_* tools"]
-    MULTIPASS["internal/multipass<br/>(multipass CLI)"]
+    MULTIPASS["internal/multipass<br/>multipass CLI wrapper"]
     VALIDATE["internal/validation<br/>shell AST allowlist check (fail closed)"]
 
     CLI --> CONF
     CLI --> HARNESS
     HARNESS --> AGENT
-    AGENT --> DISPATCH
-    DISPATCH --> MULTIPASS
-    DISPATCH --> VALIDATE
+    AGENT --> MULTIPASS
+    AGENT --> VALIDATE
 ```
+
+Tool dispatch (`Call`, `callExec`, `callInfo`) lives in `internal/agent/spec.go` alongside tool specifications.
 
 ## Package responsibilities
 
@@ -71,12 +71,12 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A[model] -->|tool_choice| B[agent]
+    A[Model] -->|tool_choice| B[Agent]
     B -->|"multipass_exec: { command: apt update }"| C[Call]
-    C --> D[validation.ValidateShellCommand allowlist]
+    C --> D[validation.ValidateShellCommand]
     D -->|No| E[FAILED JSON to model]
-    D -->|Yes| F[multipass exec &lt;vm&gt; -- bash -c &quot;&lt;cmd&gt;&quot;]
-    F --> G[combined stdout/stderr back to model]
+    D -->|Yes| F["multipass exec <vm> -- bash -c "<cmd>""]
+    F --> G[stdout/stderr back to model]
     E --> B
     G --> B
 ```

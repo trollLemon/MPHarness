@@ -59,6 +59,12 @@ Everything else is optional; the values above are sensible defaults for a CPU-on
 ./bin/mph first-task.yaml
 ```
 
+The config file can be passed as a positional argument or with `-c`/`--config`:
+
+```bash
+./bin/mph -c first-task.yaml
+```
+
 Add `-v` if you want debug-level logging, and `--pretty` for human-readable (instead of JSON) logs:
 
 ```bash
@@ -67,8 +73,13 @@ Add `-v` if you want debug-level logging, and `--pretty` for human-readable (ins
 
 Additional flags:
 
-- `-i` (or `--ignore-existing`): reuse an existing VM with the same name without prompting
-- `-k` (or `--keep`): keep the VM after the task completes instead of deleting it
+- `-c`, `--config <file>`: path to YAML config file (positional arg also works)
+- `-i`, `--ignore-existing`: reuse an existing VM with the same name without prompting
+- `-k`, `--keep`: keep the VM after the task completes instead of deleting it
+- `-v`, `--verbose`: verbose (debug) logging
+- `--pretty`: pretty-print logs (human-readable console) instead of JSON
+- `--version`: print version and exit
+- `-h`, `--help`: show help
 
 ```bash
 ./bin/mph -i -k first-task.yaml

@@ -17,7 +17,7 @@ vm:
 
 | Key     | Required | Default     | Description |
 |---------|----------|-------------|-------------|
-| `name`  | no       | `mph-vm`    | Multipass instance name. If left blank, the harness will let `multipass` choose the name.|
+| `name`  | no       | `mph-vm`    | Multipass instance name. Defaults to `mph-vm` if omitted.|
 | `disk`  | yes      | none       | Disk size, e.g. `20G`. |
 | `ram`   | yes      | none       | Memory, e.g. `4G`. |
 | `cpu`   | yes      | none       | CPU count, must be greater than `0`. |
