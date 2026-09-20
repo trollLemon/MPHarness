@@ -1,0 +1,54 @@
+name: E2E Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    name: E2E Deterministic Test
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+
+      - name: Install multipass
+        run: |
+          sudo snap install multipass --classic
+          multipass version
+
+      - name: Build binary
+        run: make build
+
+      - name: Create deterministic test config
+        run: |
+          cat > e2e-test.yaml << 'EOF'
+          vm:
+            disk: 10G
+            ram: 2G
+            cpu: 2
+            image: noble
+            name: mph-e2e-test
+          model: unsloth/Qwen3-0.6B-Q8_0
+          prompt: "Run `echo hello from e2e` in the VM and return its output."
+          llm:
+            temperature: 0.0
+            top_p: 0.1
+            top_k: 1
+            tool_choice: auto
+            context_window: 4096
+          agent:
+            max_iterations: 5
+            chat_timeout: 120s
+            total_timeout: 10m
+          EOF
+
+      - name: Run E2E test
+        run: |
+          ./bin/mph -v e2e-test.yaml
+        timeout-minutes: 25

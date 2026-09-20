@@ -333,7 +333,7 @@ func buildToolDocuments() []model.D {
 func buildUserPrompt(conf config.Config) string {
 	var b strings.Builder
 	if len(conf.AllowedCommands) > 0 {
-		b.WriteString(fmt.Sprintf("Allowed commands: %s\n\n", strings.Join(conf.AllowedCommandsList(), ", ")))
+		fmt.Fprintf(&b, "Allowed commands: %s\n\n", strings.Join(conf.AllowedCommandsList(), ", "))
 	} else {
 		b.WriteString("Allowed commands: (all)\n\n")
 	}
