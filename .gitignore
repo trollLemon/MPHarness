@@ -38,3 +38,6 @@ mph.yaml
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# graphify
+graphify-out/
