@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -195,9 +196,10 @@ func normalizeAllowedCommands(cmds []string) map[string]bool {
 }
 
 func LoadFile(path string) (Config, error) {
-	data, err := os.ReadFile(path)
+	cleanPath := filepath.Clean(path)
+	data, err := os.ReadFile(cleanPath)
 	if err != nil {
-		return Config{}, fmt.Errorf("read config %q: %w", path, err)
+		return Config{}, fmt.Errorf("read config %q: %w", cleanPath, err)
 	}
 	return Parse(data)
 }

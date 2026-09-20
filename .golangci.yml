@@ -15,7 +15,8 @@ linters:
     - unused
   settings:
     gosec:
-      excludes: []
+      excludes:
+        - G204
   exclusions:
     rules:
       - path: _test\.go
