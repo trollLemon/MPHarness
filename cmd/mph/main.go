@@ -77,7 +77,6 @@ func run() error {
 	flag.BoolVar(&verbose, "verbose", false, "verbose logging (debug)")
 	flag.BoolVar(&verbose, "v", false, "verbose logging (debug) shorthand")
 	flag.BoolVar(&pretty, "pretty", false, "pretty-print logs (human-readable console) instead of JSON")
-	flag.BoolVar(&pretty, "prettyprint", false, "alias for --pretty (pretty-print logs)")
 	flag.BoolVar(&needHelp, "help", false, "show help")
 	flag.BoolVar(&needHelp, "h", false, "show help (shorthand)")
 	flag.BoolVar(&ignoreExisting, "i", false, "ignore that a VM with the given name exists already and run against that VM")
