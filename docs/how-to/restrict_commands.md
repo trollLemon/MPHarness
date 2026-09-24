@@ -27,7 +27,7 @@ allowed_commands:
   - apt      # allows: apt update, apt install -y ...
 ```
 
-Matching is case-sensitive and matches against the **first token** of each executed command (the binary name). It does **not** do prefix matching — `apt` allows `apt update` but does **not** allow `apt-get` (different binary).
+Matching is case-sensitive and matches against the **first token** of each executed command (the binary name). It does **not** do prefix matching. For example `apt` allows `apt update` but does **not** allow `apt-get` (different binary).
 
 ## Combinations inside a command
 

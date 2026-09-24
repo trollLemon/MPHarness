@@ -22,6 +22,7 @@ const (
 var (
 	ErrFailedToLaunch   = errors.New("VM failed to launch")
 	ErrInstanceNotFound = errors.New("VM instance not found")
+	ErrTransferFailed   = errors.New("transfer failed")
 )
 
 // Client is a thin wrapper around the multipass cli application.
@@ -157,6 +158,45 @@ func (c *Client) Exec(ctx context.Context, name string, command string) (string,
 	}
 
 	return string(out), nil
+}
+
+// Transfer copies a host directory recursively into the VM.
+func (c *Client) Transfer(ctx context.Context, vmName, hostPath, vmDest string) error {
+	if strings.TrimSpace(vmName) == "" {
+		return fmt.Errorf("instance name is required")
+	}
+	if strings.TrimSpace(hostPath) == "" {
+		return fmt.Errorf("host path is required")
+	}
+	if strings.TrimSpace(vmDest) == "" {
+		return fmt.Errorf("destination is required")
+	}
+
+	ctx, span := getTracer().Start(ctx, "multipass.transfer", trace.WithAttributes(
+		attribute.String("multipass.command", "transfer"),
+		attribute.String("mph.vm.name", vmName),
+		attribute.String("mph.transfer.source", hostPath),
+		attribute.String("mph.transfer.destination", vmDest),
+	))
+	defer span.End()
+
+	c.log.Info().Str("vm", vmName).Str("source", hostPath).Str("dest", vmDest).Msg("transferring content to VM")
+
+	args := []string{"transfer", "--recursive", "--parents", hostPath, fmt.Sprintf("%s:%s", vmName, vmDest)}
+	span.SetAttributes(attribute.StringSlice("multipass.args", args))
+
+	cmd := exec.CommandContext(ctx, c.bin, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		c.log.Debug().Err(err).Str("vm", vmName).Str("source", hostPath).Str("dest", vmDest).Str("output", msg).Msg("multipass transfer failed")
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return fmt.Errorf("%w: %s", ErrTransferFailed, msg)
+	}
+
+	c.log.Info().Str("vm", vmName).Str("source", hostPath).Str("dest", vmDest).Msg("transfer complete")
+	return nil
 }
 
 // Delete deletes a multipass VM

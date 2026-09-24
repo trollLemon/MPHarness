@@ -55,6 +55,8 @@ func Start(ctx context.Context, agt *agent.Agent, client *multipass.Client, cfg 
 		attribute.Bool("mph.keep", keep),
 		attribute.Bool("mph.ignore_existing", ignoreExisting),
 		attribute.StringSlice("mph.allowed_commands", cfg.AllowedCommandsList()),
+		attribute.String("mph.content_dir", cfg.ContentDir),
+		attribute.String("mph.content.destination", config.VMContentDir),
 	))
 	defer span.End()
 
@@ -99,6 +101,31 @@ func Start(ctx context.Context, agt *agent.Agent, client *multipass.Client, cfg 
 			span.SetStatus(codes.Error, err.Error())
 			return err
 		}
+	}
+
+	if strings.TrimSpace(cfg.ContentDir) != "" {
+		cCtx, cSpan := tracer.Start(ctx, "mph.vm.content", trace.WithAttributes(
+			attribute.String("mph.vm.name", cfg.VM.Name),
+			attribute.String("mph.content.source", cfg.ContentDir),
+			attribute.String("mph.content.destination", config.VMContentDir),
+		))
+		if _, err := client.Exec(cCtx, cfg.VM.Name, fmt.Sprintf("mkdir -p %q", config.VMContentDir)); err != nil {
+			cSpan.RecordError(err)
+			cSpan.SetStatus(codes.Error, err.Error())
+			cSpan.End()
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return err
+		}
+		if err := client.Transfer(cCtx, cfg.VM.Name, cfg.ContentDir, config.VMContentDir); err != nil {
+			cSpan.RecordError(err)
+			cSpan.SetStatus(codes.Error, err.Error())
+			cSpan.End()
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return err
+		}
+		cSpan.End()
 	}
 
 	if err := agt.Execute(ctx, cfg, client); err != nil {

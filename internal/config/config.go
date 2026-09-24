@@ -20,6 +20,10 @@ var (
 	ErrPromptRequired = errors.New("prompt is required")
 )
 
+// VMContentDir is the fixed directory inside the VM where host content_dir is copied.
+// The harness creates this path and transfers the local directory there before the agent starts.
+const VMContentDir = "/home/ubuntu/content"
+
 // coreUtils is an array of the core utils commands, for when the user config specifies the meta command `coreUtils`.
 var coreUtils = [...]string{
 	// File utilities
@@ -120,6 +124,7 @@ type Config struct {
 	Model           string          `yaml:"model"`
 	Prompt          string          `yaml:"prompt"`
 	AllowedCommands map[string]bool `yaml:"-"`
+	ContentDir      string          `yaml:"content_dir"`
 	LLM             LLMConfig       `yaml:"llm"`
 	Agent           AgentConfig     `yaml:"agent"`
 	Otel            OtelConfig      `yaml:"otel"`
@@ -135,6 +140,16 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.Prompt) == "" {
 		return ErrPromptRequired
 	}
+	if strings.TrimSpace(c.ContentDir) != "" {
+		cleaned := filepath.Clean(strings.TrimSpace(c.ContentDir))
+		info, err := os.Stat(cleaned)
+		if err != nil {
+			return fmt.Errorf("content_dir %q: %w", cleaned, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("content_dir %q is not a directory", cleaned)
+		}
+	}
 	return nil
 }
 
@@ -148,6 +163,7 @@ type configRaw struct {
 	Model           string      `yaml:"model"`
 	Prompt          string      `yaml:"prompt"`
 	AllowedCommands []string    `yaml:"allowed_commands"`
+	ContentDir      string      `yaml:"content_dir"`
 	LLM             LLMConfig   `yaml:"llm"`
 	Agent           AgentConfig `yaml:"agent"`
 	Otel            OtelConfig  `yaml:"otel"`
@@ -162,6 +178,7 @@ func (c *Config) UnmarshalYAML(node *yaml.Node) error {
 	c.Model = raw.Model
 	c.Prompt = raw.Prompt
 	c.AllowedCommands = normalizeAllowedCommands(raw.AllowedCommands)
+	c.ContentDir = strings.TrimSpace(raw.ContentDir)
 	c.LLM = raw.LLM
 	c.Agent = raw.Agent
 	c.Otel = raw.Otel
@@ -242,6 +259,10 @@ func Parse(data []byte) (Config, error) {
 	}
 	if time.Duration(cfg.Agent.TotalTimeout) == 0 {
 		cfg.Agent.TotalTimeout = Duration(30 * time.Minute)
+	}
+
+	if strings.TrimSpace(cfg.ContentDir) != "" {
+		cfg.ContentDir = filepath.Clean(strings.TrimSpace(cfg.ContentDir))
 	}
 
 	if err := cfg.Validate(); err != nil {

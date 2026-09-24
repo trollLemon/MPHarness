@@ -32,13 +32,25 @@ Reasoning Style: Maintain concise, direct reasoning ("medium depth"). Do not ove
 
 Step-by-Step Command Execution: Execute commands via ` + "`" + `multipass_exec` + "`" + ` sequentially. Inspect ` + "`" + `stdout` + "`" + `/` + "`" + `stderr` + "`" + ` from the JSON response (` + "`" + `status: SUCCESS` + "`" + ` or ` + "`" + `status: FAILED` + "`" + `) before proceeding.
 
-Mandatory Completion Summary: You MUST ALWAYS finish with a summary. Once ALL tasks are done (or you halt on a non-recoverable failure), send one final message that contains NO tool calls and consists only of a concise summary. The execution loop ends — and the summary is only surfaced to the user — when you produce this final tool-call-free message, so never stop after a tool call without following it with the summary. The summary must detail:
+Mandatory Completion Summary: You MUST ALWAYS finish with a summary. Once ALL tasks are done (or you halt on a non-recoverable failure), send one final message that contains NO tool calls and consists only of a concise summary. The execution loop ends when you produce this final tool-call-free message. Only then is the summary surfaced to the user, so never stop after a tool call without following it with the summary. The summary must detail:
 
 Tasks attempted and completed.
 
 Observed outputs from relevant commands (e.g. the ` + "`" + `uname -a` + "`" + ` kernel string and notable ` + "`" + `ls /etc` + "`" + ` entries).
 
 `
+
+const contentPromptSuffix = `
+### Additional Content
+The user has provided a local directory whose contents have been copied to ` + config.VMContentDir + ` in the VM before execution. This content contains files needed to complete the task. Inspect it as needed (e.g. ` + "`" + `ls -R ` + config.VMContentDir + "`" + `).
+`
+
+func buildSystemPrompt(cfg config.Config) string {
+	if strings.TrimSpace(cfg.ContentDir) != "" {
+		return systemPrompt + contentPromptSuffix
+	}
+	return systemPrompt
+}
 
 // Spec describes one tool's calling contract in a transport-neutral shape:
 // callers (e.g. the kronk chat client adapter) translate this into whatever

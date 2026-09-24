@@ -121,5 +121,6 @@ multipass list
 ## Next steps
 
 - Tune the VM and LLM to your machine: [Configure the VM](../how-to/configure_vm.md), [Configure the LLM](../how-to/configure_llm.md).
+- Test a locally-built artifact: [Provide local content](../how-to/provide_content.md).
 - Keep the agent from running anything you don't want: [Restrict commands](../how-to/restrict_commands.md).
 - Learn how the agent interacts with the VM: [How tool calling works](../explaination/tool_calling.md).
