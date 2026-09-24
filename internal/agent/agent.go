@@ -270,7 +270,7 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *multipass.
 
 func buildInitialConversation(conf config.Config) []model.D {
 	return []model.D{
-		{"role": "system", "content": systemPrompt},
+		{"role": "system", "content": buildSystemPrompt(conf)},
 		{"role": "user", "content": buildUserPrompt(conf)},
 	}
 }

@@ -43,6 +43,7 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "    image: noble       # optional, Ubuntu image (noble/jammy/focal/bionic or 22.04, release:noble, daily:resolute); default LTS\n")
 	_, _ = fmt.Fprintf(w, "  model: <id>           # LLM, e.g. unsloth/Qwen3-0.6B-Q8_0 (downloaded on first run)\n")
 	_, _ = fmt.Fprintf(w, "  prompt: \"do stuff in the VM\"\n")
+	_, _ = fmt.Fprintf(w, "  content_dir: ./path   # optional, local dir to copy to %s in VM\n", config.VMContentDir)
 	_, _ = fmt.Fprintf(w, "  allowed_commands:     # optional, restrict VM commands\n")
 	_, _ = fmt.Fprintf(w, "    - apt\n")
 	_, _ = fmt.Fprintf(w, "    - git\n")
@@ -143,6 +144,7 @@ func run() error {
 		Str("config", configPath).
 		Str("vm", cfg.VM.Name).
 		Str("model", cfg.Model).
+		Str("content_dir", cfg.ContentDir).
 		Strs("allowed_commands", cfg.AllowedCommandsList()).
 		Float64("llm.temperature", cfg.LLM.Temperature).
 		Float64("llm.top_p", cfg.LLM.TopP).
