@@ -11,10 +11,16 @@ import (
 	"github.com/ardanlabs/kronk/sdk/tools/libs"
 	"github.com/ardanlabs/kronk/sdk/tools/models"
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // InitializeModelFiles initializes llama.cpp libbraries and model files.
 func InitializeModelFiles(ctx context.Context, logger zerolog.Logger, modelSource string) (models.Path, error) {
+	ctx, span := otel.Tracer("mph").Start(ctx, "mph.model.init", trace.WithAttributes(attribute.String("mph.model", modelSource)))
+	defer span.End()
 	alog := zerologAdapter(logger)
 
 	libMgr, err := libs.New(libs.WithDetect(ctx, alog))
@@ -30,10 +36,14 @@ func InitializeModelFiles(ctx context.Context, logger zerolog.Logger, modelSourc
 
 	modelMgr, err := models.New()
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return models.Path{}, fmt.Errorf("initialize model manager: %w", err)
 	}
 	mp, err := modelMgr.Download(ctx, alog, modelSource)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return models.Path{}, fmt.Errorf("install model %q: %w", modelSource, err)
 	}
 
@@ -41,6 +51,12 @@ func InitializeModelFiles(ctx context.Context, logger zerolog.Logger, modelSourc
 }
 
 func NewKronk(mp models.Path, logger zerolog.Logger, contextWindow int) (*kronk.Kronk, error) {
+	cwAttr := attribute.Int("mph.context_window", contextWindow)
+	if contextWindow == 0 {
+		cwAttr = attribute.String("mph.context_window", "auto")
+	}
+	_, span := otel.Tracer("mph").Start(context.Background(), "mph.model.load", trace.WithAttributes(cwAttr))
+	defer span.End()
 
 	logger.Info().Msg("Loading model")
 
@@ -114,9 +130,9 @@ func zerologAdapter(logger zerolog.Logger) applog.Logger {
 
 		var evt *zerolog.Event
 		if isErr {
-			evt = logger.Error()
+			evt = logger.Error().Ctx(ctx)
 		} else {
-			evt = logger.Info()
+			evt = logger.Info().Ctx(ctx)
 		}
 
 		if tid := applog.GetTraceID(ctx); tid != applog.NoTraceID && tid != "" {

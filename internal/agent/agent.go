@@ -5,25 +5,26 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/trollLemon/MPHarness/internal/config"
 	"github.com/trollLemon/MPHarness/internal/multipass"
+	mphotel "github.com/trollLemon/MPHarness/internal/otel"
 )
 
-// Kronk is the minimal interface of the kronk client used by Agent.
-// Defining this allows unit tests to mock the client, rather than have to run a real model
-// each time .
 type Kronk interface {
 	Chat(ctx context.Context, req model.D) (model.ChatResponse, error)
 }
 
-// LLMConfig holds the configuration for the LLM when creating an Agent.
-// With this struct, you can control how deterministic or non deterministic you want
-// the agent to be.
 type LLMConfig struct {
 	Temperature float64 `json:"temperature" yaml:"temperature"`
 	TopP        float64 `json:"top_p" yaml:"top_p"`
@@ -31,8 +32,6 @@ type LLMConfig struct {
 	ToolChoice  string  `json:"tool_choice" yaml:"tool_choice"`
 }
 
-// Agent is the logical bundling of a logger, LLM client, timeout, and LLM configs, as
-// a single unit to perform tasks.
 type Agent struct {
 	log           zerolog.Logger
 	krn           Kronk
@@ -57,11 +56,83 @@ func NewAgent(log zerolog.Logger, krn Kronk, maxIterations int, chatTimeout time
 	}
 }
 
-// Execute runs a chat session where the model completes the task defined in the VM config.
-// This call is blocking, and will exit when the LLM determines the task is complete, ran into a failure
-// it couldn't recover from, the totalTimeout fires, or if the max iterations was reached.
-func (a *Agent) Execute(conf config.Config, cli *multipass.Client) error {
-	ctx, cancel := context.WithTimeout(context.Background(), a.totalTimeout)
+var (
+	tokensHist            metric.Int64Histogram
+	tpsHist               metric.Float64Histogram
+	iterationsCounter     metric.Int64Counter
+	toolDurationHist      metric.Float64Histogram
+	toolCallsCounter      metric.Int64Counter
+	toolFailuresCounter   metric.Int64Counter
+	agentMetricsOnce      sync.Once
+)
+
+func getAgentTracer() trace.Tracer {
+	return otel.Tracer("mph")
+}
+
+func getAgentMeter() metric.Meter {
+	return otel.Meter("mph")
+}
+
+func initAgentMetrics() {
+	agentMetricsOnce.Do(func() {
+		meter := getAgentMeter()
+		var err error
+		tokensHist, err = meter.Int64Histogram("mph.tokens")
+		if err != nil {
+			tokensHist = nil
+		}
+		tpsHist, err = meter.Float64Histogram("mph.tokens_per_second")
+		if err != nil {
+			tpsHist = nil
+		}
+		iterationsCounter, err = meter.Int64Counter("mph.iterations")
+		if err != nil {
+			iterationsCounter = nil
+		}
+		toolDurationHist, err = meter.Float64Histogram("mph.agent.tool.duration")
+		if err != nil {
+			toolDurationHist = nil
+		}
+		toolCallsCounter, err = meter.Int64Counter("mph.agent.tool.calls")
+		if err != nil {
+			toolCallsCounter = nil
+		}
+		toolFailuresCounter, err = meter.Int64Counter("mph.agent.tool.failures")
+		if err != nil {
+			toolFailuresCounter = nil
+		}
+	})
+}
+
+func recordTokenUsage(ctx context.Context, span trace.Span, log zerolog.Logger, usage *model.Usage) {
+	if usage == nil {
+		return
+	}
+	mphotel.LogEvent(ctx, log, zerolog.InfoLevel, "token usage", map[string]any{
+		"prompt_tokens":     usage.PromptTokens,
+		"completion_tokens": usage.CompletionTokens,
+		"total_tokens":      usage.TotalTokens,
+		"tps":               usage.TokensPerSecond,
+	})
+	span.SetAttributes(
+		attribute.Int("mph.tokens.prompt", usage.PromptTokens),
+		attribute.Int("mph.tokens.completion", usage.CompletionTokens),
+		attribute.Int("mph.tokens.total", usage.TotalTokens),
+		attribute.Float64("mph.tokens_per_second", usage.TokensPerSecond),
+	)
+	if tokensHist != nil {
+		tokensHist.Record(ctx, int64(usage.PromptTokens), metric.WithAttributes(attribute.String("tokens.type", "prompt")))
+		tokensHist.Record(ctx, int64(usage.CompletionTokens), metric.WithAttributes(attribute.String("tokens.type", "completion")))
+		tokensHist.Record(ctx, int64(usage.TotalTokens), metric.WithAttributes(attribute.String("tokens.type", "total")))
+	}
+	if tpsHist != nil {
+		tpsHist.Record(ctx, usage.TokensPerSecond)
+	}
+}
+
+func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *multipass.Client) error {
+	ctx, cancel := context.WithTimeout(ctx, a.totalTimeout)
 	defer cancel()
 
 	toolDocs := buildToolDocuments()
@@ -75,7 +146,15 @@ func (a *Agent) Execute(conf config.Config, cli *multipass.Client) error {
 	a.log.Info().Msg("Starting inference")
 
 	for iter := 0; iter < a.maxIterations; iter++ {
-		a.log.Debug().Int("iteration", iter+1).Msg("running inference")
+		iterCtx, iterSpan := getAgentTracer().Start(ctx, "mph.agent.iteration", trace.WithAttributes(attribute.Int("mph.iteration", iter+1)))
+		initAgentMetrics()
+		if iterationsCounter != nil {
+			iterationsCounter.Add(iterCtx, 1, metric.WithAttributes(attribute.Int("mph.iteration", iter+1)))
+		}
+
+		iterLog := a.log.With().Ctx(iterCtx).Logger()
+
+		iterLog.Debug().Int("iteration", iter+1).Msg("running inference")
 		topK := a.llmConfig.TopK
 		if topK == 0 {
 			topK = 1
@@ -90,37 +169,56 @@ func (a *Agent) Execute(conf config.Config, cli *multipass.Client) error {
 			"parallel_tool_calls": false,
 		}
 
-		resp, err := a.callChat(ctx, req, iter)
+		resp, err := a.callChat(iterCtx, req, iter)
 		if err != nil {
+			iterSpan.RecordError(err)
+			iterSpan.SetStatus(codes.Error, err.Error())
+			iterSpan.End()
 			return err
 		}
 
-		if resp.Usage != nil {
-			a.log.Info().
-				Int("prompt_tokens", resp.Usage.PromptTokens).
-				Int("completion_tokens", resp.Usage.CompletionTokens).
-				Int("total_tokens", resp.Usage.TotalTokens).
-				Float64("tps", resp.Usage.TokensPerSecond).
-				Msg("token usage")
-		}
+		recordTokenUsage(iterCtx, iterSpan, iterLog, resp.Usage)
 
 		msg, finishReason, shouldBreak := a.extractAssistantMessage(resp)
+		iterSpan.SetAttributes(attribute.String("mph.finish_reason", finishReason))
 		if shouldBreak {
+			iterSpan.End()
 			break
 		}
 		if msg.Reasoning != "" {
-			a.log.Info().Int("iteration", iter+1).Str("reasoning", truncate(msg.Reasoning, 8000)).Msg("agent reasoning")
+			mphotel.LogEvent(iterCtx, iterLog, zerolog.InfoLevel, "agent reasoning", map[string]any{
+				"iteration": iter + 1,
+				"reasoning": truncate(msg.Reasoning, 8000),
+			})
 		}
 		if msg.Content != "" {
-			a.log.Info().Int("iteration", iter+1).Str("content", truncate(msg.Content, 8000)).Msg("agent output")
+			mphotel.LogEvent(iterCtx, iterLog, zerolog.InfoLevel, "agent output", map[string]any{
+				"iteration": iter + 1,
+				"content":   truncate(msg.Content, 8000),
+			})
 			lastAssistantContent = msg.Content
 		} else if finishReason != model.FinishReasonTool && len(msg.ToolCalls) == 0 {
-			a.log.Debug().Str("finish_reason", finishReason).Msg("empty content")
+			mphotel.LogEvent(iterCtx, iterLog, zerolog.DebugLevel, "empty content", map[string]any{
+				"finish_reason": finishReason,
+			})
 		}
 
 		toolCalls := msg.ToolCalls
+		for _, tc := range toolCalls {
+			argsJSON, _ := json.Marshal(tc.Function.Arguments)
+			iterSpan.AddEvent("mph.agent.tool_call", trace.WithAttributes(
+				attribute.String("mph.tool.name", tc.Function.Name),
+				attribute.String("mph.tool.id", tc.ID),
+				attribute.String("mph.tool.arguments", truncate(string(argsJSON), 4000)),
+			))
+		}
+
 		if len(toolCalls) == 0 && finishReason == model.FinishReasonLength {
-			a.log.Warn().Int("iteration", iter+1).Str("finish_reason", finishReason).Msg("hit length limit without tool calls, injecting nudge and continuing")
+			mphotel.LogEvent(iterCtx, iterLog, zerolog.WarnLevel, "hit length limit without tool calls, injecting nudge and continuing", map[string]any{
+				"iteration":     iter + 1,
+				"finish_reason": finishReason,
+			})
+			iterSpan.AddEvent("mph.agent.length_nudge", trace.WithAttributes(attribute.Int("mph.iteration", iter+1)))
 			if msg.Reasoning != "" || msg.Content != "" {
 				nudgedAssistant := model.D{"role": "assistant"}
 				if msg.Content != "" {
@@ -135,23 +233,26 @@ func (a *Agent) Execute(conf config.Config, cli *multipass.Client) error {
 				"role":    "user",
 				"content": "Your previous response hit the token limit without making a tool call. Please be concise and try again and run a tool call if necessary",
 			})
+			iterSpan.End()
 			continue
 		}
 		if a.shouldTerminateWithoutToolCalls(toolCalls, finishReason, iter) {
+			iterSpan.End()
 			break
 		}
 
-		toolCallDocs := a.buildToolCallDocs(toolCalls, iter)
+		toolCallDocs := a.buildToolCallDocsWithContext(iterCtx, toolCalls, iter)
 		assistantMsg := buildAssistantMessage(msg, toolCallDocs)
 		conversation = appendToConversation(conversation, assistantMsg)
 
-		toolResponses, newOutputs := a.executeToolCalls(ctx, cli, conf, toolCalls)
+		toolResponses, newOutputs := a.executeToolCalls(iterCtx, cli, conf, toolCalls)
 		commandOutputs = append(commandOutputs, newOutputs...)
 		conversation = appendToConversation(conversation, toolResponses...)
 
 		if len(commandOutputs) > 0 {
-			a.log.Debug().Int("command_outputs", len(commandOutputs)).Msg("collected outputs so far")
+			iterLog.Debug().Int("command_outputs", len(commandOutputs)).Msg("collected outputs so far")
 		}
+		iterSpan.End()
 	}
 
 	if len(commandOutputs) > 0 {
@@ -219,15 +320,19 @@ func (a *Agent) shouldTerminateWithoutToolCalls(toolCalls []model.ResponseToolCa
 }
 
 func (a *Agent) buildToolCallDocs(toolCalls []model.ResponseToolCall, iter int) []model.D {
+	return a.buildToolCallDocsWithContext(context.Background(), toolCalls, iter)
+}
+
+func (a *Agent) buildToolCallDocsWithContext(ctx context.Context, toolCalls []model.ResponseToolCall, iter int) []model.D {
 	docs := make([]model.D, 0, len(toolCalls))
 	for _, tc := range toolCalls {
 		argsJSON, _ := json.Marshal(tc.Function.Arguments)
-		a.log.Info().
-			Int("iteration", iter+1).
-			Str("tool", tc.Function.Name).
-			Str("id", tc.ID).
-			RawJSON("arguments", argsJSON).
-			Msg("agent tool call")
+		mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "agent tool call", map[string]any{
+			"iteration": iter + 1,
+			"tool":      tc.Function.Name,
+			"id":        tc.ID,
+			"arguments": json.RawMessage(argsJSON),
+		})
 
 		docs = append(docs, model.D{
 			"id":   tc.ID,
@@ -263,19 +368,65 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg
 	var toolResponses []model.D
 	var commandOutputs []string
 
+	span := trace.SpanFromContext(ctx)
 	for _, tc := range toolCalls {
+		start := time.Now()
 		result, err := Call(ctx, cli, cfg, tc.Function.Name, map[string]any(tc.Function.Arguments))
+		duration := time.Since(start)
+		durationSec := duration.Seconds()
+		durationMs := duration.Milliseconds()
 		var content string
+		var status string
 		if err != nil {
-			a.log.Error().Err(err).Str("tool", tc.Function.Name).Str("id", tc.ID).Msg("tool execution failed")
+			status = "FAILED"
+			mphotel.LogEvent(ctx, a.log, zerolog.ErrorLevel, "tool execution failed", map[string]any{
+				"tool":  tc.Function.Name,
+				"id":    tc.ID,
+				"error": err,
+			})
 			content = buildToolErrorContent(err)
+			initAgentMetrics()
+			if toolFailuresCounter != nil {
+				toolFailuresCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("mph.tool.name", tc.Function.Name)))
+			}
+			span.AddEvent("mph.agent.tool_result", trace.WithAttributes(
+				attribute.String("mph.tool.name", tc.Function.Name),
+				attribute.String("mph.tool.id", tc.ID),
+				attribute.String("mph.tool.status", status),
+				attribute.String("mph.tool.result", truncate(err.Error(), 4000)),
+				attribute.Int64("mph.tool.duration_ms", durationMs),
+			))
 		} else {
-			a.log.Info().Str("tool", tc.Function.Name).Str("id", tc.ID).Str("result", truncate(result, 4000)).Msg("tool succeeded")
+			status = "SUCCESS"
+			mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "tool succeeded", map[string]any{
+				"tool":   tc.Function.Name,
+				"id":     tc.ID,
+				"result": truncate(result, 4000),
+			})
 			if tc.Function.Name == "multipass_exec" {
 				commandOutputs = append(commandOutputs, result)
-				a.log.Info().Str("command_output", truncate(result, 600)).Msg("command output")
+				mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "command output", map[string]any{
+					"command_output": truncate(result, 600),
+				})
 			}
 			content = buildToolSuccessContent(tc.Function.Name, result)
+			span.AddEvent("mph.agent.tool_result", trace.WithAttributes(
+				attribute.String("mph.tool.name", tc.Function.Name),
+				attribute.String("mph.tool.id", tc.ID),
+				attribute.String("mph.tool.status", status),
+				attribute.String("mph.tool.result", truncate(result, 4000)),
+				attribute.Int64("mph.tool.duration_ms", durationMs),
+			))
+		}
+		initAgentMetrics()
+		if toolCallsCounter != nil {
+			toolCallsCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("mph.tool.name", tc.Function.Name)))
+		}
+		if toolDurationHist != nil {
+			toolDurationHist.Record(ctx, durationSec, metric.WithAttributes(
+				attribute.String("mph.tool.name", tc.Function.Name),
+				attribute.String("mph.tool.status", status),
+			))
 		}
 
 		toolResponses = append(toolResponses, model.D{
