@@ -30,6 +30,7 @@ go.work.sum
 # Build output
 /bin/
 /archive/
+*.snap
 
 # Env / local configs
 mph.yaml
