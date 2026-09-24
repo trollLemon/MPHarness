@@ -56,7 +56,7 @@ make build
 Traces: `mph.run` → `mph.vm.create`/`multipass.launch` → `mph.agent.iteration`×N (with `mph.agent.tool_call`/`tool_result` events and `multipass.exec` children) → `mph.vm.delete`; logs mirror console lines with `trace_id`; metrics like `mph.tokens`, `mph.agent.tool.calls`.
 
 ### Negative checks
-- Run `./bin/mph ./test.yaml` with collector down — must complete with no `:4317` dials (proves default-off).
+- Run `./bin/mph ./test.yaml` with collector down. It must complete with no `:4317` dials. This proves default-off.
 - Env override: `OTEL_EXPORTER_OTLP_ENDPOINT=host:4317 ./bin/mph --otel ./test-otel.yaml`.
 - Flag vs YAML: `--otel` with no `otel:` block enables via defaults; `otel.enabled: true` without flag also enables.
 

@@ -23,6 +23,18 @@ vm:
 | `cpu`   | yes      | none       | CPU count, must be greater than `0`. |
 | `image` | no       | default LTS | Ubuntu image to use (see below). |
 
+Top-level `content_dir` copies a local directory into the VM before the agent starts (see [Provide local content](provide_content.md)):
+
+```yaml
+vm:
+  disk: 20G
+  ram: 4G
+  cpu: 2
+model: unsloth/Qwen3-0.6B-Q8_0
+prompt: "test the build in /home/ubuntu/content"
+content_dir: ./my-build
+```
+
 The config fails validation if `disk`, `ram`, or `cpu` is missing or invalid, so always fill them in.
 
 ## Choosing an image

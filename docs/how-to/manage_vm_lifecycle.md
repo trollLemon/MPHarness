@@ -1,6 +1,6 @@
 # Managing the VM lifecycle
 
-The harness manages the VM lifecycle **outside** the agent loop. The agent's only tools are `multipass_exec` and `multipass_info` — it cannot create, start, stop, or delete the VM.
+The harness manages the VM lifecycle **outside** the agent loop. The agent's only tools are `multipass_exec` and `multipass_info`. It cannot create, start, stop, or delete the VM.
 
 ## Harness VM lifecycle
 
