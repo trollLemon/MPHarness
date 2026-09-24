@@ -146,7 +146,6 @@ prompt: |
   1. Update apt and install python3, pip, git (this requires sudo)
   2. run ls /etc
   3. Summarise the test results.
-  Create the VM if needed, when finished, remove the vm.
 ```
 
 ---
