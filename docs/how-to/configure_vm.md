@@ -43,5 +43,5 @@ If `image` is omitted, Multipass's default LTS image is used.
 ## Related
 
 - [Restrict what the agent may run in the VM](restrict_commands.md)
-- [Guide the VM lifecycle from your prompt](manage_vm_lifecycle.md)
+- [Manage the VM lifecycle](manage_vm_lifecycle.md)
 - [Software architecture](../reference/arch.md)
