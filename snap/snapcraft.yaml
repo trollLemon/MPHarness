@@ -1,0 +1,52 @@
+name: mph
+base: core24
+adopt-info: mph
+summary: Local harness for running agentic tests in Multipass VMs
+description: |
+  MPHarness is a local harness for running LLM agents inside ephemeral
+  Multipass VMs. It launches a VM from the config, lets an agent drive
+  `multipass exec` tool calls, streams progress, and tears the VM down
+  afterwards — without worrying about an agent going bonkers on the host.
+
+  See `mph --help` for config YAML keys and flags. The binary is the same
+  `mph` built by `make build`.
+grade: stable
+confinement: strict
+license: GPL-3.0
+
+platforms:
+  amd64:
+  arm64:
+
+apps:
+  mph:
+    command: bin/mph
+    plugs:
+      - home
+      - network
+
+parts:
+  mph:
+    plugin: go
+    source: .
+    build-snaps:
+      - go/latest/stable
+    build-packages:
+      - ca-certificates
+    stage-packages:
+      - ca-certificates
+    override-pull: |
+      craftctl default
+      # Derive version from git; fallback to 0.0.0+dev if no tags.
+      if git describe --tags --always --dirty >/dev/null 2>&1; then
+        ver="$(git describe --tags --always --dirty 2>/dev/null | sed 's/^v//')"
+      else
+        ver="dev"
+      fi
+      # snap version must be clean; replace unsupported chars
+      ver="$(echo "$ver" | tr '/' '-')"
+      craftctl set version="$ver"
+    override-build: |
+      # Replicate Makefile ldflags so `mph --version` reports snap version.
+      go build -trimpath -ldflags "-X main.version=${CRAFT_PROJECT_VERSION} -s -w" -o "${CRAFT_PART_INSTALL}/bin/mph" ./cmd/mph
+      chmod +x "${CRAFT_PART_INSTALL}/bin/mph"
