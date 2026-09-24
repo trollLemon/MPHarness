@@ -108,6 +108,13 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 	return fmt.Errorf("invalid duration %q", node.Value)
 }
 
+type OtelConfig struct {
+	Enabled            bool              `yaml:"enabled"`
+	Endpoint           string            `yaml:"endpoint"`
+	ServiceName        string            `yaml:"service_name"`
+	ResourceAttributes map[string]string `yaml:"resource_attributes"`
+}
+
 type Config struct {
 	VM              VMConfig        `yaml:"vm"`
 	Model           string          `yaml:"model"`
@@ -115,6 +122,7 @@ type Config struct {
 	AllowedCommands map[string]bool `yaml:"-"`
 	LLM             LLMConfig       `yaml:"llm"`
 	Agent           AgentConfig     `yaml:"agent"`
+	Otel            OtelConfig      `yaml:"otel"`
 }
 
 func (c Config) Validate() error {
@@ -142,6 +150,7 @@ type configRaw struct {
 	AllowedCommands []string    `yaml:"allowed_commands"`
 	LLM             LLMConfig   `yaml:"llm"`
 	Agent           AgentConfig `yaml:"agent"`
+	Otel            OtelConfig  `yaml:"otel"`
 }
 
 func (c *Config) UnmarshalYAML(node *yaml.Node) error {
@@ -155,6 +164,7 @@ func (c *Config) UnmarshalYAML(node *yaml.Node) error {
 	c.AllowedCommands = normalizeAllowedCommands(raw.AllowedCommands)
 	c.LLM = raw.LLM
 	c.Agent = raw.Agent
+	c.Otel = raw.Otel
 	return nil
 }
 
@@ -212,6 +222,13 @@ func Parse(data []byte) (Config, error) {
 
 	if cfg.VM.Name == "" {
 		cfg.VM.Name = "mph-vm"
+	}
+
+	if cfg.Otel.Endpoint == "" {
+		cfg.Otel.Endpoint = "localhost:4317"
+	}
+	if cfg.Otel.ServiceName == "" {
+		cfg.Otel.ServiceName = "mph"
 	}
 
 	if cfg.LLM.ToolChoice == "" {

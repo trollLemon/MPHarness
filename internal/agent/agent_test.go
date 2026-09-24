@@ -407,7 +407,7 @@ func TestExecute(t *testing.T) {
 				conf.Prompt = "do nothing"
 			}
 			cli := multipass.New(zerolog.Nop())
-			err := agent.Execute(conf, cli)
+			err := agent.Execute(context.Background(), conf, cli)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err %v wantErr %v", err, tt.wantErr)
 			}

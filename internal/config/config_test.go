@@ -214,3 +214,64 @@ func TestParse(t *testing.T) {
 		})
 	}
 }
+
+func TestParseOtelDefaults(t *testing.T) {
+	tests := []struct {
+		name        string
+		yaml        string
+		wantEnabled bool
+		wantEP      string
+		wantService string
+		wantAttrs   map[string]string
+	}{
+		{
+			name:        "otel absent defaults",
+			yaml:        "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\n",
+			wantEnabled: false,
+			wantEP:      "localhost:4317",
+			wantService: "mph",
+		},
+		{
+			name:        "otel enabled true preserves",
+			yaml:        "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\notel:\n  enabled: true\n  endpoint: mycol:4317\n  service_name: custom\n",
+			wantEnabled: true,
+			wantEP:      "mycol:4317",
+			wantService: "custom",
+		},
+		{
+			name:        "otel endpoint default when empty",
+			yaml:        "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\notel:\n  enabled: true\n",
+			wantEnabled: true,
+			wantEP:      "localhost:4317",
+			wantService: "mph",
+		},
+		{
+			name:        "otel resource_attributes",
+			yaml:        "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\notel:\n  resource_attributes:\n    environment: prod\n    region: eu\n",
+			wantEnabled: false,
+			wantEP:      "localhost:4317",
+			wantService: "mph",
+			wantAttrs:   map[string]string{"environment": "prod", "region": "eu"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(tt.yaml))
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if cfg.Otel.Enabled != tt.wantEnabled {
+				t.Fatalf("enabled %v want %v", cfg.Otel.Enabled, tt.wantEnabled)
+			}
+			if cfg.Otel.Endpoint != tt.wantEP {
+				t.Fatalf("endpoint %q want %q", cfg.Otel.Endpoint, tt.wantEP)
+			}
+			if cfg.Otel.ServiceName != tt.wantService {
+				t.Fatalf("service %q want %q", cfg.Otel.ServiceName, tt.wantService)
+			}
+			if !reflect.DeepEqual(cfg.Otel.ResourceAttributes, tt.wantAttrs) {
+				t.Fatalf("attrs %v want %v", cfg.Otel.ResourceAttributes, tt.wantAttrs)
+			}
+		})
+	}
+}
