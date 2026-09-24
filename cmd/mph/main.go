@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -16,6 +17,7 @@ import (
 	"github.com/trollLemon/MPHarness/internal/config"
 	"github.com/trollLemon/MPHarness/internal/harness"
 	"github.com/trollLemon/MPHarness/internal/multipass"
+	mphotel "github.com/trollLemon/MPHarness/internal/otel"
 )
 
 var version = "dev"
@@ -54,7 +56,13 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "  agent:                # optional, agent loop params\n")
 	_, _ = fmt.Fprintf(w, "    max_iterations: 10\n")
 	_, _ = fmt.Fprintf(w, "    chat_timeout: 300s\n")
-	_, _ = fmt.Fprintf(w, "    total_timeout: 30m\n\n")
+	_, _ = fmt.Fprintf(w, "    total_timeout: 30m\n")
+	_, _ = fmt.Fprintf(w, "  otel:                 # optional, OpenTelemetry\n")
+	_, _ = fmt.Fprintf(w, "    enabled: false\n")
+	_, _ = fmt.Fprintf(w, "    endpoint: localhost:4317\n")
+	_, _ = fmt.Fprintf(w, "    service_name: mph\n")
+	_, _ = fmt.Fprintf(w, "    resource_attributes:\n")
+	_, _ = fmt.Fprintf(w, "      environment: dev\n\n")
 	_, _ = fmt.Fprintf(w, "Example:\n")
 	_, _ = fmt.Fprintf(w, "  mph -v ./mph.yaml\n")
 
@@ -69,6 +77,7 @@ func run() error {
 		needHelp       bool
 		ignoreExisting bool
 		keep           bool
+		otelEnabled    bool
 	)
 
 	flag.StringVar(&configPath, "config", "", "path to yaml config file (or positional arg)")
@@ -81,6 +90,7 @@ func run() error {
 	flag.BoolVar(&needHelp, "h", false, "show help (shorthand)")
 	flag.BoolVar(&ignoreExisting, "i", false, "ignore that a VM with the given name exists already and run against that VM")
 	flag.BoolVar(&keep, "k", false, "keep the VM after execution rather than deleting it")
+	flag.BoolVar(&otelEnabled, "otel", false, "enable OpenTelemetry tracing (also via MPH_OTEL=true)")
 
 	flag.Usage = func() { printUsage(os.Stderr) }
 
@@ -111,6 +121,24 @@ func run() error {
 		return err
 	}
 
+	otelCfg := resolveOtelConfig(cfg.Otel, otelEnabled)
+
+	if otelCfg.Enabled {
+		shutdown, err := mphotel.Setup(otelCfg)
+		if err != nil {
+			return fmt.Errorf("otel setup: %w", err)
+		}
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := shutdown(ctx); err != nil {
+				log.Warn().Err(err).Msg("otel shutdown failed")
+			}
+		}()
+		log.Logger = log.Logger.Hook(mphotel.NewHook("mph"))
+		log.Info().Str("otel.endpoint", otelCfg.Endpoint).Str("otel.service_name", otelCfg.ServiceName).Msg("otel enabled")
+	}
+
 	log.Info().
 		Str("config", configPath).
 		Str("vm", cfg.VM.Name).
@@ -124,6 +152,7 @@ func run() error {
 		Int("agent.max_iterations", cfg.Agent.MaxIterations).
 		Str("agent.chat_timeout", time.Duration(cfg.Agent.ChatTimeout).String()).
 		Str("agent.total_timeout", time.Duration(cfg.Agent.TotalTimeout).String()).
+		Bool("otel.enabled", otelCfg.Enabled).
 		Msg("loaded config")
 
 	ctx := context.Background()
@@ -180,4 +209,39 @@ func setupLogger(verbose, pretty bool) {
 	}
 
 	log.Logger = zerolog.New(os.Stdout).With().Timestamp().Caller().Logger()
+}
+
+func resolveOtelConfig(yamlCfg config.OtelConfig, flagEnabled bool) mphotel.Config {
+	enabled := yamlCfg.Enabled
+	if flagEnabled || isEnvTrue(os.Getenv("MPH_OTEL")) {
+		enabled = true
+	}
+
+	endpoint := yamlCfg.Endpoint
+	if v := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")); v != "" {
+		endpoint = v
+	}
+	if endpoint == "" {
+		endpoint = "localhost:4317"
+	}
+
+	serviceName := yamlCfg.ServiceName
+	if v := strings.TrimSpace(os.Getenv("OTEL_SERVICE_NAME")); v != "" {
+		serviceName = v
+	}
+	if serviceName == "" {
+		serviceName = "mph"
+	}
+
+	return mphotel.Config{
+		Enabled:            enabled,
+		Endpoint:           endpoint,
+		ServiceName:        serviceName,
+		ResourceAttributes: yamlCfg.ResourceAttributes,
+	}
+}
+
+func isEnvTrue(v string) bool {
+	v = strings.ToLower(strings.TrimSpace(v))
+	return v == "true" || v == "1" || v == "yes"
 }

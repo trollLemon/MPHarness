@@ -9,6 +9,7 @@ creates the VM, lets an LLM drive a tool-calling loop to complete the task, and 
   - [Configure the LLM](how-to/configure_llm.md)
   - [Restrict commands the agent may run](how-to/restrict_commands.md)
   - [Manage the VM lifecycle](how-to/manage_vm_lifecycle.md)
+  - [Enable OpenTelemetry](how-to/enable_otel.md)
 - **[Reference](reference/)**: precise technical descriptions:
   - [Software architecture](reference/arch.md)
   - [Good models](reference/good_models.md)

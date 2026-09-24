@@ -9,6 +9,7 @@ Local harness for running tests in a Multipass VM.
 - `internal/config/` - Configuration handling
 - `internal/harness/` - Harness orchestration
 - `internal/multipass/` - Multipass VM operations
+- `internal/otel/` - OpenTelemetry pipeline (tracer/meter/logger providers, zerolog Hook)
 - `internal/validation/` - Input validation
 
 ## Commands
@@ -42,6 +43,25 @@ golangci-lint run
 - Use meaningful variable and function names
 - Minimal comments - code should be self-documenting
 - Only add comments for non-obvious workarounds or constraints
+
+## Testing OTel Instrumentation
+OTel is disabled by default; when enabled it exports logs, traces, and metrics via OTLP/gRPC (default `localhost:4317`).
+
+### Smoke test (tiny deterministic model)
+Uses `test-otel.yaml` (Qwen3-0.6B-Q8_0, `llm.temperature: 0.0` so output is stable across runs) with `otel.enabled: true`:
+```bash
+make build
+./bin/mph ./test-otel.yaml      # requires an OTLP collector on localhost:4317
+```
+Traces: `mph.run` → `mph.vm.create`/`multipass.launch` → `mph.agent.iteration`×N (with `mph.agent.tool_call`/`tool_result` events and `multipass.exec` children) → `mph.vm.delete`; logs mirror console lines with `trace_id`; metrics like `mph.tokens`, `mph.agent.tool.calls`.
+
+### Negative checks
+- Run `./bin/mph ./test.yaml` with collector down — must complete with no `:4317` dials (proves default-off).
+- Env override: `OTEL_EXPORTER_OTLP_ENDPOINT=host:4317 ./bin/mph --otel ./test-otel.yaml`.
+- Flag vs YAML: `--otel` with no `otel:` block enables via defaults; `otel.enabled: true` without flag also enables.
+
+### Enabling
+`--otel` flag (or `MPH_OTEL=true`) / YAML `otel.enabled: true` / standard `OTEL_*` env vars. Precedence: flag/env > YAML > defaults (`localhost:4317`, service `mph`). See `docs/how-to/enable_otel.md`.
 
 ## Dependencies
 - Go 1.27+
