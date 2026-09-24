@@ -77,9 +77,10 @@ type LLMConfig struct {
 }
 
 type AgentConfig struct {
-	MaxIterations int      `yaml:"max_iterations"`
-	ChatTimeout   Duration `yaml:"chat_timeout"`
-	TotalTimeout  Duration `yaml:"total_timeout"`
+	MaxIterations  int      `yaml:"max_iterations"`
+	ChatTimeout    Duration `yaml:"chat_timeout"`
+	TotalTimeout   Duration `yaml:"total_timeout"`
+	MaxOutputBytes int      `yaml:"max_output_bytes"`
 }
 
 // Duration wraps time.Duration to support YAML string parsing like "60s", "10m".
@@ -259,6 +260,9 @@ func Parse(data []byte) (Config, error) {
 	}
 	if time.Duration(cfg.Agent.TotalTimeout) == 0 {
 		cfg.Agent.TotalTimeout = Duration(30 * time.Minute)
+	}
+	if cfg.Agent.MaxOutputBytes == 0 {
+		cfg.Agent.MaxOutputBytes = 64 * 1024
 	}
 
 	if strings.TrimSpace(cfg.ContentDir) != "" {

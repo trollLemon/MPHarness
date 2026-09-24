@@ -3,20 +3,37 @@ package validation
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
 )
 
+var blockedShells = map[string]bool{
+	"bash":  true,
+	"sh":    true,
+	"zsh":   true,
+	"fish":  true,
+	"dash":  true,
+	"ksh":   true,
+	"csh":   true,
+	"tcsh":  true,
+}
+
+func isBlockedShell(name string) bool {
+	base := filepath.Base(strings.TrimSpace(name))
+	base = strings.ToLower(base)
+	return blockedShells[base]
+}
+
 // ValidateShellCommand parses a raw shell command string into an AST and checks
 // that every executed command name is in the allowed set. Command substitution
 // (e.g. $(...)), pipes, &&, ||, and ; are handled by the shell grammar itself.
-// Returns nil when the allowlist is empty (allow-all mode).
+// Shell binaries (bash, sh, zsh, fish, dash, ksh, csh, tcsh) are always blocked
+// even in allow-all mode; piping (e.g. "ps aux | grep nginx") works via the
+// outer "bash -c" wrapper without explicit shell invocation.
+// Returns nil when the allowlist is empty (allow-all mode) and no blocked shells are found.
 func ValidateShellCommand(allowed map[string]bool, cmd string) error {
-	if len(allowed) == 0 {
-		return nil
-	}
-
 	file, err := syntax.NewParser().Parse(strings.NewReader(cmd), "command.sh")
 	if err != nil {
 		return fmt.Errorf("failed to parse command %q: %w", cmd, err)
@@ -70,6 +87,9 @@ func checkCall(call *syntax.CallExpr, allowed map[string]bool, notAllowed []stri
 		// A non-literal command name (e.g. "$EDITOR") can't be statically
 		// verified; fail rather than allow it.
 		return notAllowed, errors.New("non-literal command name can't be verified")
+	}
+	if isBlockedShell(name) {
+		return notAllowed, fmt.Errorf("shell %q is blocked: use direct commands instead (piping like \"ps aux | grep nginx\" works without explicit shell invocation)", name)
 	}
 	if isCommandAllowed(allowed, name) {
 		return notAllowed, nil

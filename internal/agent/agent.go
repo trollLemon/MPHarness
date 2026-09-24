@@ -364,9 +364,24 @@ func appendToConversation(conversation []model.D, msgs ...model.D) []model.D {
 	return append(conversation, msgs...)
 }
 
+func truncateOutput(s string, limit int) string {
+	if limit <= 0 {
+		return s
+	}
+	if len(s) <= limit {
+		return s
+	}
+	return s[:limit] + fmt.Sprintf("\n…(output truncated, %d bytes limit, %d bytes total)", limit, len(s))
+}
+
 func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg config.Config, toolCalls []model.ResponseToolCall) ([]model.D, []string) {
 	var toolResponses []model.D
 	var commandOutputs []string
+
+	limit := cfg.Agent.MaxOutputBytes
+	if limit == 0 {
+		limit = 64 * 1024
+	}
 
 	span := trace.SpanFromContext(ctx)
 	for _, tc := range toolCalls {
@@ -397,6 +412,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg
 				attribute.Int64("mph.tool.duration_ms", durationMs),
 			))
 		} else {
+			result = truncateOutput(result, limit)
 			status = "SUCCESS"
 			mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "tool succeeded", map[string]any{
 				"tool":   tc.Function.Name,

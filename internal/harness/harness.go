@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -16,6 +17,7 @@ import (
 	"github.com/trollLemon/MPHarness/internal/agent"
 	"github.com/trollLemon/MPHarness/internal/config"
 	"github.com/trollLemon/MPHarness/internal/multipass"
+	"github.com/trollLemon/MPHarness/internal/validation"
 )
 
 var (
@@ -104,6 +106,23 @@ func Start(ctx context.Context, agt *agent.Agent, client *multipass.Client, cfg 
 	}
 
 	if strings.TrimSpace(cfg.ContentDir) != "" {
+		if findings, scanErr := validation.ScanContentDir(cfg.ContentDir); scanErr != nil {
+			err := fmt.Errorf("content_dir scan failed: %w", scanErr)
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+			return err
+		} else if len(findings) > 0 {
+			for _, f := range findings {
+				log.Warn().Str("file", f.File).Str("pattern", f.Pattern).Str("snippet", f.Snippet).Msg("content_dir prompt injection scan: suspicious pattern detected")
+				span.AddEvent("mph.content.scan_finding", trace.WithAttributes(
+					attribute.String("mph.content.file", f.File),
+					attribute.String("mph.content.pattern", f.Pattern),
+					attribute.String("mph.content.snippet", f.Snippet),
+				))
+			}
+			span.SetAttributes(attribute.Int("mph.content.scan_findings", len(findings)))
+		}
+
 		cCtx, cSpan := tracer.Start(ctx, "mph.vm.content", trace.WithAttributes(
 			attribute.String("mph.vm.name", cfg.VM.Name),
 			attribute.String("mph.content.source", cfg.ContentDir),
