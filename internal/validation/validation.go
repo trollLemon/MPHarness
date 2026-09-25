@@ -10,14 +10,14 @@ import (
 )
 
 var blockedShells = map[string]bool{
-	"bash":  true,
-	"sh":    true,
-	"zsh":   true,
-	"fish":  true,
-	"dash":  true,
-	"ksh":   true,
-	"csh":   true,
-	"tcsh":  true,
+	"bash": true,
+	"sh":   true,
+	"zsh":  true,
+	"fish": true,
+	"dash": true,
+	"ksh":  true,
+	"csh":  true,
+	"tcsh": true,
 }
 
 func isBlockedShell(name string) bool {
