@@ -48,16 +48,17 @@ golangci-lint run
 OTel is disabled by default; when enabled it exports logs, traces, and metrics via OTLP/gRPC (default `localhost:4317`).
 
 ### Smoke test (tiny deterministic model)
-Uses `test-otel.yaml` (Qwen3-0.6B-Q8_0, `llm.temperature: 0.0` so output is stable across runs) with `otel.enabled: true`:
+Uses `testing/test.yaml` (Ministral-3-14B-Instruct-2512-UD-Q4_K_XL, `llm.temperature: 0.0` so output is stable across runs) with `otel.enabled: true`:
 ```bash
 make build
-./bin/mph ./test-otel.yaml      # requires an OTLP collector on localhost:4317
+make otel-up                       # Compose stack under testing/, OTLP on localhost:4317
+./bin/mph ./testing/test.yaml
 ```
 Traces: `mph.run` → `mph.vm.create`/`multipass.launch` → `mph.agent.iteration`×N (with `mph.agent.tool_call`/`tool_result` events and `multipass.exec` children) → `mph.vm.delete`; logs mirror console lines with `trace_id`; metrics like `mph.tokens`, `mph.agent.tool.calls`.
 
 ### Negative checks
 - Run `./bin/mph ./test.yaml` with collector down. It must complete with no `:4317` dials. This proves default-off.
-- Env override: `OTEL_EXPORTER_OTLP_ENDPOINT=host:4317 ./bin/mph --otel ./test-otel.yaml`.
+- Env override: `OTEL_EXPORTER_OTLP_ENDPOINT=host:4317 ./bin/mph --otel ./testing/test.yaml`.
 - Flag vs YAML: `--otel` with no `otel:` block enables via defaults; `otel.enabled: true` without flag also enables.
 
 ### Enabling
