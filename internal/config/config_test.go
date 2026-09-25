@@ -326,3 +326,61 @@ func TestParseTruncation(t *testing.T) {
 		})
 	}
 }
+
+func TestParseAgentOutputBudget(t *testing.T) {
+	base := "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\n"
+
+	tests := []struct {
+		name           string
+		yaml           string
+		wantMaxOut     int
+		wantMaxTokens  int
+		wantSendReason bool
+	}{
+		{
+			name:           "unset budget stays zero for the agent to derive",
+			yaml:           base,
+			wantMaxOut:     0,
+			wantMaxTokens:  DefaultLLMMaxOutputTokens,
+			wantSendReason: true,
+		},
+		{
+			name:           "explicit budget is preserved",
+			yaml:           base + "agent:\n  max_output_bytes: 1234\n",
+			wantMaxOut:     1234,
+			wantMaxTokens:  DefaultLLMMaxOutputTokens,
+			wantSendReason: true,
+		},
+		{
+			name:           "reasoning can be disabled",
+			yaml:           base + "agent:\n  send_reasoning: false\n",
+			wantMaxOut:     0,
+			wantMaxTokens:  DefaultLLMMaxOutputTokens,
+			wantSendReason: false,
+		},
+		{
+			name:           "max output tokens honoured",
+			yaml:           base + "llm:\n  max_output_tokens: 512\n",
+			wantMaxOut:     0,
+			wantMaxTokens:  512,
+			wantSendReason: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(tt.yaml))
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if cfg.Agent.MaxOutputBytes != tt.wantMaxOut {
+				t.Errorf("MaxOutputBytes = %d, want %d", cfg.Agent.MaxOutputBytes, tt.wantMaxOut)
+			}
+			if cfg.LLM.MaxOutputTokens != tt.wantMaxTokens {
+				t.Errorf("MaxOutputTokens = %d, want %d", cfg.LLM.MaxOutputTokens, tt.wantMaxTokens)
+			}
+			if got := cfg.Agent.Reasoning(); got != tt.wantSendReason {
+				t.Errorf("SendReasoning = %v, want %v", got, tt.wantSendReason)
+			}
+		})
+	}
+}

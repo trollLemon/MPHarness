@@ -4,12 +4,13 @@ import (
 	"context"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/log/global"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
@@ -53,6 +54,20 @@ func TestSetupOTEL_SDK_DISABLED(t *testing.T) {
 	_ = os.Unsetenv("OTEL_SDK_DISABLED")
 }
 
+// TestSetupEnabled asserts what Setup does locally when enabled: it installs SDK
+// providers and replaces the global ones.
+//
+// The returned shutdown is deliberately never called. The metric reader is
+// periodic, and Shutdown forces a final collect-and-export whether or not
+// anything was recorded, so calling it opens a socket to the configured
+// endpoint. Pointing that at the default endpoint would make the test depend on
+// whatever OTLP collector the machine happens to be running, and pointing it at
+// a dead port would still spend the full 5s exportTimeout proving the port is
+// dead. Neither belongs in a unit test.
+//
+// Setup itself opens no socket: the OTLP exporters dial lazily, so constructing
+// them does no I/O and everything asserted here is reached offline. The globals
+// are restored on exit, so the providers left installed are inert.
 func TestSetupEnabled(t *testing.T) {
 	origTP := otel.GetTracerProvider()
 	origMP := otel.GetMeterProvider()
@@ -65,7 +80,6 @@ func TestSetupEnabled(t *testing.T) {
 
 	cfg := Config{
 		Enabled:     true,
-		Endpoint:    "localhost:4317",
 		ServiceName: "mph-test",
 		ResourceAttributes: map[string]string{
 			"environment": "test",
@@ -81,55 +95,32 @@ func TestSetupEnabled(t *testing.T) {
 	if got := otel.GetTracerProvider(); got == origTP {
 		t.Fatalf("tracer provider not set")
 	}
-	// providers should be SDK types
 	if _, ok := otel.GetTracerProvider().(*sdktrace.TracerProvider); !ok {
 		t.Fatalf("unexpected tracer provider type %T", otel.GetTracerProvider())
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := shutdown(ctx); err != nil {
-		// Without a collector, export fails with Unavailable/connection refused – acceptable in unit test.
-		if !isCollectorUnavailable(err) {
-			t.Fatalf("shutdown: %v", err)
-		}
-		t.Logf("shutdown (expected without collector): %v", err)
+	if _, ok := otel.GetMeterProvider().(*sdkmetric.MeterProvider); !ok {
+		t.Fatalf("unexpected meter provider type %T", otel.GetMeterProvider())
 	}
-}
-
-func isCollectorUnavailable(err error) bool {
-	if err == nil {
-		return false
+	if _, ok := global.GetLoggerProvider().(*sdklog.LoggerProvider); !ok {
+		t.Fatalf("unexpected logger provider type %T", global.GetLoggerProvider())
 	}
-	s := err.Error()
-	return contains(s, "connection refused") || contains(s, "Unavailable") || contains(s, "connection error")
-}
-
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (func() bool {
-		for i := 0; i <= len(s)-len(sub); i++ {
-			if s[i:i+len(sub)] == sub {
-				return true
-			}
-		}
-		return false
-	})()
 }
 
 func TestHookRun(t *testing.T) {
 	origLP := global.GetLoggerProvider()
 	defer global.SetLoggerProvider(origLP)
 
-	// Setup a provider so hook has a real logger provider (but no collector)
-	cfg := Config{Enabled: true, Endpoint: "localhost:4317", ServiceName: "mph-hook-test"}
+	// The hook only needs a real LoggerProvider, which Setup installs offline, so
+	// the returned shutdown is never called and no socket is opened. See
+	// TestSetupEnabled for why shutdown is off limits in a unit test.
+	cfg := Config{Enabled: true, ServiceName: "mph-hook-test"}
 	shutdown, err := Setup(cfg)
 	if err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = shutdown(ctx)
-	}()
+	if shutdown == nil {
+		t.Fatalf("shutdown nil")
+	}
 
 	h := NewHook("mph")
 	if h == nil {
@@ -178,21 +169,22 @@ func TestConvertLevel(t *testing.T) {
 	}
 }
 
+// TestSetupDefaults covers the zero-config path, so the Config is left entirely
+// blank and Setup has to resolve DefaultEndpoint and DefaultServiceName itself.
+// shutdown is not called, so resolving the default endpoint costs no I/O; see
+// TestSetupEnabled.
 func TestSetupDefaults(t *testing.T) {
 	origTP := otel.GetTracerProvider()
 	defer otel.SetTracerProvider(origTP)
-	cfg := Config{Enabled: true}
-	shutdown, err := Setup(cfg)
+	shutdown, err := Setup(Config{Enabled: true})
 	if err != nil {
 		t.Fatalf("Setup defaults: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := shutdown(ctx); err != nil {
-		if !isCollectorUnavailable(err) {
-			t.Fatalf("shutdown: %v", err)
-		}
-		t.Logf("shutdown (expected without collector): %v", err)
+	if shutdown == nil {
+		t.Fatalf("shutdown nil")
+	}
+	if got := otel.GetTracerProvider(); got == origTP {
+		t.Fatalf("tracer provider not set for a zero-value Config")
 	}
 }
 

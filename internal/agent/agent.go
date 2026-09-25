@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 	"uuid"
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
@@ -26,10 +27,69 @@ type Kronk interface {
 }
 
 type LLMConfig struct {
-	Temperature float64 `json:"temperature" yaml:"temperature"`
-	TopP        float64 `json:"top_p" yaml:"top_p"`
-	TopK        int     `json:"top_k" yaml:"top_k"`
-	ToolChoice  string  `json:"tool_choice" yaml:"tool_choice"`
+	Temperature     float64 `json:"temperature" yaml:"temperature"`
+	TopP            float64 `json:"top_p" yaml:"top_p"`
+	TopK            int     `json:"top_k" yaml:"top_k"`
+	ToolChoice      string  `json:"tool_choice" yaml:"tool_choice"`
+	MaxOutputTokens int     `json:"max_output_tokens" yaml:"max_output_tokens"`
+}
+
+const (
+	// DefaultMaxOutputTokens caps one model turn. Without it a runaway completion
+	// can decode until it exhausts the context window, which trips the length
+	// nudge and costs a whole extra iteration.
+	DefaultMaxOutputTokens = 2048
+
+	// toolResultWindowDivisor sets each tool result to roughly 1/divisor of the
+	// live context window, leaving room for the remaining iterations, the
+	// assistant turns, and the tool call documents.
+	toolResultWindowDivisor = 8
+
+	// bytesPerToken is a deliberately conservative text estimate. Command output
+	// is mostly ASCII, so real payloads land near 4 bytes per token.
+	bytesPerToken = 4
+
+	minToolResultBytes = 2 * 1024
+	maxToolResultBytes = 64 * 1024
+
+	// toolResultHeadPercent splits the surviving budget between the head and the
+	// tail, favouring the head where the command and its context appear.
+	toolResultHeadPercent = 70
+
+	// assumedContextWindow is used when the model reports no window, so the
+	// budget is still bounded rather than falling back to an unbounded payload.
+	assumedContextWindow = 8192
+
+	// finalOutputBytes bounds the stdout dump of every command result. The log
+	// line is truncated separately, but stdout is consumed by whatever runs the
+	// harness, so an unbounded join becomes that consumer's token cost.
+	finalOutputBytes = 64 * 1024
+)
+
+// finalCommandOutput joins the run's command results for the end-of-run report,
+// capped so a long run cannot emit an unbounded blob.
+func finalCommandOutput(commandOutputs []string) string {
+	if len(commandOutputs) == 0 {
+		return ""
+	}
+	return truncateToolResult(strings.Join(commandOutputs, "\n---\n"), finalOutputBytes)
+}
+
+// toolResultBudgetBytes returns the cap for one tool result handed to the model.
+// An explicit agent.max_output_bytes wins; otherwise the cap tracks the context
+// window the model actually loaded, which the harness auto-tunes to the host
+// VRAM and the user never picks. A fixed byte cap is therefore wrong in both
+// directions: harmless on a large window, and on a small one a single result can
+// exceed the whole window and overflow the run on its first iteration.
+func toolResultBudgetBytes(cfg config.Config, contextWindow int) int {
+	if cfg.Agent.MaxOutputBytes > 0 {
+		return cfg.Agent.MaxOutputBytes
+	}
+	if contextWindow <= 0 {
+		contextWindow = assumedContextWindow
+	}
+	budget := (contextWindow / toolResultWindowDivisor) * bytesPerToken
+	return max(min(budget, maxToolResultBytes), minToolResultBytes)
 }
 
 type Agent struct {
@@ -78,8 +138,10 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *multipass.
 
 	var lastContextTokens int64
 
+	toolResultBudget := toolResultBudgetBytes(conf, a.krn.ModelConfig().ContextWindow())
+
 	for iter := 0; iter < a.maxIterations; iter++ {
-		res, err := a.runIteration(ctx, iter, conversation, toolDocs, commandOutputs, cli, conf, lastContextTokens)
+		res, err := a.runIteration(ctx, iter, conversation, toolDocs, commandOutputs, cli, conf, lastContextTokens, toolResultBudget)
 		if err != nil {
 			return err
 		}
@@ -93,9 +155,9 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *multipass.
 	}
 
 	if len(commandOutputs) > 0 {
-		joined := strings.Join(commandOutputs, "\n---\n")
-		a.log.Info().Str("command_output", truncate(joined, conf.Truncation.CommandOutput)).Msg("final command output")
-		fmt.Println(joined)
+		final := finalCommandOutput(commandOutputs)
+		a.log.Info().Str("command_output", truncate(final, conf.Truncation.CommandOutput)).Msg("final command output")
+		fmt.Println(final)
 	} else if lastAssistantContent != "" {
 		a.log.Info().Str("final_output", truncate(lastAssistantContent, conf.Truncation.LogContent)).Msg("agent final answer (no command output)")
 	} else {
@@ -118,7 +180,7 @@ type iterationResult struct {
 func (a *Agent) runIteration(
 	ctx context.Context, iter int, conversation, toolDocs []model.D,
 	commandOutputs []string, cli *multipass.Client, conf config.Config,
-	lastContextTokens int64,
+	lastContextTokens int64, toolResultBudget int,
 ) (res *iterationResult, err error) {
 	res = &iterationResult{
 		conversation:   conversation,
@@ -183,9 +245,9 @@ func (a *Agent) runIteration(
 	}
 
 	toolCallDocs := a.buildToolCallDocsWithContext(iterCtx, toolCalls, iter)
-	res.conversation = appendToConversation(conversation, buildAssistantMessage(msg, toolCallDocs))
+	res.conversation = appendToConversation(conversation, buildAssistantMessage(msg, toolCallDocs, conf.Agent.Reasoning()))
 
-	toolResponses, newOutputs := a.executeToolCalls(iterCtx, cli, conf, toolCalls)
+	toolResponses, newOutputs := a.executeToolCalls(iterCtx, cli, conf, toolCalls, toolResultBudget)
 	res.commandOutputs = append(res.commandOutputs, newOutputs...)
 	res.conversation = appendToConversation(res.conversation, toolResponses...)
 
@@ -297,7 +359,7 @@ func (a *Agent) buildToolCallDocsWithContext(ctx context.Context, toolCalls []mo
 	return docs
 }
 
-func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg config.Config, toolCalls []model.ResponseToolCall) ([]model.D, []string) {
+func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg config.Config, toolCalls []model.ResponseToolCall, resultBudget int) ([]model.D, []string) {
 	var toolResponses []model.D
 	var commandOutputs []string
 
@@ -329,7 +391,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg
 				attribute.Int64("mph.tool.duration_ms", durationMs),
 			))
 		} else {
-			result = truncate(result, cfg.Agent.MaxOutputBytes)
+			result = truncateToolResult(result, resultBudget)
 			status = "SUCCESS"
 			mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "tool succeeded", map[string]any{
 				"tool":   tc.Function.Name,
@@ -368,10 +430,58 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg
 }
 
 // truncate caps s at n bytes for logs and span attributes. A non-positive n
-// means no limit, which is how a caller opts out of capping entirely.
+// means no limit, which is how a caller opts out of capping entirely. Only the
+// head is kept, so this is for payloads where the beginning is the signal.
 func truncate(s string, n int) string {
 	if n <= 0 || len(s) <= n {
 		return s
 	}
-	return fmt.Sprintf("%s…(truncated, %d of %d bytes)", s[:n], n, len(s))
+	return fmt.Sprintf("%s…(truncated, %d of %d bytes)", trimPartialRuneTail(s[:n]), n, len(s))
+}
+
+// truncateToolResult caps a tool result at n bytes for the model, keeping both
+// ends. Command output usually carries its signal at the end (errors, summary
+// lines, footers), so a head-only cut drops the part the model needs. The
+// marker stays so the model knows output is missing. Only the n <= 0 and
+// too-short cases pass through; the cap itself is fixed per result when the
+// result is created, never revised afterwards, because rewriting an earlier
+// message invalidates the inference server's prefix cache and forces a full
+// re-prefill of the conversation.
+func truncateToolResult(s string, n int) string {
+	if n <= 0 || len(s) <= n {
+		return s
+	}
+	marker := fmt.Sprintf("\n…(truncated, %d of %d bytes; head and tail shown)…\n", n, len(s))
+	budget := n - len(marker)
+	if budget <= 0 {
+		return truncate(s, n)
+	}
+	head := budget * toolResultHeadPercent / 100
+	tail := budget - head
+	return trimPartialRuneTail(s[:head]) + marker + trimPartialRuneHead(s[len(s)-tail:])
+}
+
+// trimPartialRuneTail drops a trailing partial UTF-8 sequence so a byte-indexed
+// cut never splits a rune.
+func trimPartialRuneTail(s string) string {
+	for len(s) > 0 {
+		if r, size := utf8.DecodeLastRuneInString(s); r == utf8.RuneError && size <= 1 {
+			s = s[:len(s)-1]
+			continue
+		}
+		break
+	}
+	return s
+}
+
+// trimPartialRuneHead drops a leading partial UTF-8 sequence.
+func trimPartialRuneHead(s string) string {
+	for len(s) > 0 {
+		if r, size := utf8.DecodeRuneInString(s); r == utf8.RuneError && size <= 1 {
+			s = s[1:]
+			continue
+		}
+		break
+	}
+	return s
 }
