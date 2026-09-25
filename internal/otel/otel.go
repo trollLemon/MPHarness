@@ -3,6 +3,7 @@ package otel
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -14,18 +15,36 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
-	"go.opentelemetry.io/otel/log/global"
 	otellog "go.opentelemetry.io/otel/log"
+	"go.opentelemetry.io/otel/log/global"
+	"go.opentelemetry.io/otel/propagation"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type ctxKey string
 
 const skipHookKey ctxKey = "otel-skip-hook"
+
+// Defaults for a Config left partially blank. Exported so cmd/mph can present the
+// same values in help text and layer environment variables over the YAML without
+// the two drifting apart.
+const (
+	DefaultEndpoint    = "localhost:4317"
+	DefaultServiceName = "mph"
+)
+
+// Exporter and batcher tunables.
+const (
+	exporterTimeout = 10 * time.Second
+	batchTimeout    = 2 * time.Second
+	exportTimeout   = 5 * time.Second
+	metricInterval  = 5 * time.Second
+	logInterval     = 1 * time.Second
+)
 
 type Config struct {
 	Enabled            bool
@@ -44,10 +63,10 @@ func Setup(cfg Config) (func(context.Context) error, error) {
 	ctx := context.Background()
 
 	if cfg.Endpoint == "" {
-		cfg.Endpoint = "localhost:4317"
+		cfg.Endpoint = DefaultEndpoint
 	}
 	if cfg.ServiceName == "" {
-		cfg.ServiceName = "mph"
+		cfg.ServiceName = DefaultServiceName
 	}
 
 	attrs := []attribute.KeyValue{
@@ -70,13 +89,14 @@ func Setup(cfg Config) (func(context.Context) error, error) {
 	traceExp, err := otlptracegrpc.New(ctx,
 		otlptracegrpc.WithEndpoint(cfg.Endpoint),
 		otlptracegrpc.WithInsecure(),
+		otlptracegrpc.WithTimeout(exporterTimeout),
 	)
 	if err != nil {
 		return nil, err
 	}
 
 	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(traceExp),
+		sdktrace.WithBatcher(traceExp, sdktrace.WithBatchTimeout(batchTimeout), sdktrace.WithExportTimeout(exportTimeout)),
 		sdktrace.WithResource(res),
 	)
 	otel.SetTracerProvider(tp)
@@ -85,13 +105,17 @@ func Setup(cfg Config) (func(context.Context) error, error) {
 	metricExp, err := otlpmetricgrpc.New(ctx,
 		otlpmetricgrpc.WithEndpoint(cfg.Endpoint),
 		otlpmetricgrpc.WithInsecure(),
+		otlpmetricgrpc.WithTimeout(exporterTimeout),
 	)
 	if err != nil {
 		_ = tp.Shutdown(ctx)
 		return nil, err
 	}
 
-	reader := sdkmetric.NewPeriodicReader(metricExp)
+	reader := sdkmetric.NewPeriodicReader(metricExp,
+		sdkmetric.WithInterval(metricInterval),
+		sdkmetric.WithTimeout(exportTimeout),
+	)
 	mp := sdkmetric.NewMeterProvider(
 		sdkmetric.WithReader(reader),
 		sdkmetric.WithResource(res),
@@ -101,6 +125,7 @@ func Setup(cfg Config) (func(context.Context) error, error) {
 	logExp, err := otlploggrpc.New(ctx,
 		otlploggrpc.WithEndpoint(cfg.Endpoint),
 		otlploggrpc.WithInsecure(),
+		otlploggrpc.WithTimeout(exporterTimeout),
 	)
 	if err != nil {
 		_ = tp.Shutdown(ctx)
@@ -109,29 +134,26 @@ func Setup(cfg Config) (func(context.Context) error, error) {
 	}
 
 	lp := sdklog.NewLoggerProvider(
-		sdklog.WithProcessor(sdklog.NewBatchProcessor(logExp)),
+		sdklog.WithProcessor(sdklog.NewBatchProcessor(logExp,
+			sdklog.WithExportInterval(logInterval),
+			sdklog.WithExportTimeout(exportTimeout),
+		)),
 		sdklog.WithResource(res),
 	)
 	global.SetLoggerProvider(lp)
 
 	shutdown := func(ctx context.Context) error {
-		var err error
-		if e := tp.Shutdown(ctx); e != nil {
-			err = e
+		var errs []error
+		if err := tp.Shutdown(ctx); err != nil {
+			errs = append(errs, err)
 		}
-		if e := mp.Shutdown(ctx); e != nil {
-			if err != nil {
-				err = e
-			} else {
-				err = e
-			}
+		if err := mp.Shutdown(ctx); err != nil {
+			errs = append(errs, err)
 		}
-		if e := lp.Shutdown(ctx); e != nil {
-			if err == nil {
-				err = e
-			}
+		if err := lp.Shutdown(ctx); err != nil {
+			errs = append(errs, err)
 		}
-		return err
+		return errors.Join(errs...)
 	}
 
 	return shutdown, nil
@@ -161,7 +183,24 @@ func (h Hook) Run(e *zerolog.Event, level zerolog.Level, msg string) {
 	rec.SetSeverity(convertLevel(level))
 	rec.SetSeverityText(level.String())
 	rec.SetBody(otellog.StringValue(msg))
+	for _, kv := range traceAttrs(ctx) {
+		rec.AddAttributes(kv)
+	}
 	h.logger.Emit(ctx, rec)
+}
+
+// traceAttrs exposes the active span as record attributes. The log SDK's
+// Record has no dedicated trace/span fields, so correlation is carried as
+// attributes instead; without them log lines cannot be linked to a trace.
+func traceAttrs(ctx context.Context) []otellog.KeyValue {
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.IsValid() {
+		return nil
+	}
+	return []otellog.KeyValue{
+		otellog.String("trace_id", sc.TraceID().String()),
+		otellog.String("span_id", sc.SpanID().String()),
+	}
 }
 
 func LogEvent(ctx context.Context, logger zerolog.Logger, level zerolog.Level, msg string, fields map[string]any) {
@@ -171,6 +210,7 @@ func LogEvent(ctx context.Context, logger zerolog.Logger, level zerolog.Level, m
 		// level disabled – still emit OTEL directly
 		evt = nil
 	} else {
+		evt.CallerSkipFrame(1)
 		for k, v := range fields {
 			switch val := v.(type) {
 			case string:
@@ -222,6 +262,9 @@ func LogEvent(ctx context.Context, logger zerolog.Logger, level zerolog.Level, m
 		default:
 			rec.AddAttributes(otellog.String(k, fmt.Sprint(v)))
 		}
+	}
+	for _, kv := range traceAttrs(ctx) {
+		rec.AddAttributes(kv)
 	}
 	global.Logger("mph").Emit(ctx, rec)
 }

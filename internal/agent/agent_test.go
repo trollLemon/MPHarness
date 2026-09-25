@@ -1,23 +1,40 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/trollLemon/MPHarness/internal/config"
 	"github.com/trollLemon/MPHarness/internal/multipass"
 )
 
 type mockKronk struct {
-	responses []model.ChatResponse
-	errs      []error
-	calls     int
-	captured  []model.D
-	chatFunc  func(context.Context, model.D) (model.ChatResponse, error)
+	responses    []model.ChatResponse
+	errs         []error
+	calls        int
+	captured     []model.D
+	chatFunc     func(context.Context, model.D) (model.ChatResponse, error)
+	contextWidth int
+}
+
+func (m *mockKronk) ModelConfig() model.Config {
+	cfg := model.Config{}
+	if m.contextWidth > 0 {
+		cfg.PtrContextWindow = &m.contextWidth
+	}
+	return cfg
 }
 
 func (m *mockKronk) Chat(ctx context.Context, req model.D) (model.ChatResponse, error) {
@@ -104,9 +121,11 @@ func TestTruncate(t *testing.T) {
 		want string
 	}{
 		{"short unchanged", "hello", 10, "hello"},
-		{"long truncated", "hello world", 5, "hello…(truncated)"},
+		{"long truncated", "hello world", 5, "hello…(truncated, 5 of 11 bytes)"},
 		{"empty", "", 5, ""},
 		{"exact", "hello", 5, "hello"},
+		{"zero means no limit", "hello", 0, "hello"},
+		{"negative means no limit", "hello", -1, "hello"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -336,6 +355,195 @@ func TestBuildAssistantMessageAndAppend(t *testing.T) {
 	}
 }
 
+func TestBuildToolResponseMessage(t *testing.T) {
+	tc := model.ResponseToolCall{ID: "call-1", Type: "function", Function: model.ResponseToolCallFunction{Name: "multipass_exec"}}
+	m := buildToolResponseMessage(tc, "out")
+	if m["role"] != "tool" {
+		t.Errorf("role %v", m["role"])
+	}
+	if m["tool_call_id"] != "call-1" {
+		t.Errorf("tool_call_id %v", m["tool_call_id"])
+	}
+	if m["name"] != "multipass_exec" {
+		t.Errorf("name %v", m["name"])
+	}
+	if m["content"] != "out" {
+		t.Errorf("content %v", m["content"])
+	}
+}
+
+func TestBuildChatRequest(t *testing.T) {
+	conv := []model.D{{"role": "user", "content": "task"}}
+	docs := []model.D{{"type": "function"}}
+
+	t.Run("top_k defaults to 1", func(t *testing.T) {
+		req := buildChatRequest(conv, docs, LLMConfig{ToolChoice: "auto"})
+		if req["top_k"] != 1 {
+			t.Errorf("top_k %v want 1", req["top_k"])
+		}
+		if req["parallel_tool_calls"] != false {
+			t.Errorf("parallel_tool_calls %v want false", req["parallel_tool_calls"])
+		}
+		if req["tool_choice"] != "auto" {
+			t.Errorf("tool_choice %v", req["tool_choice"])
+		}
+		msgs, _ := req["messages"].([]model.D)
+		if len(msgs) != 1 || msgs[0]["content"] != "task" {
+			t.Errorf("messages %v", req["messages"])
+		}
+		tools, _ := req["tools"].([]model.D)
+		if len(tools) != 1 {
+			t.Errorf("tools %v", req["tools"])
+		}
+	})
+
+	t.Run("config values pass through", func(t *testing.T) {
+		req := buildChatRequest(conv, docs, LLMConfig{Temperature: 0.7, TopP: 0.9, TopK: 5, ToolChoice: "required"})
+		if req["temperature"] != 0.7 {
+			t.Errorf("temperature %v want 0.7", req["temperature"])
+		}
+		if req["top_p"] != 0.9 {
+			t.Errorf("top_p %v want 0.9", req["top_p"])
+		}
+		if req["top_k"] != 5 {
+			t.Errorf("top_k %v want 5", req["top_k"])
+		}
+		if req["tool_choice"] != "required" {
+			t.Errorf("tool_choice %v want required", req["tool_choice"])
+		}
+	})
+}
+
+func TestBuildLengthNudgeMessages(t *testing.T) {
+	const nudgePrefix = "Your previous response hit the token limit"
+	long := strings.Repeat("x", 2500)
+
+	tests := []struct {
+		name          string
+		msg           *model.ResponseMessage
+		wantLen       int
+		wantRole      string
+		wantContent   string
+		wantReasoning string
+	}{
+		{
+			name:     "empty message yields only the nudge",
+			msg:      &model.ResponseMessage{},
+			wantLen:  1,
+			wantRole: "user",
+		},
+		{
+			name:        "content is truncated into the replayed turn",
+			msg:         &model.ResponseMessage{Content: long},
+			wantLen:     2,
+			wantRole:    "assistant",
+			wantContent: truncate(long, config.DefaultNudgeBytes),
+		},
+		{
+			name:          "reasoning is replayed too",
+			msg:           &model.ResponseMessage{Reasoning: "because"},
+			wantLen:       2,
+			wantRole:      "assistant",
+			wantReasoning: "because",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msgs := buildLengthNudgeMessages(tt.msg, config.DefaultNudgeBytes)
+			if len(msgs) != tt.wantLen {
+				t.Fatalf("msgs len %d want %d: %v", len(msgs), tt.wantLen, msgs)
+			}
+			if msgs[0]["role"] != tt.wantRole {
+				t.Errorf("role %v want %v", msgs[0]["role"], tt.wantRole)
+			}
+			if tt.wantContent != "" && msgs[0]["content"] != tt.wantContent {
+				t.Errorf("content len %d want %d", len(msgs[0]["content"].(string)), len(tt.wantContent))
+			}
+			if tt.wantReasoning != "" && msgs[0]["reasoning_content"] != tt.wantReasoning {
+				t.Errorf("reasoning %v want %v", msgs[0]["reasoning_content"], tt.wantReasoning)
+			}
+			last := msgs[len(msgs)-1]
+			if last["role"] != "user" {
+				t.Errorf("last role %v want user", last["role"])
+			}
+			if nudge, _ := last["content"].(string); !strings.HasPrefix(nudge, nudgePrefix) {
+				t.Errorf("nudge %q", nudge)
+			}
+		})
+	}
+}
+
+func TestLogModelOutput(t *testing.T) {
+	ctx := context.Background()
+	log := zerolog.Nop()
+
+	if got := logModelOutput(ctx, log, 0, &model.ResponseMessage{Content: "answer"}, config.DefaultLogContentBytes); got != "answer" {
+		t.Errorf("content %q want answer", got)
+	}
+	if got := logModelOutput(ctx, log, 0, &model.ResponseMessage{Reasoning: "thinking"}, config.DefaultLogContentBytes); got != "" {
+		t.Errorf("content %q want empty", got)
+	}
+	if got := logModelOutput(ctx, log, 0, &model.ResponseMessage{}, config.DefaultLogContentBytes); got != "" {
+		t.Errorf("content %q want empty", got)
+	}
+}
+
+// TestLogModelOutputKeys pins the field names a log query depends on: both
+// parts share one message and one text key, split only by part.
+func TestLogModelOutputKeys(t *testing.T) {
+	var buf bytes.Buffer
+	log := zerolog.New(&buf)
+
+	if got := logModelOutput(context.Background(), log, 1, &model.ResponseMessage{
+		Reasoning: "thinking",
+		Content:   "answer",
+	}, config.DefaultLogContentBytes); got != "answer" {
+		t.Fatalf("content %q want answer", got)
+	}
+
+	want := []struct{ part, text string }{
+		{"reasoning", "thinking"},
+		{"content", "answer"},
+	}
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != len(want) {
+		t.Fatalf("got %d lines want %d: %s", len(lines), len(want), buf.String())
+	}
+	for i, w := range want {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(lines[i]), &rec); err != nil {
+			t.Fatalf("line %d: %v", i, err)
+		}
+		if rec["message"] != "model output" {
+			t.Errorf("line %d message %v want model output", i, rec["message"])
+		}
+		if rec["part"] != w.part {
+			t.Errorf("line %d part %v want %s", i, rec["part"], w.part)
+		}
+		if rec["text"] != w.text {
+			t.Errorf("line %d text %v want %s", i, rec["text"], w.text)
+		}
+		if rec["iteration"] != float64(2) {
+			t.Errorf("line %d iteration %v want 2", i, rec["iteration"])
+		}
+	}
+}
+
+func TestLogModelOutputTruncatesTextKey(t *testing.T) {
+	var buf bytes.Buffer
+	log := zerolog.New(&buf)
+
+	logModelOutput(context.Background(), log, 0, &model.ResponseMessage{Content: "hello world"}, 5)
+
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &rec); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if rec["text"] != truncate("hello world", 5) {
+		t.Errorf("text %v not truncated", rec["text"])
+	}
+}
+
 func TestExecute(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -456,4 +664,145 @@ func TestCallChatUsesTimeout(t *testing.T) {
 	if !called {
 		t.Fatalf("mock not called")
 	}
+}
+
+func TestExecuteTagsMetricsWithRunID(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(provider)
+	t.Cleanup(func() {
+		otel.SetMeterProvider(prev)
+		tokensHist, tpsHist, iterationsCounter = nil, nil, nil
+		toolDurationHist, toolCallsCounter, toolFailuresCounter = nil, nil, nil
+		contextWindowGauge, contextTokensGauge = nil, nil
+	})
+	mock := &mockKronk{
+		contextWidth: 32768,
+		responses: []model.ChatResponse{chatResp("done", "", model.FinishReasonStop, nil,
+			&model.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120, TokensPerSecond: 8.5})},
+	}
+	agent := NewAgent(zerolog.Nop(), mock, 2, time.Second, 5*time.Second, defaultLLMConfig())
+	conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
+	if err := agent.Execute(context.Background(), conf, multipass.New(zerolog.Nop())); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+
+	seen := map[string]bool{}
+	runIDs := map[string]bool{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			seen[m.Name] = true
+			attrs := dataPointAttrs(m.Data)
+			if len(attrs) == 0 {
+				t.Errorf("metric %q produced no data points", m.Name)
+				continue
+			}
+			for _, set := range attrs {
+				v, ok := set.Value("mph.run.id")
+				if !ok || v.AsString() == "" {
+					t.Fatalf("metric %q missing mph.run.id attribute (attrs: %s)", m.Name, set.Encoded(attribute.DefaultEncoder()))
+					continue
+				}
+				runIDs[v.AsString()] = true
+			}
+		}
+	}
+
+	for _, name := range []string{
+		"mph.tokens", "mph.tokens_per_second", "mph.iterations",
+		"mph.context.window", "mph.context.tokens",
+	} {
+		if !seen[name] {
+			t.Errorf("metric %q was never recorded", name)
+		}
+	}
+	if len(runIDs) != 1 {
+		t.Fatalf("want exactly one run id across all metrics, got %d: %v", len(runIDs), runIDs)
+	}
+	for id := range runIDs {
+		if _, err := uuid.Parse(id); err != nil {
+			t.Errorf("run id %q is not a uuid: %v", id, err)
+		}
+	}
+}
+
+func TestRunIDFromContext(t *testing.T) {
+	if got := runIDFromContext(context.Background()); got != "" {
+		t.Errorf("runIDFromContext on bare ctx = %q, want empty", got)
+	}
+
+	const id = "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5"
+	if got := runIDFromContext(withRunID(context.Background(), id)); got != id {
+		t.Errorf("runIDFromContext = %q, want %q", got, id)
+	}
+}
+
+func TestRunSpanAttrs(t *testing.T) {
+	iter := attribute.Int("mph.iteration", 3)
+
+	t.Run("omits run id when unset", func(t *testing.T) {
+		got := runSpanAttrs(context.Background(), iter)
+		if len(got) != 1 {
+			t.Fatalf("got %d attrs, want 1: %v", len(got), got)
+		}
+		if key := string(got[0].Key); key != "mph.iteration" {
+			t.Errorf("got %d attrs, want only the extra attr on a bare ctx: %v", len(got), got)
+		}
+	})
+
+	t.Run("adds run id when set", func(t *testing.T) {
+		const id = "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5"
+		got := runSpanAttrs(withRunID(context.Background(), id), iter)
+		if len(got) != 2 {
+			t.Fatalf("got %d attrs, want 2: %v", len(got), got)
+		}
+		if key := string(got[1].Key); key != "mph.run.id" {
+			t.Fatalf("second attr key = %q, want mph.run.id", key)
+		}
+		if got[1].Value.AsString() != id {
+			t.Errorf("run id = %q, want %q", got[1].Value.AsString(), id)
+		}
+	})
+}
+
+func dataPointAttrs(data metricdata.Aggregation) []attribute.Set {
+	switch a := data.(type) {
+	case metricdata.Histogram[int64]:
+		out := make([]attribute.Set, 0, len(a.DataPoints))
+		for _, dp := range a.DataPoints {
+			out = append(out, dp.Attributes)
+		}
+		return out
+	case metricdata.Histogram[float64]:
+		out := make([]attribute.Set, 0, len(a.DataPoints))
+		for _, dp := range a.DataPoints {
+			out = append(out, dp.Attributes)
+		}
+		return out
+	case metricdata.Sum[int64]:
+		out := make([]attribute.Set, 0, len(a.DataPoints))
+		for _, dp := range a.DataPoints {
+			out = append(out, dp.Attributes)
+		}
+		return out
+	case metricdata.Sum[float64]:
+		out := make([]attribute.Set, 0, len(a.DataPoints))
+		for _, dp := range a.DataPoints {
+			out = append(out, dp.Attributes)
+		}
+		return out
+	case metricdata.Gauge[int64]:
+		out := make([]attribute.Set, 0, len(a.DataPoints))
+		for _, dp := range a.DataPoints {
+			out = append(out, dp.Attributes)
+		}
+		return out
+	}
+	return nil
 }

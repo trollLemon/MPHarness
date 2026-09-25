@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
+	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	"github.com/trollLemon/MPHarness/internal/config"
 	"github.com/trollLemon/MPHarness/internal/multipass"
 	"github.com/trollLemon/MPHarness/internal/validation"
@@ -125,7 +127,7 @@ func callExec(ctx context.Context, cli *multipass.Client, cfg config.Config, arg
 		return "", err
 	}
 
-	out, execErr := cli.Exec(ctx, cfg.VM.Name, command)
+	out, execErr := cli.Exec(ctx, cfg.VM.Name, command, cfg.Truncation.ToolResult)
 	if execErr != nil {
 		return "", execErr
 	}
@@ -133,4 +135,121 @@ func callExec(ctx context.Context, cli *multipass.Client, cfg config.Config, arg
 		return "(no output)", nil
 	}
 	return out, nil
+}
+
+func buildToolErrorContent(err error) string {
+	b, _ := json.Marshal(map[string]any{
+		"status": "FAILED",
+		"data":   map[string]any{"error": err.Error()},
+	})
+	return string(b)
+}
+
+func buildToolSuccessContent(toolName, result string) string {
+	var payload map[string]any
+	if toolName == "multipass_exec" {
+		payload = map[string]any{
+			"status": "SUCCESS",
+			"data":   map[string]any{"output": result},
+		}
+	} else {
+		payload = map[string]any{
+			"status": "SUCCESS",
+			"data":   map[string]any{"result": result},
+		}
+	}
+	b, _ := json.Marshal(payload)
+	return string(b)
+}
+
+func buildToolDocuments() []model.D {
+	specs := Specs()
+	docs := make([]model.D, 0, len(specs))
+	for _, s := range specs {
+		docs = append(docs, model.D{
+			"type": "function",
+			"function": model.D{
+				"name":        s.Name,
+				"description": s.Description,
+				"parameters":  s.Parameters,
+			},
+		})
+	}
+	return docs
+}
+
+func buildUserPrompt(conf config.Config) string {
+	var b strings.Builder
+	if len(conf.AllowedCommands) > 0 {
+		fmt.Fprintf(&b, "Allowed commands: %s\n\n", strings.Join(conf.AllowedCommandsList(), ", "))
+	} else {
+		b.WriteString("Allowed commands: (all)\n\n")
+	}
+	b.WriteString("Task:\n")
+	b.WriteString(strings.TrimSpace(conf.Prompt))
+	b.WriteString("\n")
+	return b.String()
+}
+
+func buildAssistantMessage(msg *model.ResponseMessage, toolCallDocs []model.D) model.D {
+	assistantMsg := model.D{
+		"role":       "assistant",
+		"tool_calls": toolCallDocs,
+	}
+	if msg.Content != "" {
+		assistantMsg["content"] = msg.Content
+	}
+	if msg.Reasoning != "" {
+		assistantMsg["reasoning_content"] = msg.Reasoning
+	}
+	return assistantMsg
+}
+
+func buildToolResponseMessage(tc model.ResponseToolCall, content string) model.D {
+	return model.D{
+		"role":         "tool",
+		"tool_call_id": tc.ID,
+		"name":         tc.Function.Name,
+		"content":      content,
+	}
+}
+
+func appendToConversation(conversation []model.D, msgs ...model.D) []model.D {
+	return append(conversation, msgs...)
+}
+
+// buildLengthNudgeMessages rebuilds the truncated assistant turn plus the user
+// nudge injected when a reply hit the length limit without a tool call.
+func buildLengthNudgeMessages(msg *model.ResponseMessage, maxContent int) []model.D {
+	msgs := make([]model.D, 0, 2)
+	if msg.Reasoning != "" || msg.Content != "" {
+		nudgedAssistant := model.D{"role": "assistant"}
+		if msg.Content != "" {
+			nudgedAssistant["content"] = truncate(msg.Content, maxContent)
+		}
+		if msg.Reasoning != "" {
+			nudgedAssistant["reasoning_content"] = truncate(msg.Reasoning, maxContent)
+		}
+		msgs = append(msgs, nudgedAssistant)
+	}
+	return append(msgs, model.D{
+		"role":    "user",
+		"content": "Your previous response hit the token limit without making a tool call. Please be concise and try again and run a tool call if necessary",
+	})
+}
+
+func buildChatRequest(conversation, toolDocs []model.D, llmConfig LLMConfig) model.D {
+	topK := llmConfig.TopK
+	if topK == 0 {
+		topK = 1
+	}
+	return model.D{
+		"messages":            conversation,
+		"temperature":         llmConfig.Temperature,
+		"top_p":               llmConfig.TopP,
+		"top_k":               topK,
+		"tools":               toolDocs,
+		"tool_choice":         llmConfig.ToolChoice,
+		"parallel_tool_calls": false,
+	}
 }

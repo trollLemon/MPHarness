@@ -1,0 +1,1625 @@
+{
+  "uid": "mph-otel",
+  "title": "MPHarness - OTel (Metrics / Logs / Traces)",
+  "tags": [
+    "mph",
+    "otel",
+    "batch"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 41,
+  "version": 2,
+  "refresh": "30s",
+  "editable": true,
+  "description": "Telemetry from batch test runs, not a long-running service. Every run is shown, unfiltered: per-run lines end with their run instead of running on flat, tokens are shown per interval so a run reads as a burst that returns to zero, and final totals live in the Per run totals table.",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "annotations": {
+    "list": []
+  },
+  "templating": {
+    "list": []
+  },
+  "panels": [
+    {
+      "type": "row",
+      "id": 100,
+      "title": "Run summary (all runs in the selected range)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": [],
+      "description": ""
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Tool calls in range",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mph-prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "expr": "sum(increase(mph_agent_tool_calls_total[$__range]))",
+          "instant": true,
+          "range": false,
+          "format": "time_series",
+          "legendFormat": "calls"
+        }
+      ],
+      "description": ""
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Tool failures in range",
+      "description": "Zero when nothing failed. The counter is only touched when a tool actually fails, so without the or vector(0) fallback an idle period reads as No data rather than 0.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mph-prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "expr": "sum(increase(mph_agent_tool_failures_total[$__range])) or vector(0)",
+          "instant": true,
+          "range": false,
+          "format": "time_series",
+          "legendFormat": "failures"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Tool duration p95 in range",
+      "description": "p95 across the run window, not a live rate.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mph-prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 2,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (increase(mph_agent_tool_duration_bucket{}[$__range])))",
+          "instant": true,
+          "range": false,
+          "format": "time_series",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Avg tokens/sec in range",
+      "description": "Mean generation speed recorded during the run.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mph-prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "purple",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "expr": "sum(increase(mph_tokens_per_second_sum[$__range])) / sum(increase(mph_tokens_per_second_count[$__range]))",
+          "instant": true,
+          "range": false,
+          "format": "time_series",
+          "legendFormat": "tokens/sec"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 101,
+      "title": "Agent metrics",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "panels": [],
+      "description": ""
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Tool calls per interval, by tool",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mph-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisPlacement": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "expr": "sum by (mph_tool_name) (increase(mph_agent_tool_calls_total[$__rate_interval]))",
+          "range": true,
+          "instant": false,
+          "format": "time_series",
+          "legendFormat": "{{mph_tool_name}}"
+        }
+      ],
+      "description": "Calls per interval rather than a running total, so a run reads as a burst that falls back to zero once it stops reporting. Runs are pooled across the selected range, so this counts calls rather than per-run totals."
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Tool failures per interval, by tool",
+      "description": "Failures per interval rather than a running total. The counter is only touched when a tool fails, so the zero series is synthesised from the tool call counter to keep one labelled line per tool instead of No data.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mph-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisPlacement": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "expr": "sum by (mph_tool_name) (increase(mph_agent_tool_failures_total[$__rate_interval])) or (0 * sum by (mph_tool_name) (increase(mph_agent_tool_calls_total[$__range])))",
+          "range": true,
+          "instant": false,
+          "format": "time_series",
+          "legendFormat": "{{mph_tool_name}}"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Tool duration p50 / p95 by tool (all runs in range)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mph-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 3,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le, mph_tool_name) (increase(mph_agent_tool_duration_bucket{}[$__range])))",
+          "range": true,
+          "instant": false,
+          "format": "time_series",
+          "legendFormat": "p50 {{mph_tool_name}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, mph_tool_name) (increase(mph_agent_tool_duration_bucket{}[$__range])))",
+          "range": true,
+          "instant": false,
+          "format": "time_series",
+          "legendFormat": "p95 {{mph_tool_name}}"
+        }
+      ],
+      "description": "Quantile over every call in the selected range. Buckets are increased over the range rather than read as a running total, because each run's histogram restarts and pooling the raw buckets would blend two distributions."
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Tokens/sec p50 / p95 (all runs in range)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mph-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 14
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (increase(mph_tokens_per_second_bucket{}[$__range])))",
+          "range": true,
+          "instant": false,
+          "format": "time_series",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (increase(mph_tokens_per_second_bucket{}[$__range])))",
+          "range": true,
+          "instant": false,
+          "format": "time_series",
+          "legendFormat": "p95"
+        }
+      ],
+      "description": "Quantile over every call in the selected range, pooled across runs. The buckets are increased over the range rather than read as a running total, since each run's histogram restarts from zero."
+    },
+    {
+      "id": 105,
+      "type": "row",
+      "title": "Per run totals (one row per run)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
+      "panels": []
+    },
+    {
+      "id": 106,
+      "type": "row",
+      "title": "Per run over time (one line per run id)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 33
+      },
+      "panels": []
+    },
+    {
+      "id": 110,
+      "type": "timeseries",
+      "title": "Tokens per interval, one line per run",
+      "description": "Tokens consumed per interval rather than a running total, so each run reads as a burst that falls back to zero once it stops reporting. A cumulative line can only ever climb and leaves every finished run frozen at its total; the totals themselves are in the table above.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mph-prometheus"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 34
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false,
+            "pointSize": 6,
+            "axisSoftMin": null,
+            "axisSoftMax": null,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                }
+              ]
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "sum by (mph_run_id) (increase(mph_tokens_sum{tokens_type=\"total\"}[$__rate_interval]))",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{mph_run_id}}"
+        }
+      ]
+    },
+    {
+      "id": 111,
+      "type": "timeseries",
+      "title": "Context window utilization per run over time",
+      "description": "How close each run got to the model's context window, one line per run id, no run filter. Read it as a staircase, not a ramp: the level is only written once per iteration (recordTokenUsage adds the delta, so the series holds the last request's total tokens) and the collector re-publishes that same number on every 5s scrape, so linear interpolation would invent growth that never happened. spanNulls is off so each line ends with its run, but expect a ~5min flat tail: the OTel Prometheus exporter keeps a finished run's last value alive briefly before evicting it, so the line is trustworthy only up to that point. No upper axis bound is set because the ratio is not clamped - a request whose tokens exceed the effective window pushes it past 1. Rejected: increase() over this counter, which scrape-extrapolates the per-iteration steps into non-integer bursts (observed 1003.77 and 104.26 'tokens grown'), and last_over_time(...[$__range]), which flattens every run to a permanent horizontal line - the per-run final value is in the \"Per run totals\" table instead.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mph-prometheus"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 34
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "pointSize": 4,
+            "axisSoftMin": 0,
+            "axisSoftMax": null,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                },
+                {
+                  "color": "red",
+                  "value": 1
+                }
+              ]
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "sum by (mph_run_id) (mph_context_tokens{}) / sum by (mph_run_id) (mph_context_window{})",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{mph_run_id}}"
+        }
+      ]
+    },
+    {
+      "id": 112,
+      "type": "timeseries",
+      "title": "Iterations per run (running total)",
+      "description": "Running total per run, so a line ends at that run's final iteration count. This one cannot be a burst: the counter fans out into one series per iteration, each born at 1, so increase() is identically zero.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mph-prometheus"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 43
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false,
+            "pointSize": 6,
+            "axisSoftMin": null,
+            "axisSoftMax": null,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                }
+              ]
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "sum by (mph_run_id) (mph_iterations_total{})",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{mph_run_id}}"
+        }
+      ]
+    },
+    {
+      "id": 113,
+      "type": "timeseries",
+      "title": "Tool calls per run (running total)",
+      "description": "Running total per run, so a line ends at that run's final call count. Kept cumulative rather than per interval because a short run can be erased entirely by per-interval sampling.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mph-prometheus"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 43
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false,
+            "pointSize": 6,
+            "axisSoftMin": null,
+            "axisSoftMax": null,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                }
+              ]
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "sum by (mph_run_id) (mph_agent_tool_calls_total{})",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{mph_run_id}}"
+        }
+      ]
+    },
+    {
+      "id": 114,
+      "type": "timeseries",
+      "title": "Tokens/sec p95 per run over time",
+      "description": "Real time series rather than a flattened final value: one line per run id, drawn only while that run is reporting. No run filter: every run is shown. Quantiles need le in the grouping, so buckets are summed per run before the quantile is taken.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mph-prometheus"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 52
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": false,
+            "pointSize": 6,
+            "axisSoftMin": null,
+            "axisSoftMax": null,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "green",
+                  "value": null
+                }
+              ]
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le, mph_run_id) (rate(mph_tokens_per_second_bucket{}[$__rate_interval])))",
+          "range": true,
+          "instant": false,
+          "legendFormat": "{{mph_run_id}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 102,
+      "title": "OTel collector",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 61
+      },
+      "panels": [],
+      "description": ""
+    },
+    {
+      "id": 40,
+      "type": "timeseries",
+      "title": "OTLP received per interval (spans / metrics / logs)",
+      "description": "Points arriving per interval, so gaps in traffic read as zero. Spans, metric points and log records differ by orders of magnitude, so read the shape rather than the height.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mph-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 62
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "expr": "sum(increase(otelcol_receiver_accepted_spans_total[$__rate_interval]))",
+          "range": true,
+          "instant": false,
+          "format": "time_series",
+          "legendFormat": "spans"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "expr": "sum(increase(otelcol_receiver_accepted_metric_points_total[$__rate_interval]))",
+          "range": true,
+          "instant": false,
+          "format": "time_series",
+          "legendFormat": "metric points"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "expr": "sum(increase(otelcol_receiver_accepted_log_records_total[$__rate_interval]))",
+          "range": true,
+          "instant": false,
+          "format": "time_series",
+          "legendFormat": "log records"
+        }
+      ]
+    },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "Export failures (should stay flat at zero)",
+      "description": "Any non-zero value means telemetry was dropped on the way to Tempo / Prometheus / Loki.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mph-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 62
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisPlacement": "auto"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "expr": "sum by (otelcol_exporter) (increase(otelcol_exporter_send_failed_spans_total[$__range]))",
+          "range": true,
+          "instant": false,
+          "format": "time_series",
+          "legendFormat": "spans {{otelcol_exporter}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "expr": "sum by (otelcol_exporter) (increase(otelcol_exporter_send_failed_log_records_total[$__range]))",
+          "range": true,
+          "instant": false,
+          "format": "time_series",
+          "legendFormat": "logs {{otelcol_exporter}}"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "expr": "sum by (otelcol_exporter) (increase(otelcol_exporter_send_failed_metric_points_total[$__range]))",
+          "range": true,
+          "instant": false,
+          "format": "time_series",
+          "legendFormat": "metrics {{otelcol_exporter}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 103,
+      "title": "Logs",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 70
+      },
+      "panels": [],
+      "description": ""
+    },
+    {
+      "id": 20,
+      "type": "logs",
+      "title": "All log lines",
+      "description": "Raw stream. Stream labels are detected_level, exporter, job, level, service_name; caller, trace and span ids live inside the JSON body.",
+      "datasource": {
+        "type": "loki",
+        "uid": "mph-loki"
+      },
+      "gridPos": {
+        "h": 14,
+        "w": 16,
+        "x": 0,
+        "y": 71
+      },
+      "options": {
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true,
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "dedupStrategy": "none",
+        "showCommonLabels": false
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "mph-loki"
+          },
+          "expr": "{service_name=~\".+\"}",
+          "queryType": "range",
+          "direction": "backward",
+          "maxLines": 500
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Log lines per interval by level",
+      "datasource": {
+        "type": "loki",
+        "uid": "mph-loki"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 71
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisPlacement": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "sum"
+          ],
+          "calculation": "lastNotNull"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "mph-loki"
+          },
+          "expr": "sum by (level) (count_over_time({service_name=~\".+\"}[$__rate_interval]))",
+          "queryType": "range",
+          "direction": "backward",
+          "legendFormat": "{{level}}"
+        }
+      ],
+      "description": "Lines arriving in each interval rather than a running total, so an idle period reads as zero instead of a plateau."
+    },
+    {
+      "id": 22,
+      "type": "table",
+      "title": "Warn and error log lines",
+      "description": "Matches the severity field inside each record, not the level stream label. A quiet run correctly shows no rows.",
+      "datasource": {
+        "type": "loki",
+        "uid": "mph-loki"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 78
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "mph-loki"
+          },
+          "expr": "{service_name=~\".+\"} | json | severity=~\"warn|error|fatal\"",
+          "queryType": "range",
+          "direction": "backward",
+          "maxLines": 200
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "type": "logs",
+      "title": "Log lines with trace correlation",
+      "description": "Caller attribution was removed from the logger, so this shows the message with its trace and span ids. The model text itself arrives under body=\"model output\" split by attributes.part (content or reasoning) with the payload in attributes.text.",
+      "datasource": {
+        "type": "loki",
+        "uid": "mph-loki"
+      },
+      "gridPos": {
+        "h": 14,
+        "w": 16,
+        "x": 0,
+        "y": 85
+      },
+      "options": {
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true,
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "dedupStrategy": "none",
+        "showCommonLabels": false
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "mph-loki"
+          },
+          "expr": "{service_name=~\".+\"} | json",
+          "queryType": "range",
+          "direction": "backward",
+          "maxLines": 200,
+          "line_format": "{{.body}}  |  {{.severity}}  trace_id={{.traceid}} span_id={{.spanid}}"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 104,
+      "title": "Traces",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 99
+      },
+      "panels": [],
+      "description": ""
+    },
+    {
+      "id": 30,
+      "type": "table",
+      "title": "Trace search (Tempo)",
+      "description": "Search results are a table, not a flame graph: Grafana's Traces panel discards TraceQL search responses because they carry no span ids, so a search rendered there always reports no data. Click a row to open the trace. Tempo keeps roughly an hour of blocks, so widen the retention before expecting older runs here.",
+      "datasource": {
+        "type": "tempo",
+        "uid": "mph-tempo"
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 100
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "tempo",
+            "uid": "mph-tempo"
+          },
+          "queryType": "traceql",
+          "limit": 20,
+          "query": "{ resource.service.name =~ \".*\" }",
+          "tableType": "traces"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "sortBy": [
+          {
+            "displayName": "Trace duration",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "id": 120,
+      "type": "table",
+      "title": "Per run totals",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mph-prometheus"
+      },
+      "description": "One row per run id: final tokens, iterations, tool calls and context used, each read as its last value over the selected range. Format=Table on each target makes the Prometheus datasource turn the mph_run_id label into a real column; Merge then joins the four queries on run id and evaluation time, and Organize names the columns and drops the time column.",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (mph_run_id) (last_over_time(mph_tokens_sum{tokens_type=\"total\"}[$__range]))",
+          "instant": true,
+          "range": false,
+          "format": "table",
+          "legendFormat": "Tokens"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (mph_run_id) (last_over_time(mph_iterations_total[$__range]))",
+          "instant": true,
+          "range": false,
+          "format": "table",
+          "legendFormat": "Iterations"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (mph_run_id) (last_over_time(mph_agent_tool_calls_total[$__range]))",
+          "instant": true,
+          "range": false,
+          "format": "table",
+          "legendFormat": "Tool calls"
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (mph_run_id) (last_over_time(mph_context_tokens[$__range])) / sum by (mph_run_id) (last_over_time(mph_context_window[$__range]))",
+          "instant": true,
+          "range": false,
+          "format": "table",
+          "legendFormat": "Context used"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "mph_run_id": 0,
+              "Value #A": 1,
+              "Value #B": 2,
+              "Value #C": 3,
+              "Value #D": 4
+            },
+            "renameByName": {
+              "mph_run_id": "Run id",
+              "Value #A": "Tokens",
+              "Value #B": "Iterations",
+              "Value #C": "Tool calls",
+              "Value #D": "Context used"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none",
+          "decimals": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Context used"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Run id",
+            "desc": false
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -24,6 +24,25 @@ var (
 // The harness creates this path and transfers the local directory there before the agent starts.
 const VMContentDir = "/home/ubuntu/content"
 
+// Agent defaults. Named so the help text in cmd/mph cannot drift from the values
+// applyDefaults actually installs.
+const (
+	DefaultMaxIterations  = 10
+	DefaultChatTimeout    = 300 * time.Second
+	DefaultTotalTimeout   = 30 * time.Minute
+	DefaultMaxOutputBytes = 64 * 1024
+)
+
+// Truncation defaults, in bytes. Each caps a different kind of payload on its way
+// into a log line or span attribute, where an unbounded value would blow up the
+// collector or bury the signal.
+const (
+	DefaultCommandOutputBytes = 600
+	DefaultLogContentBytes    = 8000
+	DefaultToolResultBytes    = 4000
+	DefaultNudgeBytes         = 2000
+)
+
 // coreUtils is an array of the core utils commands, for when the user config specifies the meta command `coreUtils`.
 var coreUtils = [...]string{
 	// File utilities
@@ -83,6 +102,16 @@ type AgentConfig struct {
 	MaxOutputBytes int      `yaml:"max_output_bytes"`
 }
 
+// TruncationConfig caps payload sizes on their way into telemetry. A value of 0
+// or less is resolved to the package default, so an omitted block behaves exactly
+// as before.
+type TruncationConfig struct {
+	CommandOutput int `yaml:"command_output"`
+	LogContent    int `yaml:"log_content"`
+	ToolResult    int `yaml:"tool_result"`
+	Nudge         int `yaml:"nudge"`
+}
+
 // Duration wraps time.Duration to support YAML string parsing like "60s", "10m".
 type Duration time.Duration
 
@@ -121,14 +150,15 @@ type OtelConfig struct {
 }
 
 type Config struct {
-	VM              VMConfig        `yaml:"vm"`
-	Model           string          `yaml:"model"`
-	Prompt          string          `yaml:"prompt"`
-	AllowedCommands map[string]bool `yaml:"-"`
-	ContentDir      string          `yaml:"content_dir"`
-	LLM             LLMConfig       `yaml:"llm"`
-	Agent           AgentConfig     `yaml:"agent"`
-	Otel            OtelConfig      `yaml:"otel"`
+	VM              VMConfig         `yaml:"vm"`
+	Model           string           `yaml:"model"`
+	Prompt          string           `yaml:"prompt"`
+	AllowedCommands map[string]bool  `yaml:"-"`
+	ContentDir      string           `yaml:"content_dir"`
+	LLM             LLMConfig        `yaml:"llm"`
+	Agent           AgentConfig      `yaml:"agent"`
+	Truncation      TruncationConfig `yaml:"truncation"`
+	Otel            OtelConfig       `yaml:"otel"`
 }
 
 func (c Config) Validate() error {
@@ -160,14 +190,15 @@ func (c Config) Validate() error {
 // It also lets us decode allowed_commands as []string then convert to
 // map[string]bool.
 type configRaw struct {
-	VM              VMConfig    `yaml:"vm"`
-	Model           string      `yaml:"model"`
-	Prompt          string      `yaml:"prompt"`
-	AllowedCommands []string    `yaml:"allowed_commands"`
-	ContentDir      string      `yaml:"content_dir"`
-	LLM             LLMConfig   `yaml:"llm"`
-	Agent           AgentConfig `yaml:"agent"`
-	Otel            OtelConfig  `yaml:"otel"`
+	VM              VMConfig         `yaml:"vm"`
+	Model           string           `yaml:"model"`
+	Prompt          string           `yaml:"prompt"`
+	AllowedCommands []string         `yaml:"allowed_commands"`
+	ContentDir      string           `yaml:"content_dir"`
+	LLM             LLMConfig        `yaml:"llm"`
+	Agent           AgentConfig      `yaml:"agent"`
+	Truncation      TruncationConfig `yaml:"truncation"`
+	Otel            OtelConfig       `yaml:"otel"`
 }
 
 func (c *Config) UnmarshalYAML(node *yaml.Node) error {
@@ -182,6 +213,7 @@ func (c *Config) UnmarshalYAML(node *yaml.Node) error {
 	c.ContentDir = strings.TrimSpace(raw.ContentDir)
 	c.LLM = raw.LLM
 	c.Agent = raw.Agent
+	c.Truncation = raw.Truncation
 	c.Otel = raw.Otel
 	return nil
 }
@@ -242,27 +274,37 @@ func Parse(data []byte) (Config, error) {
 		cfg.VM.Name = "mph-vm"
 	}
 
-	if cfg.Otel.Endpoint == "" {
-		cfg.Otel.Endpoint = "localhost:4317"
-	}
-	if cfg.Otel.ServiceName == "" {
-		cfg.Otel.ServiceName = "mph"
-	}
+	// Otel endpoint and service name are resolved later, in
+	// cmd/mph.resolveOtelConfig, which layers the environment over the YAML.
+	// Defaulting them here would make that resolution order impossible to read.
 
 	if cfg.LLM.ToolChoice == "" {
 		cfg.LLM.ToolChoice = "auto"
 	}
 	if cfg.Agent.MaxIterations == 0 {
-		cfg.Agent.MaxIterations = 10
+		cfg.Agent.MaxIterations = DefaultMaxIterations
 	}
 	if time.Duration(cfg.Agent.ChatTimeout) == 0 {
-		cfg.Agent.ChatTimeout = Duration(300 * time.Second)
+		cfg.Agent.ChatTimeout = Duration(DefaultChatTimeout)
 	}
 	if time.Duration(cfg.Agent.TotalTimeout) == 0 {
-		cfg.Agent.TotalTimeout = Duration(30 * time.Minute)
+		cfg.Agent.TotalTimeout = Duration(DefaultTotalTimeout)
 	}
 	if cfg.Agent.MaxOutputBytes == 0 {
-		cfg.Agent.MaxOutputBytes = 64 * 1024
+		cfg.Agent.MaxOutputBytes = DefaultMaxOutputBytes
+	}
+
+	if cfg.Truncation.CommandOutput <= 0 {
+		cfg.Truncation.CommandOutput = DefaultCommandOutputBytes
+	}
+	if cfg.Truncation.LogContent <= 0 {
+		cfg.Truncation.LogContent = DefaultLogContentBytes
+	}
+	if cfg.Truncation.ToolResult <= 0 {
+		cfg.Truncation.ToolResult = DefaultToolResultBytes
+	}
+	if cfg.Truncation.Nudge <= 0 {
+		cfg.Truncation.Nudge = DefaultNudgeBytes
 	}
 
 	if strings.TrimSpace(cfg.ContentDir) != "" {

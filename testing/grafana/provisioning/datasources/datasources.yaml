@@ -1,0 +1,27 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: mph-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+
+  - name: Tempo
+    uid: mph-tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: mph-loki
+    editable: true
+
+  - name: Loki
+    uid: mph-loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: true
