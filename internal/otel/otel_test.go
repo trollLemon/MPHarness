@@ -8,8 +8,8 @@ import (
 
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/log/global"
 	otellog "go.opentelemetry.io/otel/log"
+	"go.opentelemetry.io/otel/log/global"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
@@ -194,4 +194,57 @@ func TestSetupDefaults(t *testing.T) {
 		}
 		t.Logf("shutdown (expected without collector): %v", err)
 	}
+}
+
+func TestTraceAttrs(t *testing.T) {
+	origTP := otel.GetTracerProvider()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	otel.SetTracerProvider(tp)
+	t.Cleanup(func() {
+		otel.SetTracerProvider(origTP)
+		_ = tp.Shutdown(context.Background())
+	})
+
+	t.Run("no span in context yields no attributes", func(t *testing.T) {
+		if got := traceAttrs(context.Background()); got != nil {
+			t.Fatalf("traceAttrs(background) = %v, want nil", got)
+		}
+	})
+
+	t.Run("active span yields trace and span id attributes", func(t *testing.T) {
+		ctx, span := otel.Tracer("mph").Start(context.Background(), "test-span")
+		defer span.End()
+
+		got := traceAttrs(ctx)
+		if len(got) != 2 {
+			t.Fatalf("traceAttrs returned %d attributes, want 2: %v", len(got), got)
+		}
+
+		want := map[string]string{
+			"trace_id": span.SpanContext().TraceID().String(),
+			"span_id":  span.SpanContext().SpanID().String(),
+		}
+		for _, kv := range got {
+			key := string(kv.Key)
+			if want[key] == "" {
+				t.Errorf("unexpected attribute %q", key)
+				continue
+			}
+			if got := kv.Value.AsString(); got != want[key] {
+				t.Errorf("%s = %v, want %v", key, got, want[key])
+			}
+			delete(want, key)
+		}
+		for key := range want {
+			t.Errorf("missing attribute %q", key)
+		}
+	})
+
+	t.Run("ended span still yields attributes", func(t *testing.T) {
+		ctx, span := otel.Tracer("mph").Start(context.Background(), "ended-span")
+		span.End()
+		if got := traceAttrs(ctx); len(got) != 2 {
+			t.Fatalf("traceAttrs(ended span) = %v, want 2 attributes", got)
+		}
+	})
 }

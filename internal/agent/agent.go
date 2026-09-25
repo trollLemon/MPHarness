@@ -5,12 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
+	"uuid"
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	"github.com/rs/zerolog"
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
@@ -23,6 +22,7 @@ import (
 
 type Kronk interface {
 	Chat(ctx context.Context, req model.D) (model.ChatResponse, error)
+	ModelConfig() model.Config
 }
 
 type LLMConfig struct {
@@ -56,81 +56,6 @@ func NewAgent(log zerolog.Logger, krn Kronk, maxIterations int, chatTimeout time
 	}
 }
 
-var (
-	tokensHist            metric.Int64Histogram
-	tpsHist               metric.Float64Histogram
-	iterationsCounter     metric.Int64Counter
-	toolDurationHist      metric.Float64Histogram
-	toolCallsCounter      metric.Int64Counter
-	toolFailuresCounter   metric.Int64Counter
-	agentMetricsOnce      sync.Once
-)
-
-func getAgentTracer() trace.Tracer {
-	return otel.Tracer("mph")
-}
-
-func getAgentMeter() metric.Meter {
-	return otel.Meter("mph")
-}
-
-func initAgentMetrics() {
-	agentMetricsOnce.Do(func() {
-		meter := getAgentMeter()
-		var err error
-		tokensHist, err = meter.Int64Histogram("mph.tokens")
-		if err != nil {
-			tokensHist = nil
-		}
-		tpsHist, err = meter.Float64Histogram("mph.tokens_per_second")
-		if err != nil {
-			tpsHist = nil
-		}
-		iterationsCounter, err = meter.Int64Counter("mph.iterations")
-		if err != nil {
-			iterationsCounter = nil
-		}
-		toolDurationHist, err = meter.Float64Histogram("mph.agent.tool.duration")
-		if err != nil {
-			toolDurationHist = nil
-		}
-		toolCallsCounter, err = meter.Int64Counter("mph.agent.tool.calls")
-		if err != nil {
-			toolCallsCounter = nil
-		}
-		toolFailuresCounter, err = meter.Int64Counter("mph.agent.tool.failures")
-		if err != nil {
-			toolFailuresCounter = nil
-		}
-	})
-}
-
-func recordTokenUsage(ctx context.Context, span trace.Span, log zerolog.Logger, usage *model.Usage) {
-	if usage == nil {
-		return
-	}
-	mphotel.LogEvent(ctx, log, zerolog.InfoLevel, "token usage", map[string]any{
-		"prompt_tokens":     usage.PromptTokens,
-		"completion_tokens": usage.CompletionTokens,
-		"total_tokens":      usage.TotalTokens,
-		"tps":               usage.TokensPerSecond,
-	})
-	span.SetAttributes(
-		attribute.Int("mph.tokens.prompt", usage.PromptTokens),
-		attribute.Int("mph.tokens.completion", usage.CompletionTokens),
-		attribute.Int("mph.tokens.total", usage.TotalTokens),
-		attribute.Float64("mph.tokens_per_second", usage.TokensPerSecond),
-	)
-	if tokensHist != nil {
-		tokensHist.Record(ctx, int64(usage.PromptTokens), metric.WithAttributes(attribute.String("tokens.type", "prompt")))
-		tokensHist.Record(ctx, int64(usage.CompletionTokens), metric.WithAttributes(attribute.String("tokens.type", "completion")))
-		tokensHist.Record(ctx, int64(usage.TotalTokens), metric.WithAttributes(attribute.String("tokens.type", "total")))
-	}
-	if tpsHist != nil {
-		tpsHist.Record(ctx, usage.TokensPerSecond)
-	}
-}
-
 func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *multipass.Client) error {
 	ctx, cancel := context.WithTimeout(ctx, a.totalTimeout)
 	defer cancel()
@@ -140,132 +65,154 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *multipass.
 
 	conversation := buildInitialConversation(conf)
 
+	runUuid := uuid.NewV7()
+	runID := runUuid.String()
+	ctx = withRunID(ctx, runID)
+
 	var commandOutputs []string
 	var lastAssistantContent string
 
-	a.log.Info().Msg("Starting inference")
+	a.log.Info().Str("uuid", runID).Msg("Starting inference")
+	initAgentMetrics()
+	recordContextWindow(ctx, a.krn)
+
+	var lastContextTokens int64
 
 	for iter := 0; iter < a.maxIterations; iter++ {
-		iterCtx, iterSpan := getAgentTracer().Start(ctx, "mph.agent.iteration", trace.WithAttributes(attribute.Int("mph.iteration", iter+1)))
-		initAgentMetrics()
-		if iterationsCounter != nil {
-			iterationsCounter.Add(iterCtx, 1, metric.WithAttributes(attribute.Int("mph.iteration", iter+1)))
-		}
-
-		iterLog := a.log.With().Ctx(iterCtx).Logger()
-
-		iterLog.Debug().Int("iteration", iter+1).Msg("running inference")
-		topK := a.llmConfig.TopK
-		if topK == 0 {
-			topK = 1
-		}
-		req := model.D{
-			"messages":            conversation,
-			"temperature":         a.llmConfig.Temperature,
-			"top_p":               a.llmConfig.TopP,
-			"top_k":               topK,
-			"tools":               toolDocs,
-			"tool_choice":         a.llmConfig.ToolChoice,
-			"parallel_tool_calls": false,
-		}
-
-		resp, err := a.callChat(iterCtx, req, iter)
+		res, err := a.runIteration(ctx, iter, conversation, toolDocs, commandOutputs, cli, conf, lastContextTokens)
 		if err != nil {
-			iterSpan.RecordError(err)
-			iterSpan.SetStatus(codes.Error, err.Error())
-			iterSpan.End()
 			return err
 		}
-
-		recordTokenUsage(iterCtx, iterSpan, iterLog, resp.Usage)
-
-		msg, finishReason, shouldBreak := a.extractAssistantMessage(resp)
-		iterSpan.SetAttributes(attribute.String("mph.finish_reason", finishReason))
-		if shouldBreak {
-			iterSpan.End()
+		conversation, commandOutputs, lastContextTokens = res.conversation, res.commandOutputs, res.contextTokens
+		if res.content != "" {
+			lastAssistantContent = res.content
+		}
+		if res.done {
 			break
 		}
-		if msg.Reasoning != "" {
-			mphotel.LogEvent(iterCtx, iterLog, zerolog.InfoLevel, "agent reasoning", map[string]any{
-				"iteration": iter + 1,
-				"reasoning": truncate(msg.Reasoning, 8000),
-			})
-		}
-		if msg.Content != "" {
-			mphotel.LogEvent(iterCtx, iterLog, zerolog.InfoLevel, "agent output", map[string]any{
-				"iteration": iter + 1,
-				"content":   truncate(msg.Content, 8000),
-			})
-			lastAssistantContent = msg.Content
-		} else if finishReason != model.FinishReasonTool && len(msg.ToolCalls) == 0 {
-			mphotel.LogEvent(iterCtx, iterLog, zerolog.DebugLevel, "empty content", map[string]any{
-				"finish_reason": finishReason,
-			})
-		}
-
-		toolCalls := msg.ToolCalls
-		for _, tc := range toolCalls {
-			argsJSON, _ := json.Marshal(tc.Function.Arguments)
-			iterSpan.AddEvent("mph.agent.tool_call", trace.WithAttributes(
-				attribute.String("mph.tool.name", tc.Function.Name),
-				attribute.String("mph.tool.id", tc.ID),
-				attribute.String("mph.tool.arguments", truncate(string(argsJSON), 4000)),
-			))
-		}
-
-		if len(toolCalls) == 0 && finishReason == model.FinishReasonLength {
-			mphotel.LogEvent(iterCtx, iterLog, zerolog.WarnLevel, "hit length limit without tool calls, injecting nudge and continuing", map[string]any{
-				"iteration":     iter + 1,
-				"finish_reason": finishReason,
-			})
-			iterSpan.AddEvent("mph.agent.length_nudge", trace.WithAttributes(attribute.Int("mph.iteration", iter+1)))
-			if msg.Reasoning != "" || msg.Content != "" {
-				nudgedAssistant := model.D{"role": "assistant"}
-				if msg.Content != "" {
-					nudgedAssistant["content"] = truncate(msg.Content, 2000)
-				}
-				if msg.Reasoning != "" {
-					nudgedAssistant["reasoning_content"] = truncate(msg.Reasoning, 2000)
-				}
-				conversation = appendToConversation(conversation, nudgedAssistant)
-			}
-			conversation = appendToConversation(conversation, model.D{
-				"role":    "user",
-				"content": "Your previous response hit the token limit without making a tool call. Please be concise and try again and run a tool call if necessary",
-			})
-			iterSpan.End()
-			continue
-		}
-		if a.shouldTerminateWithoutToolCalls(toolCalls, finishReason, iter) {
-			iterSpan.End()
-			break
-		}
-
-		toolCallDocs := a.buildToolCallDocsWithContext(iterCtx, toolCalls, iter)
-		assistantMsg := buildAssistantMessage(msg, toolCallDocs)
-		conversation = appendToConversation(conversation, assistantMsg)
-
-		toolResponses, newOutputs := a.executeToolCalls(iterCtx, cli, conf, toolCalls)
-		commandOutputs = append(commandOutputs, newOutputs...)
-		conversation = appendToConversation(conversation, toolResponses...)
-
-		if len(commandOutputs) > 0 {
-			iterLog.Debug().Int("command_outputs", len(commandOutputs)).Msg("collected outputs so far")
-		}
-		iterSpan.End()
 	}
 
 	if len(commandOutputs) > 0 {
 		joined := strings.Join(commandOutputs, "\n---\n")
-		a.log.Info().Str("command_output", truncate(joined, 600)).Msg("final command output")
+		a.log.Info().Str("command_output", truncate(joined, conf.Truncation.CommandOutput)).Msg("final command output")
 		fmt.Println(joined)
 	} else if lastAssistantContent != "" {
-		a.log.Info().Str("final_output", truncate(lastAssistantContent, 8000)).Msg("agent final answer (no command output)")
+		a.log.Info().Str("final_output", truncate(lastAssistantContent, conf.Truncation.LogContent)).Msg("agent final answer (no command output)")
 	} else {
 		a.log.Info().Msg("agent completed with no command output or final answer")
 	}
 
 	return nil
+}
+
+// iterationResult is what one inference round hands back to the run loop.
+type iterationResult struct {
+	conversation   []model.D
+	commandOutputs []string
+	contextTokens  int64
+	content        string
+	done           bool
+}
+
+// runIteration runs one inference round.
+func (a *Agent) runIteration(
+	ctx context.Context, iter int, conversation, toolDocs []model.D,
+	commandOutputs []string, cli *multipass.Client, conf config.Config,
+	lastContextTokens int64,
+) (res *iterationResult, err error) {
+	res = &iterationResult{
+		conversation:   conversation,
+		commandOutputs: commandOutputs,
+		contextTokens:  lastContextTokens,
+	}
+
+	iterCtx, iterSpan := getAgentTracer().Start(ctx, "mph.agent.iteration",
+		trace.WithAttributes(runSpanAttrs(ctx, attribute.Int("mph.iteration", iter+1))...))
+	if iterationsCounter != nil {
+		iterationsCounter.Add(iterCtx, 1, runAttrs(iterCtx), metric.WithAttributes(attribute.Int("mph.iteration", iter+1)))
+	}
+
+	iterLog := a.log.With().Ctx(iterCtx).Logger()
+
+	iterLog.Debug().Int("iteration", iter+1).Msg("running inference")
+
+	resp, err := a.callChat(iterCtx, buildChatRequest(conversation, toolDocs, a.llmConfig), iter)
+	if err != nil {
+		iterSpan.RecordError(err)
+		iterSpan.SetStatus(codes.Error, err.Error())
+		iterSpan.End()
+		return res, err
+	}
+
+	lastContextTokens = recordTokenUsage(iterCtx, iterSpan, iterLog, lastContextTokens, resp.Usage)
+	res.contextTokens = lastContextTokens
+
+	msg, finishReason, shouldBreak := a.extractAssistantMessage(resp)
+	iterSpan.SetAttributes(attribute.String("mph.finish_reason", finishReason))
+	if shouldBreak {
+		iterSpan.End()
+		res.done = true
+		return res, nil
+	}
+
+	res.content = logModelOutput(iterCtx, iterLog, iter, msg, conf.Truncation.LogContent)
+	if res.content == "" && finishReason != model.FinishReasonTool && len(msg.ToolCalls) == 0 {
+		mphotel.LogEvent(iterCtx, iterLog, zerolog.DebugLevel, "empty content", map[string]any{
+			"finish_reason": finishReason,
+		})
+	}
+
+	toolCalls := msg.ToolCalls
+	addToolCallEvents(iterSpan, toolCalls, conf.Truncation.ToolResult)
+
+	if len(toolCalls) == 0 && finishReason == model.FinishReasonLength {
+		mphotel.LogEvent(iterCtx, iterLog, zerolog.WarnLevel, "hit length limit without tool calls, injecting nudge and continuing", map[string]any{
+			"iteration":     iter + 1,
+			"finish_reason": finishReason,
+		})
+		iterSpan.AddEvent("mph.agent.length_nudge", trace.WithAttributes(attribute.Int("mph.iteration", iter+1)))
+		res.conversation = appendToConversation(conversation, buildLengthNudgeMessages(msg, conf.Truncation.Nudge)...)
+		iterSpan.End()
+		return res, nil
+	}
+
+	if a.shouldTerminateWithoutToolCalls(toolCalls, finishReason, iter) {
+		iterSpan.End()
+		res.done = true
+		return res, nil
+	}
+
+	toolCallDocs := a.buildToolCallDocsWithContext(iterCtx, toolCalls, iter)
+	res.conversation = appendToConversation(conversation, buildAssistantMessage(msg, toolCallDocs))
+
+	toolResponses, newOutputs := a.executeToolCalls(iterCtx, cli, conf, toolCalls)
+	res.commandOutputs = append(res.commandOutputs, newOutputs...)
+	res.conversation = appendToConversation(res.conversation, toolResponses...)
+
+	if len(res.commandOutputs) > 0 {
+		iterLog.Debug().Int("command_outputs", len(res.commandOutputs)).Msg("collected outputs so far")
+	}
+	iterSpan.End()
+	return res, nil
+}
+
+// logModelOutput logs the reasoning and content of a model reply and returns
+// the content, which the run reports as its final answer when nothing ran.
+func logModelOutput(ctx context.Context, log zerolog.Logger, iter int, msg *model.ResponseMessage, maxContent int) string {
+	if msg.Reasoning != "" {
+		mphotel.LogEvent(ctx, log, zerolog.InfoLevel, "agent reasoning", map[string]any{
+			"iteration": iter + 1,
+			"reasoning": truncate(msg.Reasoning, maxContent),
+		})
+	}
+	if msg.Content == "" {
+		return ""
+	}
+	mphotel.LogEvent(ctx, log, zerolog.InfoLevel, "agent output", map[string]any{
+		"iteration": iter + 1,
+		"content":   truncate(msg.Content, maxContent),
+	})
+	return msg.Content
 }
 
 func buildInitialConversation(conf config.Config) []model.D {
@@ -346,42 +293,9 @@ func (a *Agent) buildToolCallDocsWithContext(ctx context.Context, toolCalls []mo
 	return docs
 }
 
-func buildAssistantMessage(msg *model.ResponseMessage, toolCallDocs []model.D) model.D {
-	assistantMsg := model.D{
-		"role":       "assistant",
-		"tool_calls": toolCallDocs,
-	}
-	if msg.Content != "" {
-		assistantMsg["content"] = msg.Content
-	}
-	if msg.Reasoning != "" {
-		assistantMsg["reasoning_content"] = msg.Reasoning
-	}
-	return assistantMsg
-}
-
-func appendToConversation(conversation []model.D, msgs ...model.D) []model.D {
-	return append(conversation, msgs...)
-}
-
-func truncateOutput(s string, limit int) string {
-	if limit <= 0 {
-		return s
-	}
-	if len(s) <= limit {
-		return s
-	}
-	return s[:limit] + fmt.Sprintf("\n…(output truncated, %d bytes limit, %d bytes total)", limit, len(s))
-}
-
 func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg config.Config, toolCalls []model.ResponseToolCall) ([]model.D, []string) {
 	var toolResponses []model.D
 	var commandOutputs []string
-
-	limit := cfg.Agent.MaxOutputBytes
-	if limit == 0 {
-		limit = 64 * 1024
-	}
 
 	span := trace.SpanFromContext(ctx)
 	for _, tc := range toolCalls {
@@ -400,29 +314,28 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg
 				"error": err,
 			})
 			content = buildToolErrorContent(err)
-			initAgentMetrics()
 			if toolFailuresCounter != nil {
-				toolFailuresCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("mph.tool.name", tc.Function.Name)))
+				toolFailuresCounter.Add(ctx, 1, runAttrs(ctx), metric.WithAttributes(attribute.String("mph.tool.name", tc.Function.Name)))
 			}
 			span.AddEvent("mph.agent.tool_result", trace.WithAttributes(
 				attribute.String("mph.tool.name", tc.Function.Name),
 				attribute.String("mph.tool.id", tc.ID),
 				attribute.String("mph.tool.status", status),
-				attribute.String("mph.tool.result", truncate(err.Error(), 4000)),
+				attribute.String("mph.tool.result", truncate(err.Error(), cfg.Truncation.ToolResult)),
 				attribute.Int64("mph.tool.duration_ms", durationMs),
 			))
 		} else {
-			result = truncateOutput(result, limit)
+			result = truncate(result, cfg.Agent.MaxOutputBytes)
 			status = "SUCCESS"
 			mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "tool succeeded", map[string]any{
 				"tool":   tc.Function.Name,
 				"id":     tc.ID,
-				"result": truncate(result, 4000),
+				"result": truncate(result, cfg.Truncation.ToolResult),
 			})
 			if tc.Function.Name == "multipass_exec" {
 				commandOutputs = append(commandOutputs, result)
 				mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "command output", map[string]any{
-					"command_output": truncate(result, 600),
+					"command_output": truncate(result, cfg.Truncation.CommandOutput),
 				})
 			}
 			content = buildToolSuccessContent(tc.Function.Name, result)
@@ -430,89 +343,31 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg
 				attribute.String("mph.tool.name", tc.Function.Name),
 				attribute.String("mph.tool.id", tc.ID),
 				attribute.String("mph.tool.status", status),
-				attribute.String("mph.tool.result", truncate(result, 4000)),
+				attribute.String("mph.tool.result", truncate(result, cfg.Truncation.ToolResult)),
 				attribute.Int64("mph.tool.duration_ms", durationMs),
 			))
 		}
-		initAgentMetrics()
 		if toolCallsCounter != nil {
-			toolCallsCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("mph.tool.name", tc.Function.Name)))
+			toolCallsCounter.Add(ctx, 1, runAttrs(ctx), metric.WithAttributes(attribute.String("mph.tool.name", tc.Function.Name)))
 		}
 		if toolDurationHist != nil {
-			toolDurationHist.Record(ctx, durationSec, metric.WithAttributes(
+			toolDurationHist.Record(ctx, durationSec, runAttrs(ctx), metric.WithAttributes(
 				attribute.String("mph.tool.name", tc.Function.Name),
 				attribute.String("mph.tool.status", status),
 			))
 		}
 
-		toolResponses = append(toolResponses, model.D{
-			"role":         "tool",
-			"tool_call_id": tc.ID,
-			"name":         tc.Function.Name,
-			"content":      content,
-		})
+		toolResponses = append(toolResponses, buildToolResponseMessage(tc, content))
 	}
 
 	return toolResponses, commandOutputs
 }
 
-func buildToolErrorContent(err error) string {
-	b, _ := json.Marshal(map[string]any{
-		"status": "FAILED",
-		"data":   map[string]any{"error": err.Error()},
-	})
-	return string(b)
-}
-
-func buildToolSuccessContent(toolName, result string) string {
-	var payload map[string]any
-	if toolName == "multipass_exec" {
-		payload = map[string]any{
-			"status": "SUCCESS",
-			"data":   map[string]any{"output": result},
-		}
-	} else {
-		payload = map[string]any{
-			"status": "SUCCESS",
-			"data":   map[string]any{"result": result},
-		}
-	}
-	b, _ := json.Marshal(payload)
-	return string(b)
-}
-
-func buildToolDocuments() []model.D {
-	specs := Specs()
-	docs := make([]model.D, 0, len(specs))
-	for _, s := range specs {
-		docs = append(docs, model.D{
-			"type": "function",
-			"function": model.D{
-				"name":        s.Name,
-				"description": s.Description,
-				"parameters":  s.Parameters,
-			},
-		})
-	}
-	return docs
-}
-
-func buildUserPrompt(conf config.Config) string {
-	var b strings.Builder
-	if len(conf.AllowedCommands) > 0 {
-		fmt.Fprintf(&b, "Allowed commands: %s\n\n", strings.Join(conf.AllowedCommandsList(), ", "))
-	} else {
-		b.WriteString("Allowed commands: (all)\n\n")
-	}
-	b.WriteString("Task:\n")
-	b.WriteString(strings.TrimSpace(conf.Prompt))
-	b.WriteString("\n")
-	return b.String()
-}
-
+// truncate caps s at n bytes for logs and span attributes. A non-positive n
+// means no limit, which is how a caller opts out of capping entirely.
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	if n <= 0 || len(s) <= n {
 		return s
 	}
-	return s[:n] + "…(truncated)"
+	return fmt.Sprintf("%s…(truncated, %d of %d bytes)", s[:n], n, len(s))
 }

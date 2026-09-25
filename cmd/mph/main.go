@@ -55,13 +55,19 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "    tool_choice: auto   # auto|required|none\n")
 	_, _ = fmt.Fprintf(w, "    context_window: 8192 # 0 = auto-tune\n")
 	_, _ = fmt.Fprintf(w, "  agent:                # optional, agent loop params\n")
-	_, _ = fmt.Fprintf(w, "    max_iterations: 10\n")
-	_, _ = fmt.Fprintf(w, "    chat_timeout: 300s\n")
-	_, _ = fmt.Fprintf(w, "    total_timeout: 30m\n")
+	_, _ = fmt.Fprintf(w, "    max_iterations: %d\n", config.DefaultMaxIterations)
+	_, _ = fmt.Fprintf(w, "    chat_timeout: %s\n", config.DefaultChatTimeout)
+	_, _ = fmt.Fprintf(w, "    total_timeout: %s\n", config.DefaultTotalTimeout)
+	_, _ = fmt.Fprintf(w, "    max_output_bytes: %d\n", config.DefaultMaxOutputBytes)
+	_, _ = fmt.Fprintf(w, "  truncation:           # optional, telemetry payload caps in bytes\n")
+	_, _ = fmt.Fprintf(w, "    command_output: %d\n", config.DefaultCommandOutputBytes)
+	_, _ = fmt.Fprintf(w, "    log_content: %d\n", config.DefaultLogContentBytes)
+	_, _ = fmt.Fprintf(w, "    tool_result: %d\n", config.DefaultToolResultBytes)
+	_, _ = fmt.Fprintf(w, "    nudge: %d\n", config.DefaultNudgeBytes)
 	_, _ = fmt.Fprintf(w, "  otel:                 # optional, OpenTelemetry\n")
 	_, _ = fmt.Fprintf(w, "    enabled: false\n")
-	_, _ = fmt.Fprintf(w, "    endpoint: localhost:4317\n")
-	_, _ = fmt.Fprintf(w, "    service_name: mph\n")
+	_, _ = fmt.Fprintf(w, "    endpoint: %s\n", mphotel.DefaultEndpoint)
+	_, _ = fmt.Fprintf(w, "    service_name: %s\n", mphotel.DefaultServiceName)
 	_, _ = fmt.Fprintf(w, "    resource_attributes:\n")
 	_, _ = fmt.Fprintf(w, "      environment: dev\n\n")
 	_, _ = fmt.Fprintf(w, "Example:\n")
@@ -130,10 +136,12 @@ func run() error {
 			return fmt.Errorf("otel setup: %w", err)
 		}
 		defer func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			if err := shutdown(ctx); err != nil {
-				log.Warn().Err(err).Msg("otel shutdown failed")
+				log.Warn().Err(err).Msg("otel flush/shutdown failed (some telemetry may be lost)")
+			} else {
+				log.Debug().Msg("otel flush/shutdown complete")
 			}
 		}()
 		log.Logger = log.Logger.Hook(mphotel.NewHook("mph"))
@@ -224,7 +232,7 @@ func resolveOtelConfig(yamlCfg config.OtelConfig, flagEnabled bool) mphotel.Conf
 		endpoint = v
 	}
 	if endpoint == "" {
-		endpoint = "localhost:4317"
+		endpoint = mphotel.DefaultEndpoint
 	}
 
 	serviceName := yamlCfg.ServiceName
@@ -232,7 +240,7 @@ func resolveOtelConfig(yamlCfg config.OtelConfig, flagEnabled bool) mphotel.Conf
 		serviceName = v
 	}
 	if serviceName == "" {
-		serviceName = "mph"
+		serviceName = mphotel.DefaultServiceName
 	}
 
 	return mphotel.Config{

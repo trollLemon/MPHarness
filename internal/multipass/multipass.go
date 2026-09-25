@@ -127,7 +127,9 @@ func (c *Client) Launch(ctx context.Context, vm config.VMConfig) error {
 }
 
 // Exec runs a command inside the multipass VM and returns the combined stdout and stderr.
-func (c *Client) Exec(ctx context.Context, name string, command string) (string, error) {
+// Exec runs a command in the VM. maxAttrBytes caps the command echoed into the
+// multipass.exec span; a non-positive value means no cap.
+func (c *Client) Exec(ctx context.Context, name string, command string, maxAttrBytes int) (string, error) {
 	if strings.TrimSpace(name) == "" {
 		return "", fmt.Errorf("instance name is required")
 	}
@@ -138,7 +140,7 @@ func (c *Client) Exec(ctx context.Context, name string, command string) (string,
 	ctx, span := getTracer().Start(ctx, "multipass.exec", trace.WithAttributes(
 		attribute.String("multipass.command", "exec"),
 		attribute.String("mph.vm.name", name),
-		attribute.String("mph.command", truncate(command, 4000)),
+		attribute.String("mph.command", truncate(command, maxAttrBytes)),
 	))
 	defer span.End()
 

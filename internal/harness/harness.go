@@ -53,7 +53,7 @@ func Start(ctx context.Context, agt *agent.Agent, client *multipass.Client, cfg 
 	ctx, span := tracer.Start(ctx, "mph.run", trace.WithAttributes(
 		attribute.String("mph.vm.name", cfg.VM.Name),
 		attribute.String("mph.model", cfg.Model),
-		attribute.String("mph.prompt", truncate(cfg.Prompt, 8000)),
+		attribute.String("mph.prompt", truncate(cfg.Prompt, cfg.Truncation.LogContent)),
 		attribute.Bool("mph.keep", keep),
 		attribute.Bool("mph.ignore_existing", ignoreExisting),
 		attribute.StringSlice("mph.allowed_commands", cfg.AllowedCommandsList()),
@@ -128,7 +128,7 @@ func Start(ctx context.Context, agt *agent.Agent, client *multipass.Client, cfg 
 			attribute.String("mph.content.source", cfg.ContentDir),
 			attribute.String("mph.content.destination", config.VMContentDir),
 		))
-		if _, err := client.Exec(cCtx, cfg.VM.Name, fmt.Sprintf("mkdir -p %q", config.VMContentDir)); err != nil {
+		if _, err := client.Exec(cCtx, cfg.VM.Name, fmt.Sprintf("mkdir -p %q", config.VMContentDir), cfg.Truncation.ToolResult); err != nil {
 			cSpan.RecordError(err)
 			cSpan.SetStatus(codes.Error, err.Error())
 			cSpan.End()

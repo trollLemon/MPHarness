@@ -225,11 +225,9 @@ func TestParseOtelDefaults(t *testing.T) {
 		wantAttrs   map[string]string
 	}{
 		{
-			name:        "otel absent defaults",
+			name:        "otel absent stays empty for later resolution",
 			yaml:        "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\n",
 			wantEnabled: false,
-			wantEP:      "localhost:4317",
-			wantService: "mph",
 		},
 		{
 			name:        "otel enabled true preserves",
@@ -239,18 +237,14 @@ func TestParseOtelDefaults(t *testing.T) {
 			wantService: "custom",
 		},
 		{
-			name:        "otel endpoint default when empty",
+			name:        "otel enabled with no endpoint stays empty",
 			yaml:        "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\notel:\n  enabled: true\n",
 			wantEnabled: true,
-			wantEP:      "localhost:4317",
-			wantService: "mph",
 		},
 		{
 			name:        "otel resource_attributes",
 			yaml:        "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\notel:\n  resource_attributes:\n    environment: prod\n    region: eu\n",
 			wantEnabled: false,
-			wantEP:      "localhost:4317",
-			wantService: "mph",
 			wantAttrs:   map[string]string{"environment": "prod", "region": "eu"},
 		},
 	}
@@ -271,6 +265,63 @@ func TestParseOtelDefaults(t *testing.T) {
 			}
 			if !reflect.DeepEqual(cfg.Otel.ResourceAttributes, tt.wantAttrs) {
 				t.Fatalf("attrs %v want %v", cfg.Otel.ResourceAttributes, tt.wantAttrs)
+			}
+		})
+	}
+}
+
+func TestParseTruncation(t *testing.T) {
+	base := "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\n"
+
+	tests := []struct {
+		name string
+		yaml string
+		want TruncationConfig
+	}{
+		{
+			name: "absent block uses defaults",
+			yaml: base,
+			want: TruncationConfig{
+				CommandOutput: DefaultCommandOutputBytes,
+				LogContent:    DefaultLogContentBytes,
+				ToolResult:    DefaultToolResultBytes,
+				Nudge:         DefaultNudgeBytes,
+			},
+		},
+		{
+			name: "explicit values win",
+			yaml: base + "truncation:\n  command_output: 1\n  log_content: 2\n  tool_result: 3\n  nudge: 4\n",
+			want: TruncationConfig{CommandOutput: 1, LogContent: 2, ToolResult: 3, Nudge: 4},
+		},
+		{
+			name: "partial block keeps defaults for the rest",
+			yaml: base + "truncation:\n  log_content: 99\n",
+			want: TruncationConfig{
+				CommandOutput: DefaultCommandOutputBytes,
+				LogContent:    99,
+				ToolResult:    DefaultToolResultBytes,
+				Nudge:         DefaultNudgeBytes,
+			},
+		},
+		{
+			name: "negative falls back to default",
+			yaml: base + "truncation:\n  tool_result: -1\n",
+			want: TruncationConfig{
+				CommandOutput: DefaultCommandOutputBytes,
+				LogContent:    DefaultLogContentBytes,
+				ToolResult:    DefaultToolResultBytes,
+				Nudge:         DefaultNudgeBytes,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(tt.yaml))
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if cfg.Truncation != tt.want {
+				t.Errorf("Truncation = %+v, want %+v", cfg.Truncation, tt.want)
 			}
 		})
 	}
