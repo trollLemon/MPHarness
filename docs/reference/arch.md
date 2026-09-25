@@ -67,7 +67,9 @@ Tool dispatch (`Call`, `callExec`, `callInfo`) lives in `internal/agent/spec.go`
    - Repeats, up to `max_iterations` times: send messages + tools to the LLM, extract the assistant message, and either
      - **terminate** when the model replies with no tool calls (its final summary), or
      - **execute** the tool calls, append their results to the conversation, and continue.
-   - One tool call per turn: the request uses `parallel_tool_calls: false`.
+   - Independent tool calls are batched into one turn (`parallel_tool_calls: true`, and the "Batching Work" section of the system prompt); dependent ones are chained with `&&` inside a single `multipass_exec`. Note that kronk parses `parallel_tool_calls` but does not forward it to the inference backend, so the prompt is what actually drives batching — the flag is kept accurate so the request does not contradict the prompt.
+   - `max_tokens` caps one model turn (`llm.max_output_tokens`, default 2048) so a runaway completion cannot decode until it exhausts the context window and trip the length nudge.
+   - Tool results handed to the model are capped at `agent.max_output_bytes`, or, when that is 0, at roughly 1/8 of the context window the model actually loaded (clamped to 2 KiB–64 KiB). The cap is fixed when the result is created and keeps both head and tail. It is never revised afterwards: kronk's incremental cache only reuses a complete token prefix, so rewriting an earlier message forces a full re-prefill.
    - Injection note: if the model hits the length limit with no tool call, a "be concise" nudge is appended and the loop continues.
 
 7. **Tool dispatch.** `Call` in the `agent` package maps tool names to multipass operations. `multipass_exec` first passes the command through `validation.ValidateShellCommand`, so a command outside the allowlist never reaches Multipass. Each `multipass.*` call creates a `multipass.exec`/`info`/`launch`/`delete` child span and `Call` emits `mph.agent.tool_call`/`tool_result` events on the active iteration span.

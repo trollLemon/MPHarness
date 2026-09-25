@@ -23,7 +23,16 @@ You are an autonomous execution agent responsible for managing a Multipass Virtu
 ### Available Tools
 - ` + "`" + `multipass_exec` + "`" + `: Run a command inside the VM. Provide the full command string in the ` + "`" + `command` + "`" + ` field (e.g. ` + "`" + `df -h` + "`" + `, ` + "`" + `apt update && apt install -y curl` + "`" + `, ` + "`" + `ps aux | grep nginx` + "`" + `).
 - ` + "`" + `multipass_info` + "`" + `: Fetch current VM information as the raw JSON payload from ` + "`" + `multipass info --format json` + "`" + ` (zone, state, release, image_release, cpu_count, load, memory and disk usage, ipv4, mounts). Takes no arguments. Use this to check resource headroom before running heavy commands.
-	
+
+### Batching Work
+You may issue several tool calls in a single turn when none of them depends on another. The calls still run one after another and you see all of their results together in your next turn, so batching independent work costs one round trip instead of one per call.
+
+When a command does depend on an earlier one, do not batch it as a separate call. Put both in one ` + "`" + `multipass_exec` + "`" + ` call chained with ` + "`" + `&&` + "`" + ` so the second sees the first's result, for example ` + "`" + `mkdir -p /tmp/work && cd /tmp/work && make` + "`" + `.
+
+Check the ` + "`" + `status` + "`" + ` field of every result in a batch, not just the first.
+
+If a command's output is truncated, re-run it (if that is possible) piped into a file, then read slices of that file to get the output you need.
+
 ### Denial & Tool Failure Guardrails
 No Security Workarounds: If a tool call fails because it was denied, restricted by policy, or blocked due to insufficient permissions, STOP IMMEDIATELY. Do not attempt workarounds, alternative unauthorized commands, or privilege escalation tactics to bypass the restriction. The user is aware of this restriction and the policy of failing fast rather than working around the issue.
 
@@ -32,7 +41,7 @@ Non-Recoverable Denial: If a tool or command returns a permission or authorizati
 ### Execution Workflow & Reasoning
 Reasoning Style: Maintain concise, direct reasoning ("medium depth"). Do not over-analyze simple actions.
 
-Step-by-Step Command Execution: Execute commands via ` + "`" + `multipass_exec` + "`" + ` sequentially. Inspect ` + "`" + `stdout` + "`" + `/` + "`" + `stderr` + "`" + ` from the JSON response (` + "`" + `status: SUCCESS` + "`" + ` or ` + "`" + `status: FAILED` + "`" + `) before proceeding.
+Step-by-Step Command Execution: Execute commands via ` + "`" + `multipass_exec` + "`" + `, batching independent ones as described above. Inspect ` + "`" + `stdout` + "`" + `/` + "`" + `stderr` + "`" + ` from every JSON response in the turn (` + "`" + `status: SUCCESS` + "`" + ` or ` + "`" + `status: FAILED` + "`" + `) before deciding what to do next.
 
 Mandatory Completion Summary: You MUST ALWAYS finish with a summary. Once ALL tasks are done (or you halt on a non-recoverable failure), send one final message that contains NO tool calls and consists only of a concise summary. The execution loop ends when you produce this final tool-call-free message. Only then is the summary surfaced to the user, so never stop after a tool call without following it with the summary. The summary must detail:
 
@@ -191,7 +200,12 @@ func buildUserPrompt(conf config.Config) string {
 	return b.String()
 }
 
-func buildAssistantMessage(msg *model.ResponseMessage, toolCallDocs []model.D) model.D {
+// buildAssistantMessage replays an assistant turn into the conversation. The
+// sendReasoning flag is variadic and defaults to true so existing callers keep
+// the model's reasoning in history; callers that pass false drop
+// reasoning_content, which on a reasoning model is often the largest single
+// contributor to context growth and is replayed on every later iteration.
+func buildAssistantMessage(msg *model.ResponseMessage, toolCallDocs []model.D, sendReasoning ...bool) model.D {
 	assistantMsg := model.D{
 		"role":       "assistant",
 		"tool_calls": toolCallDocs,
@@ -199,7 +213,7 @@ func buildAssistantMessage(msg *model.ResponseMessage, toolCallDocs []model.D) m
 	if msg.Content != "" {
 		assistantMsg["content"] = msg.Content
 	}
-	if msg.Reasoning != "" {
+	if msg.Reasoning != "" && (len(sendReasoning) == 0 || sendReasoning[0]) {
 		assistantMsg["reasoning_content"] = msg.Reasoning
 	}
 	return assistantMsg
@@ -239,17 +253,34 @@ func buildLengthNudgeMessages(msg *model.ResponseMessage, maxContent int) []mode
 }
 
 func buildChatRequest(conversation, toolDocs []model.D, llmConfig LLMConfig) model.D {
-	topK := llmConfig.TopK
-	if topK == 0 {
-		topK = 1
+	maxOutputTokens := llmConfig.MaxOutputTokens
+	if maxOutputTokens <= 0 {
+		maxOutputTokens = DefaultMaxOutputTokens
 	}
-	return model.D{
-		"messages":            conversation,
-		"temperature":         llmConfig.Temperature,
-		"top_p":               llmConfig.TopP,
-		"top_k":               topK,
-		"tools":               toolDocs,
-		"tool_choice":         llmConfig.ToolChoice,
-		"parallel_tool_calls": false,
+	req := model.D{
+		"messages":    conversation,
+		"temperature": llmConfig.Temperature,
+		"top_p":       llmConfig.TopP,
+		"tools":       toolDocs,
+		"tool_choice": llmConfig.ToolChoice,
+		// The chat path reads max_tokens (not the Responses-API max_output_tokens)
+		// and applies it to n_predict, clamped to what is left of the window.
+		"max_tokens": maxOutputTokens,
 	}
+
+	// top_k defaults to greedy only when the caller also asked for greedy
+	// sampling. Defaulting it unconditionally would silently override a
+	// non-zero temperature, which is the opposite of what that setting means.
+	if llmConfig.TopK > 0 {
+		req["top_k"] = llmConfig.TopK
+	} else if llmConfig.Temperature == 0 {
+		req["top_k"] = 1
+	}
+
+	// kronk parses this but never forwards it to the inference backend, so it
+	// does not constrain generation. It is kept accurate so the request matches
+	// the batching the system prompt asks for, and so it stays correct if kronk
+	// ever wires it through.
+	req["parallel_tool_calls"] = true
+	return req
 }

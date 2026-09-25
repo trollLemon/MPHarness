@@ -18,6 +18,7 @@ llm:
   top_p: 0.95
   top_k: 40
   tool_choice: auto   # auto | required | none
+  max_output_tokens: 2048
   context_window: 0   # 0 = auto-tune
 ```
 
@@ -25,8 +26,9 @@ llm:
 |-----|----------------------|---------|--------|
 | `temperature` | `0.0` | `0.2` | Randomness of sampling. Lower is more deterministic. |
 | `top_p` | `0.0` | `0.95` | Nucleus sampling threshold (`0` = disabled). |
-| `top_k` | `0` | `40` | Only sample from top-k tokens (`0` = treated as `1` at runtime). |
+| `top_k` | `0` | `40` | Only sample from top-k tokens. `0` means greedy (`1`) when `temperature` is `0`, and is left unset when `temperature` samples — so a non-zero `temperature` is never silently overridden. |
 | `tool_choice` | `auto` | `auto` | `auto` lets model decide; `required` forces tool call; `none` disables. |
+| `max_output_tokens` | `2048` | `4096` | Caps one model turn. Prevents a runaway completion from decoding until it exhausts the context window. |
 | `context_window` | `0` (auto-tune) | `8192` | Max context tokens. `0` = auto-tune from model metadata. |
 
 ### Matching the settings to your goal
