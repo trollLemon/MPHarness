@@ -9,11 +9,14 @@ datasources:
     isDefault: true
     editable: true
 
-  - name: Jaeger
-    uid: mph-jaeger
-    type: jaeger
+  - name: Tempo
+    uid: mph-tempo
+    type: tempo
     access: proxy
-    url: http://jaeger:16686
+    url: http://tempo:3200
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: mph-loki
     editable: true
 
   - name: Loki

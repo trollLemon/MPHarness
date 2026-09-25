@@ -1,0 +1,78 @@
+vm:
+  name: mph-longrun
+  disk: 10G
+  ram: 2G
+  cpu: 1
+  image: bionic
+model: unsloth/Ministral-3-14B-Instruct-2512-UD-Q4_K_XL
+allowed_commands:
+  - ls
+  - cat
+  - uname
+  - wc
+  - head
+  - tail
+  - grep
+  - sort
+  - uniq
+  - find
+  - du
+  - df
+  - stat
+  - file
+  - date
+  - whoami
+llm:
+  temperature: 0.0
+  top_p: 0.95
+  top_k: 40
+  tool_choice: auto
+agent:
+  max_iterations: 60
+  chat_timeout: 300s
+  total_timeout: 90m
+prompt: |
+  Inside the Multipass VM, work through this checklist one item at a time,
+  running exactly one tool call per item and reporting each result before
+  moving on to the next item. Do not batch items together and do not skip
+  ahead.
+
+  1. Run `uname -a`.
+  2. Run `cat /etc/os-release`.
+  3. Run `ls /etc`.
+  4. Run `ls /etc/apt`.
+  5. Run `cat /etc/hostname`.
+  6. Run `cat /etc/passwd` and note how many lines it has.
+  7. Run `cat /etc/group` and note how many lines it has.
+  8. Run `ls /etc/ssl/certs`.
+  9. Run `ls /usr/bin`.
+  10. Run `ls /usr/share`.
+  11. Run `cat /proc/uptime`.
+  12. Run `cat /proc/cpuinfo`.
+  13. Run `cat /proc/meminfo`.
+  14. Run `cat /proc/version`.
+  15. Run `df -h /`.
+  16. Run `du -sh /etc`.
+  17. Run `find /etc -maxdepth 1 -name '*.conf'`.
+  18. Run `cat /etc/adduser.conf`.
+  19. Run `cat /etc/login.defs`.
+  20. Run `cat /etc/environment`.
+  21. Run `cat /etc/fstab`.
+  22. Run `cat /etc/hosts`.
+  23. Run `cat /etc/resolv.conf`.
+  24. Run `cat /etc/timezone`.
+  25. Run `cat /etc/ld.so.conf`.
+  26. Run `cat /etc/bash.bashrc`.
+  27. Run `ls /var/log`.
+  28. Run `cat /proc/mounts`.
+  29. Run `cat /proc/cmdline`.
+  30. Run `ls /tmp`.
+
+  When every item is done, state that the checklist is complete and give a
+  one-paragraph summary of the machine.
+otel:
+  enabled: true
+  endpoint: localhost:4317
+  service_name: mph-longrun
+  resource_attributes:
+    environment: dev

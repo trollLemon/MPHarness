@@ -16,7 +16,7 @@ services:
       - "55679:55679" # zpages
       - "1777:1777"   # pprof
     depends_on:
-      jaeger:
+      tempo:
         condition: service_started
       loki:
         condition: service_started
@@ -24,23 +24,18 @@ services:
       - mph-otel
     restart: unless-stopped
 
-  jaeger:
-    image: jaegertracing/all-in-one:1.72.0
-    container_name: mph-jaeger
-    environment:
-      COLLECTOR_OTLP_ENABLED: "true"
-      COLLECTOR_ZIPKIN_HOST_PORT: ":9411"
+  tempo:
+    image: grafana/tempo:2.10.8
+    container_name: mph-tempo
+    user: root
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
     ports:
-      - "16686:16686" # Jaeger UI
-      - "14268:14268" # Jaeger collector HTTP
-      - "14269:14269" # Jaeger query metrics
+      - "3200:3200" # Tempo API
     networks:
       - mph-otel
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:16686/"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
     restart: unless-stopped
 
   prometheus:
@@ -98,13 +93,12 @@ services:
     depends_on:
       - prometheus
       - loki
-      - jaeger
     restart: unless-stopped
 
   # Optional lightweight alternative: Grafana LGTM (Loki+Grafana+Tempo+Mimir) single-image stack.
   # Uncomment to try the one-container LGTM experience instead of the 5-service stack above.
   # Then mph still points to localhost:4317. Access Grafana on http://localhost:3000 (admin/admin),
-  # or Tempo/Jaeger traces via Grafana Explore. Comment out the 5 services above if you use this.
+  # or Tempo traces via Grafana Explore. Comment out the 5 services above if you use this.
   # lgtm:
   #   image: grafana/otel-lgtm:latest
   #   container_name: mph-lgtm
@@ -124,3 +118,4 @@ volumes:
   prometheus-data:
   grafana-data:
   loki-data:
+  tempo-data:

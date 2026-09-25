@@ -1,0 +1,40 @@
+# Minimal single-binary Tempo for the local test stack. The collector pushes
+# traces over OTLP, so Tempo needs no exposed receiver beyond its own API.
+stream_over_http_enabled: true
+server:
+  http_listen_port: 3200
+  log_level: warn
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+
+ingester:
+  # Short blocks so a local stack shows recent traces without waiting on
+  # Tempo's production defaults.
+  max_block_duration: 1m
+  complete_block_timeout: 1m
+
+compactor:
+  compaction:
+    block_retention: 1h
+
+storage:
+  trace:
+    backend: local
+    # TraceQL search over flushed blocks only works on a parquet block
+    # version. On the older default the search endpoint answers
+    # "backend TraceQL search queries are not supported" and Grafana's trace
+    # panel comes up empty even though the spans are stored.
+    block:
+      version: vParquet4
+    # Poll often so a freshly flushed block is queryable promptly; this must
+    # stay below complete_block_timeout or Tempo warns about 404s in between.
+    blocklist_poll: 30s
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks

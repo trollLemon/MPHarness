@@ -20,7 +20,7 @@ scrape_configs:
       - targets: ["otel-collector:8888"]
     metrics_path: /metrics
 
-  - job_name: "jaeger"
+  - job_name: "tempo"
     scrape_interval: 10s
     static_configs:
-      - targets: ["jaeger:14269"]
+      - targets: ["tempo:3200"]

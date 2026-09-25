@@ -200,19 +200,23 @@ func (a *Agent) runIteration(
 // the content, which the run reports as its final answer when nothing ran.
 func logModelOutput(ctx context.Context, log zerolog.Logger, iter int, msg *model.ResponseMessage, maxContent int) string {
 	if msg.Reasoning != "" {
-		mphotel.LogEvent(ctx, log, zerolog.InfoLevel, "agent reasoning", map[string]any{
-			"iteration": iter + 1,
-			"reasoning": truncate(msg.Reasoning, maxContent),
-		})
+		logModelPart(ctx, log, iter, "reasoning", msg.Reasoning, maxContent)
 	}
 	if msg.Content == "" {
 		return ""
 	}
-	mphotel.LogEvent(ctx, log, zerolog.InfoLevel, "agent output", map[string]any{
-		"iteration": iter + 1,
-		"content":   truncate(msg.Content, maxContent),
-	})
+	logModelPart(ctx, log, iter, "content", msg.Content, maxContent)
 	return msg.Content
+}
+
+// logModelPart emits one piece of a model reply under a shared text key, so
+// reasoning and content are one queryable stream split only by part.
+func logModelPart(ctx context.Context, log zerolog.Logger, iter int, part, text string, maxContent int) {
+	mphotel.LogEvent(ctx, log, zerolog.InfoLevel, "model output", map[string]any{
+		"iteration": iter + 1,
+		"part":      part,
+		"text":      truncate(text, maxContent),
+	})
 }
 
 func buildInitialConversation(conf config.Config) []model.D {

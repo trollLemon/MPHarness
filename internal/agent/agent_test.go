@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -483,6 +485,62 @@ func TestLogModelOutput(t *testing.T) {
 	}
 	if got := logModelOutput(ctx, log, 0, &model.ResponseMessage{}, config.DefaultLogContentBytes); got != "" {
 		t.Errorf("content %q want empty", got)
+	}
+}
+
+// TestLogModelOutputKeys pins the field names a log query depends on: both
+// parts share one message and one text key, split only by part.
+func TestLogModelOutputKeys(t *testing.T) {
+	var buf bytes.Buffer
+	log := zerolog.New(&buf)
+
+	if got := logModelOutput(context.Background(), log, 1, &model.ResponseMessage{
+		Reasoning: "thinking",
+		Content:   "answer",
+	}, config.DefaultLogContentBytes); got != "answer" {
+		t.Fatalf("content %q want answer", got)
+	}
+
+	want := []struct{ part, text string }{
+		{"reasoning", "thinking"},
+		{"content", "answer"},
+	}
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != len(want) {
+		t.Fatalf("got %d lines want %d: %s", len(lines), len(want), buf.String())
+	}
+	for i, w := range want {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(lines[i]), &rec); err != nil {
+			t.Fatalf("line %d: %v", i, err)
+		}
+		if rec["message"] != "model output" {
+			t.Errorf("line %d message %v want model output", i, rec["message"])
+		}
+		if rec["part"] != w.part {
+			t.Errorf("line %d part %v want %s", i, rec["part"], w.part)
+		}
+		if rec["text"] != w.text {
+			t.Errorf("line %d text %v want %s", i, rec["text"], w.text)
+		}
+		if rec["iteration"] != float64(2) {
+			t.Errorf("line %d iteration %v want 2", i, rec["iteration"])
+		}
+	}
+}
+
+func TestLogModelOutputTruncatesTextKey(t *testing.T) {
+	var buf bytes.Buffer
+	log := zerolog.New(&buf)
+
+	logModelOutput(context.Background(), log, 0, &model.ResponseMessage{Content: "hello world"}, 5)
+
+	var rec map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &rec); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if rec["text"] != truncate("hello world", 5) {
+		t.Errorf("text %v not truncated", rec["text"])
 	}
 }
 

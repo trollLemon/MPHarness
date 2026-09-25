@@ -77,12 +77,14 @@ make otel-down  # stop it, keep the data
 
 ```text
 mph ──OTLP/gRPC :4317──▶ otel-collector
-                           ├── traces ──▶ Jaeger
-                           ├── logs   ──▶ Loki      ◀── Grafana :3000
+                           ├── traces ──▶ Tempo      ◀── Grafana :3000
+                           ├── logs   ──▶ Loki       ┘
                            └── metrics ─▶ Prometheus ┘
 ```
 
 `testing/collector-config.yaml` routes each signal that way and also prints everything to the collector's own stdout via the `debug` exporter, which is the fastest way to confirm data is arriving before worrying about a UI.
+
+Tempo replaced Jaeger here. Grafana's Jaeger datasource sends the search window in milliseconds while Jaeger's API expects microseconds, so every search resolved to 1970 and returned nothing at all, with no error to explain it.
 
 ### Services
 
@@ -90,7 +92,7 @@ mph ──OTLP/gRPC :4317──▶ otel-collector
 |---|---|---|
 | `otel-collector` | 4317 | OTLP/gRPC receiver, fans signals out |
 | `grafana` | 3000 | Dashboards (admin/admin) and Explore |
-| `jaeger` | 16686 | Trace UI, also proxied through Grafana |
+| `tempo` | 3200 | Trace search backend, also a usable trace UI of its own |
 | `prometheus` | 9090 | Metric storage, scraped by the collector's `prometheus` exporter |
 | `loki` | 3100 | Log storage, pushed to by the collector's `loki` exporter |
 
@@ -100,14 +102,31 @@ mph ──OTLP/gRPC :4317──▶ otel-collector
 
 It is laid out in rows so a row is useful before the one below it has data:
 
-1. **Run throughput** — `mph.run` count, duration, status
-2. **Tokens** — prompt/completion/total per run, with cost
-3. **Context window** — tokens used against the limit
-4. **Tool calls** — per-tool counts and duration
-5. **Agent iterations** — duration and tool calls per iteration
-6. **VMs** — create/delete duration
+1. **Run summary** — tool calls, tool failures, tool duration p95, average tokens/sec for the selected range
+2. **Agent metrics** — token usage, iterations, and per-tool counts and durations
+3. **Per run totals** — a table with one row per run id: tokens, iterations, tool calls, context used
+4. **Per run over time** — one line per run id for each of those metrics
+5. **OTel collector** — points accepted per interval, and export failures (which should stay at zero)
+6. **Logs** — all lines, per-interval counts by level, warnings and errors, and lines with trace correlation
+7. **Traces** — TraceQL search against Tempo
 
-Every panel is variable-driven: `$run` breaks a series out per run, `$service` filters by service name, and `$window` sets the time range. `$run` multiplies series cardinality, so a small run list is fine but an all-time `All` is not what you want on a long-lived deployment.
+There are deliberately **no dashboard variables**: every panel shows all runs in the selected time range, so nothing is hidden behind a filter that silently matches nothing. The rules the panels follow:
+
+- A per-run line **ends with its run** rather than running on flat. Raw counters are drawn as-is with `spanNulls: false`, so a finished run simply stops.
+- A counter that can only climb is drawn as a **burst** instead: tokens are shown as `increase(...)` per interval, so a run reads as a hump that returns to zero once it stops working.
+- **Cumulative totals live in the table**, not on a line, because a cumulative line freezes every finished run at its final value and a wall of those is unreadable.
+
+### Searching traces by hand
+
+Tempo's own search API takes `start` and `end` in **seconds**, and only together — passing milliseconds returns `400 invalid start`, and passing one without the other is also a `400`. `tags` and the TraceQL `q` parameter are mutually exclusive.
+
+```bash
+curl -sG http://localhost:3200/api/search \
+  --data-urlencode 'q={ resource.service.name =~ ".+" }' \
+  --data-urlencode "start=$(( $(date +%s) - 3600 ))" --data-urlencode "end=$(date +%s)"
+```
+
+TraceQL has to match against **flushed blocks**, not just live data, so `testing/tempo.yaml` sets `storage.trace.block.version: vParquet4`; without it a query that works while a run is in flight returns nothing afterwards.
 
 `testing/docker-compose.lgtm.yaml` is an alternative single-image `otel-lgtm` stack for when the five-service version is more than you need.
 
@@ -133,10 +152,12 @@ make otel-up                # OTLP receiver must be listening
 
 Then:
 
-- Grafana on <http://localhost:3000> — the **MPH OTel** dashboard, or Explore → Loki/Jaeger/Prometheus
+- Grafana on <http://localhost:3000> — the **MPH OTel** dashboard, or Explore → Tempo/Loki/Prometheus
 - The trace shape to expect is `mph.run` → `mph.vm.create` / `multipass.launch` → `mph.agent.iteration` × N (with `mph.agent.tool_call` / `tool_result` events and a `multipass.exec` child per command) → `mph.vm.delete`
 
 `mph.run.id` is a UUID on every span, event, and metric, so one run can be picked out of a shared dashboard. Logs carry `trace_id` and `span_id`, so a log line links back to the trace it belongs to.
+
+Model replies land in Loki under the body `model output`, split by `part` (`content` or `reasoning`) with the payload in `text`. Nothing is logged for an iteration that produced neither, which is normal for a turn that is only a tool call.
 
 ### Negative checks
 
@@ -154,6 +175,20 @@ OTEL_SERVICE_NAME=custom-mph ./bin/mph --otel ./testing/test.yaml
 ```
 
 Check 1 is the one that matters most: it is what proves the default-off promise, so run it with the collector actually stopped.
+
+### Long runs
+
+`testing/longrun.yaml` is the same shape with a 30-step checklist, `max_iterations: 60`, and a 90m total timeout, so a run takes long enough to watch iteration duration, tokens-per-second, and the context gauges climb on the dashboard rather than flashing past:
+
+```bash
+./bin/mph ./testing/longrun.yaml
+```
+
+It uses a separate VM name (`mph-longrun`) and `service_name` (`mph-longrun`), so it never collides with the smoke test. Both land on the same unfiltered dashboard, so pick a run out of the **Per run totals** table rather than filtering panels.
+
+### If the trace panel looks empty
+
+Grafana 12.2 runs Tempo's TraceQL search in the browser, through the datasource proxy, and its server-side query endpoint has no implementation: posting a `traceql` search to `/api/ds/query` always fails with `backend TraceQL search queries are not supported`, whatever the query, and no request ever reaches Tempo. That makes the panel impossible to verify by scripting the API — it has to be checked in the browser, or through **Explore → Tempo**, which uses the working path. Tempo's own UI on <http://localhost:3200> is the other fallback.
 
 ## 4. Tuning what gets exported
 
