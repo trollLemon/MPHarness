@@ -1,0 +1,126 @@
+name: mph-otel
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.128.0
+    container_name: mph-otel-collector
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC – mph default endpoint localhost:4317
+      - "4318:4318"   # OTLP HTTP
+      - "13133:13133" # health_check
+      - "8889:8889"   # prometheus exporter (mph metrics: mph.tokens etc.)
+      - "8888:8888"   # collector self metrics
+      - "55679:55679" # zpages
+      - "1777:1777"   # pprof
+    depends_on:
+      jaeger:
+        condition: service_started
+      loki:
+        condition: service_started
+    networks:
+      - mph-otel
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.72.0
+    container_name: mph-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+      COLLECTOR_ZIPKIN_HOST_PORT: ":9411"
+    ports:
+      - "16686:16686" # Jaeger UI
+      - "14268:14268" # Jaeger collector HTTP
+      - "14269:14269" # Jaeger query metrics
+    networks:
+      - mph-otel
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:16686/"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: mph-prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/console_templates"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - mph-otel
+    depends_on:
+      otel-collector:
+        condition: service_started
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.4.1
+    container_name: mph-loki
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    volumes:
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+    networks:
+      - mph-otel
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.2.0
+    container_name: mph-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_FEATURE_TOGGLES_ENABLE: traceToLogs
+    volumes:
+      - ./grafana/provisioning/datasources/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
+      - ./grafana/provisioning/dashboards/dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    networks:
+      - mph-otel
+    depends_on:
+      - prometheus
+      - loki
+      - jaeger
+    restart: unless-stopped
+
+  # Optional lightweight alternative: Grafana LGTM (Loki+Grafana+Tempo+Mimir) single-image stack.
+  # Uncomment to try the one-container LGTM experience instead of the 5-service stack above.
+  # Then mph still points to localhost:4317. Access Grafana on http://localhost:3000 (admin/admin),
+  # or Tempo/Jaeger traces via Grafana Explore. Comment out the 5 services above if you use this.
+  # lgtm:
+  #   image: grafana/otel-lgtm:latest
+  #   container_name: mph-lgtm
+  #   ports:
+  #     - "3000:3000"   # Grafana
+  #     - "4317:4317"   # OTLP gRPC
+  #     - "4318:4318"   # OTLP HTTP
+  #     - "9090:9090"   # Prometheus (inside LGTM via Mimir)
+  #   environment:
+  #     GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+
+networks:
+  mph-otel:
+    driver: bridge
+
+volumes:
+  prometheus-data:
+  grafana-data:
+  loki-data:

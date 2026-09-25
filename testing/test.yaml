@@ -1,0 +1,32 @@
+vm:
+  name: mph-smoke
+  disk: 10G
+  ram: 2G
+  cpu: 1
+  image: bionic
+model: unsloth/Ministral-3-14B-Instruct-2512-UD-Q4_K_XL
+allowed_commands:
+  - ls
+  - cat
+  - uname
+llm:
+  temperature: 0.0
+  top_p: 0.95
+  top_k: 40
+  tool_choice: auto
+agent:
+  max_iterations: 10
+  chat_timeout: 300s
+  total_timeout: 30m
+prompt: |
+  Inside the Multipass VM, do the following:
+  1. Run ls /etc
+  2. Run cat /etc/os-release
+  3. Run uname -a
+  Summarise the results.
+otel:
+  enabled: true
+  endpoint: localhost:4317
+  service_name: mph-smoke
+  resource_attributes:
+    environment: dev
