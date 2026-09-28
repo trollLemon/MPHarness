@@ -5,13 +5,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"io"
 	"os"
 	"strings"
 	"time"
-
-	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
+	"uuid"
 
 	"github.com/trollLemon/MPHarness/internal/agent"
 	"github.com/trollLemon/MPHarness/internal/config"
@@ -59,7 +59,7 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "    max_iterations: %d\n", config.DefaultMaxIterations)
 	_, _ = fmt.Fprintf(w, "    chat_timeout: %s\n", config.DefaultChatTimeout)
 	_, _ = fmt.Fprintf(w, "    total_timeout: %s\n", config.DefaultTotalTimeout)
-	_, _ = fmt.Fprintf(w, "    max_output_bytes: 0   # per tool result cap; 0 = derive from context_window\n")
+	_, _ = fmt.Fprintf(w, "    max_output_bytes: 0   # auto-capture inline cutoff; 0 = derive from context_window\n")
 	_, _ = fmt.Fprintf(w, "    send_reasoning: true # replay reasoning_content into later turns\n")
 	_, _ = fmt.Fprintf(w, "  truncation:           # optional, telemetry payload caps in bytes\n")
 	_, _ = fmt.Fprintf(w, "    command_output: %d\n", config.DefaultCommandOutputBytes)
@@ -71,7 +71,22 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "    endpoint: %s\n", mphotel.DefaultEndpoint)
 	_, _ = fmt.Fprintf(w, "    service_name: %s\n", mphotel.DefaultServiceName)
 	_, _ = fmt.Fprintf(w, "    resource_attributes:\n")
-	_, _ = fmt.Fprintf(w, "      environment: dev\n\n")
+	_, _ = fmt.Fprintf(w, "      environment: dev\n")
+	_, _ = fmt.Fprintf(w, "  output:               # optional, chunked command output\n")
+	_, _ = fmt.Fprintf(w, "    enabled: true\n")
+	_, _ = fmt.Fprintf(w, "    mode: auto          # auto|always\n")
+	_, _ = fmt.Fprintf(w, "    chunk_lines: %d\n", config.DefaultOutputChunkLines)
+	_, _ = fmt.Fprintf(w, "    inline_max_size: 0   # 0 = derive from tool-result budget\n")
+	_, _ = fmt.Fprintf(w, "    max_command_size: 64MiB\n")
+	_, _ = fmt.Fprintf(w, "    max_total_size: 512MiB\n")
+	_, _ = fmt.Fprintf(w, "    search_max_matches: %d\n", config.DefaultOutputSearchMatches)
+	_, _ = fmt.Fprintf(w, "  compaction:           # optional, conversation compaction\n")
+	_, _ = fmt.Fprintf(w, "    enabled: true\n")
+	_, _ = fmt.Fprintf(w, "    threshold: 0.8      # fraction of context window, (0.5, 0.95]\n")
+	_, _ = fmt.Fprintf(w, "    max_summary_tokens: %d\n", config.DefaultCompactionMaxTokens)
+	_, _ = fmt.Fprintf(w, "    recent_turns: %d\n", config.DefaultCompactionRecentTurns)
+	_, _ = fmt.Fprintf(w, "    min_messages: %d\n", config.DefaultCompactionMinMessages)
+	_, _ = fmt.Fprintf(w, "    max_attempts: %d\n\n", config.DefaultCompactionMaxAttempts)
 	_, _ = fmt.Fprintf(w, "Example:\n")
 	_, _ = fmt.Fprintf(w, "  mph -v ./mph.yaml\n")
 
@@ -130,7 +145,8 @@ func run() error {
 		return err
 	}
 
-	otelCfg := resolveOtelConfig(cfg.Otel, otelEnabled)
+	runID := uuid.NewV7().String()
+	otelCfg := resolveOtelConfig(cfg.Otel, otelEnabled, runID)
 
 	if otelCfg.Enabled {
 		shutdown, err := mphotel.Setup(otelCfg)
@@ -165,6 +181,10 @@ func run() error {
 		Str("agent.chat_timeout", time.Duration(cfg.Agent.ChatTimeout).String()).
 		Str("agent.total_timeout", time.Duration(cfg.Agent.TotalTimeout).String()).
 		Bool("otel.enabled", otelCfg.Enabled).
+		Bool("output.enabled", cfg.Output.Enabled).
+		Str("output.mode", cfg.Output.Mode).
+		Bool("compaction.enabled", cfg.Compaction.Enabled).
+		Float64("compaction.threshold", cfg.Compaction.Threshold).
 		Msg("loaded config")
 
 	ctx := context.Background()
@@ -199,11 +219,12 @@ func run() error {
 		time.Duration(cfg.Agent.ChatTimeout),
 		time.Duration(cfg.Agent.TotalTimeout),
 		llmCfg,
+		runID,
 	)
 
 	client := multipass.New(log.Logger)
 
-	return harness.Start(ctx, agt, client, cfg, ignoreExisting, keep)
+	return harness.Start(ctx, agt, client, cfg, ignoreExisting, keep, runID)
 }
 
 func setupLogger(verbose, pretty bool) {
@@ -224,7 +245,7 @@ func setupLogger(verbose, pretty bool) {
 	log.Logger = zerolog.New(os.Stdout).With().Timestamp().Caller().Logger()
 }
 
-func resolveOtelConfig(yamlCfg config.OtelConfig, flagEnabled bool) mphotel.Config {
+func resolveOtelConfig(yamlCfg config.OtelConfig, flagEnabled bool, runID string) mphotel.Config {
 	enabled := yamlCfg.Enabled
 	if flagEnabled || isEnvTrue(os.Getenv("MPH_OTEL")) {
 		enabled = true
@@ -251,6 +272,7 @@ func resolveOtelConfig(yamlCfg config.OtelConfig, flagEnabled bool) mphotel.Conf
 		Endpoint:           endpoint,
 		ServiceName:        serviceName,
 		ResourceAttributes: yamlCfg.ResourceAttributes,
+		RunID:              runID,
 	}
 }
 

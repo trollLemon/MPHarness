@@ -6,7 +6,7 @@ creates the VM, lets an LLM drive a tool-calling loop to complete the task, and 
 - **[Tutorials](tutorial/run_an_agent_with_task.md)**: learn by doing your first run end to end.
 - **[How-to guides](how-to/)**: step-by-step guides for specific tasks:
   - [Configure the VM](how-to/configure_vm.md)
-  - [Configure the LLM](how-to/configure_llm.md)
+  - [Configure the LLM](how-to/configure_llm.md) (sampling, timeouts, chunked output, compaction)
   - [Restrict commands the agent may run](how-to/restrict_commands.md)
   - [Provide local content to the VM](how-to/provide_content.md)
   - [Manage the VM lifecycle](how-to/manage_vm_lifecycle.md)

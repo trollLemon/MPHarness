@@ -42,6 +42,8 @@ Tool dispatch (`Call`, `callExec`, `callInfo`) lives in `internal/agent/spec.go`
 | `internal/harness` | Orchestrates VM lifecycle: checks if VM exists, launches if needed, prompts to reuse existing VM (unless `-i`), copies `content_dir` to `VMContentDir` via `mkdir -p` + `Transfer` under child span `mph.vm.content` (if set), runs the agent with the root `mph.run` ctx, and deletes VM after task (unless `-k`). Creates root span `mph.run` (now includes `mph.content_dir`) and child `mph.vm.create`/`delete`/`content` spans around `Launch`/`Delete`/`Transfer` (which themselves create `multipass.*` children). |
 | `internal/multipass` | A thin wrapper around the `multipass` CLI binary. Each method (`Info`/`Launch`/`Exec`/`Delete`/`Transfer`) creates a `multipass.*` span (`multipass.command`, `mph.vm.name`, `mph.command` truncated 4000, `multipass.args`). `Transfer` wraps `multipass transfer --recursive --parents`. |
 | `internal/validation` | Parses a shell command into an AST (via `mvdan.cc/sh/syntax`) and checks every executed command against the allowlist; fails closed on anything it cannot verify. |
+| `internal/output` | VM-side output store: capture (`<cmd> > <raw> 2>&1`), `split -l` chunking, handle registry, POSIX ERE `output_search` over chunk files. Paths derive only from the registry. |
+| `internal/compact` | Threshold check, compaction prompt, history rendering, two-message rewrite via a `Summarizer` seam. Independent of `output`; receives `[]output.Handle`. |
 
 ## Runtime flow
 
@@ -63,13 +65,13 @@ Tool dispatch (`Call`, `callExec`, `callInfo`) lives in `internal/agent/spec.go`
 
 6. **Agent loop.** `Agent.Execute(ctx, ...)` derives the total-timeout ctx from the parent `mph.run` ctx, then per iteration starts `mph.agent.iteration` (`mph.iteration`, `mph.finish_reason`, token counts) and records `mph.tokens`/`mph.tokens_per_second`/`mph.iterations` plus `mph.agent.tool.*` events/metrics:
    - Builds the system prompt via `buildSystemPrompt(cfg)` (fixed contract + optional content notice for `/home/ubuntu/content`) and user prompt (allowed-commands line + task).
-   - Builds tool documents from `Specs()` so the model knows the two tools: `multipass_exec` and `multipass_info`.
+   - Builds tool documents from `Specs()` so the model knows the tools: `multipass_exec` and `multipass_info`, plus `output_search` and `output_read` when output captures are enabled.
    - Repeats, up to `max_iterations` times: send messages + tools to the LLM, extract the assistant message, and either
      - **terminate** when the model replies with no tool calls (its final summary), or
      - **execute** the tool calls, append their results to the conversation, and continue.
    - Independent tool calls are batched into one turn (`parallel_tool_calls: true`, and the "Batching Work" section of the system prompt); dependent ones are chained with `&&` inside a single `multipass_exec`. Note that kronk parses `parallel_tool_calls` but does not forward it to the inference backend, so the prompt is what actually drives batching — the flag is kept accurate so the request does not contradict the prompt.
    - `max_tokens` caps one model turn (`llm.max_output_tokens`, default 2048) so a runaway completion cannot decode until it exhausts the context window and trip the length nudge.
-   - Tool results handed to the model are capped at `agent.max_output_bytes`, or, when that is 0, at roughly 1/8 of the context window the model actually loaded (clamped to 2 KiB–64 KiB). The cap is fixed when the result is created and keeps both head and tail. It is never revised afterwards: kronk's incremental cache only reuses a complete token prefix, so rewriting an earlier message forces a full re-prefill.
+    - Tool results reach the model untruncated: large outputs are captured to files with handles instead, and compaction is the backstop for the rest.
    - Injection note: if the model hits the length limit with no tool call, a "be concise" nudge is appended and the loop continues.
 
 7. **Tool dispatch.** `Call` in the `agent` package maps tool names to multipass operations. `multipass_exec` first passes the command through `validation.ValidateShellCommand`, so a command outside the allowlist never reaches Multipass. Each `multipass.*` call creates a `multipass.exec`/`info`/`launch`/`delete` child span and `Call` emits `mph.agent.tool_call`/`tool_result` events on the active iteration span.

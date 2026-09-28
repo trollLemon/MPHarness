@@ -80,7 +80,7 @@ func TestResolveOtelConfig(t *testing.T) {
 			t.Setenv("OTEL_SERVICE_NAME", tt.envService)
 			t.Setenv("MPH_OTEL", tt.envMPHOtel)
 
-			got := resolveOtelConfig(tt.yaml, tt.flagEnabled)
+			got := resolveOtelConfig(tt.yaml, tt.flagEnabled, "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5")
 			if got.Enabled != tt.wantEnabled {
 				t.Errorf("Enabled = %v, want %v", got.Enabled, tt.wantEnabled)
 			}
@@ -89,6 +89,9 @@ func TestResolveOtelConfig(t *testing.T) {
 			}
 			if got.ServiceName != tt.wantService {
 				t.Errorf("ServiceName = %q, want %q", got.ServiceName, tt.wantService)
+			}
+			if got.RunID != "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5" {
+				t.Errorf("RunID = %q, want test run id", got.RunID)
 			}
 		})
 	}
