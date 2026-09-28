@@ -1,0 +1,49 @@
+vm:
+  name: mph-chunk
+  disk: 10G
+  ram: 2G
+  cpu: 1
+  image: bionic
+model: unsloth/Ministral-3-14B-Instruct-2512-UD-Q4_K_XL
+allowed_commands:
+  - coreUtils
+  - grep
+  - sed
+llm:
+  temperature: 0.0
+  top_p: 0.95
+  top_k: 40
+  tool_choice: auto
+agent:
+  max_iterations: 15
+  chat_timeout: 300s
+  total_timeout: 30m
+output:
+  enabled: true
+  mode: always
+  chunk_lines: 500
+  inline_max_size: 0
+  max_command_size: 64MiB
+  max_total_size: 512MiB
+  search_max_matches: 200
+compaction:
+  enabled: true
+  # NOTE: spec text suggests 0.25 here, but compaction.threshold is validated
+  # to (0.5, 0.95]; 0.51 still fires early against kronk's 8K auto-tune cap.
+  threshold: 0.51
+  max_summary_tokens: 2048
+  recent_turns: 3
+  min_messages: 6
+  max_attempts: 3
+prompt: |
+  Inside the Multipass VM, do the following:
+  1. Seed a large log: seq 1 2000000 | sed 's/^/log line /' > /tmp/big.log && echo 'needle-7x9 TREASURE-LINE' >> /tmp/big.log && wc -l /tmp/big.log
+  2. The log is far too large to print or read in full (about 2,000,000 lines). Find the line number containing 'needle-7x9 TREASURE-LINE' and report it.
+  3. Report the total line count of /tmp/big.log.
+  Summarise the results.
+otel:
+  enabled: true
+  endpoint: localhost:4317
+  service_name: mph-chunk
+  resource_attributes:
+    environment: dev

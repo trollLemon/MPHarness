@@ -8,10 +8,10 @@
   ],
   "timezone": "browser",
   "schemaVersion": 41,
-  "version": 2,
+  "version": 3,
   "refresh": "30s",
   "editable": true,
-  "description": "Telemetry from batch test runs, not a long-running service. Every run is shown, unfiltered: per-run lines end with their run instead of running on flat, tokens are shown per interval so a run reads as a burst that returns to zero, and final totals live in the Per run totals table.",
+  "description": "Telemetry from batch test runs, not a long-running service. Every run is shown, unfiltered: per-run lines end with their run instead of running on flat, tokens are shown per interval so a run reads as a burst that returns to zero, and final totals live in the Per run totals table. Runs are grouped by the service.instance.id resource (the run UUID); the Compaction section shows applied/reverted/failed counts, tokens reclaimed, and summary latency.",
   "time": {
     "from": "now-1h",
     "to": "now"
@@ -694,10 +694,10 @@
           },
           "refId": "A",
           "editorMode": "code",
-          "expr": "sum by (mph_run_id) (increase(mph_tokens_sum{tokens_type=\"total\"}[$__rate_interval]))",
+          "expr": "sum by (service_instance_id) (increase(mph_tokens_sum{tokens_type=\"total\"}[$__rate_interval]))",
           "range": true,
           "instant": false,
-          "legendFormat": "{{mph_run_id}}"
+          "legendFormat": "{{service_instance_id}}"
         }
       ]
     },
@@ -705,7 +705,7 @@
       "id": 111,
       "type": "timeseries",
       "title": "Context window utilization per run over time",
-      "description": "How close each run got to the model's context window, one line per run id, no run filter. Read it as a staircase, not a ramp: the level is only written once per iteration (recordTokenUsage adds the delta, so the series holds the last request's total tokens) and the collector re-publishes that same number on every 5s scrape, so linear interpolation would invent growth that never happened. spanNulls is off so each line ends with its run, but expect a ~5min flat tail: the OTel Prometheus exporter keeps a finished run's last value alive briefly before evicting it, so the line is trustworthy only up to that point. No upper axis bound is set because the ratio is not clamped - a request whose tokens exceed the effective window pushes it past 1. Rejected: increase() over this counter, which scrape-extrapolates the per-iteration steps into non-integer bursts (observed 1003.77 and 104.26 'tokens grown'), and last_over_time(...[$__range]), which flattens every run to a permanent horizontal line - the per-run final value is in the \"Per run totals\" table instead.",
+      "description": "How close each run got to the model's context window, one line per run, no run filter. Read it as a staircase, not a ramp: the gauge is recorded once per iteration with the absolute token count, and a compaction shows as a vertical drop. The collector re-publishes that same number on every 5s scrape, so linear interpolation would invent growth that never happened. spanNulls is off so each line ends with its run, but expect a ~5min flat tail: the OTel Prometheus exporter keeps a finished run's last value alive briefly before evicting it, so the line is trustworthy only up to that point. No upper axis bound is set because the ratio is not clamped - a request whose tokens exceed the effective window pushes it past 1. Rejected: increase() over this counter, which scrape-extrapolates the per-iteration steps into non-integer bursts (observed 1003.77 and 104.26 'tokens grown'), and last_over_time(...[$__range]), which flattens every run to a permanent horizontal line - the per-run final value is in the \"Per run totals\" table instead.",
       "datasource": {
         "type": "prometheus",
         "uid": "mph-prometheus"
@@ -771,10 +771,10 @@
           },
           "refId": "A",
           "editorMode": "code",
-          "expr": "sum by (mph_run_id) (mph_context_tokens{}) / sum by (mph_run_id) (mph_context_window{})",
+          "expr": "sum by (service_instance_id) (mph_context_tokens{}) / sum by (service_instance_id) (mph_context_window{})",
           "range": true,
           "instant": false,
-          "legendFormat": "{{mph_run_id}}"
+          "legendFormat": "{{service_instance_id}}"
         }
       ]
     },
@@ -844,10 +844,10 @@
           },
           "refId": "A",
           "editorMode": "code",
-          "expr": "sum by (mph_run_id) (mph_iterations_total{})",
+          "expr": "sum by (service_instance_id) (mph_iterations_total{})",
           "range": true,
           "instant": false,
-          "legendFormat": "{{mph_run_id}}"
+          "legendFormat": "{{service_instance_id}}"
         }
       ]
     },
@@ -917,10 +917,10 @@
           },
           "refId": "A",
           "editorMode": "code",
-          "expr": "sum by (mph_run_id) (mph_agent_tool_calls_total{})",
+          "expr": "sum by (service_instance_id) (mph_agent_tool_calls_total{})",
           "range": true,
           "instant": false,
-          "legendFormat": "{{mph_run_id}}"
+          "legendFormat": "{{service_instance_id}}"
         }
       ]
     },
@@ -990,10 +990,10 @@
           },
           "refId": "A",
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le, mph_run_id) (rate(mph_tokens_per_second_bucket{}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, service_instance_id) (rate(mph_tokens_per_second_bucket{}[$__rate_interval])))",
           "range": true,
           "instant": false,
-          "legendFormat": "{{mph_run_id}}"
+          "legendFormat": "{{service_instance_id}}"
         }
       ]
     },
@@ -1477,7 +1477,7 @@
         "type": "prometheus",
         "uid": "mph-prometheus"
       },
-      "description": "One row per run id: final tokens, iterations, tool calls and context used, each read as its last value over the selected range. Format=Table on each target makes the Prometheus datasource turn the mph_run_id label into a real column; Merge then joins the four queries on run id and evaluation time, and Organize names the columns and drops the time column.",
+      "description": "One row per run id: final tokens, iterations, tool calls, compactions and context used, each read as its last value over the selected range. Format=Table on each target makes the Prometheus datasource turn the service_instance_id label into a real column; Merge then joins the five queries on run id and evaluation time, and Organize names the columns and drops the time column.",
       "gridPos": {
         "h": 10,
         "w": 24,
@@ -1492,7 +1492,7 @@
             "uid": "mph-prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (mph_run_id) (last_over_time(mph_tokens_sum{tokens_type=\"total\"}[$__range]))",
+          "expr": "sum by (service_instance_id) (last_over_time(mph_tokens_sum{tokens_type=\"total\"}[$__range]))",
           "instant": true,
           "range": false,
           "format": "table",
@@ -1505,7 +1505,7 @@
             "uid": "mph-prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (mph_run_id) (last_over_time(mph_iterations_total[$__range]))",
+          "expr": "sum by (service_instance_id) (last_over_time(mph_iterations_total[$__range]))",
           "instant": true,
           "range": false,
           "format": "table",
@@ -1518,7 +1518,7 @@
             "uid": "mph-prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (mph_run_id) (last_over_time(mph_agent_tool_calls_total[$__range]))",
+          "expr": "sum by (service_instance_id) (last_over_time(mph_agent_tool_calls_total[$__range]))",
           "instant": true,
           "range": false,
           "format": "table",
@@ -1531,11 +1531,24 @@
             "uid": "mph-prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (mph_run_id) (last_over_time(mph_context_tokens[$__range])) / sum by (mph_run_id) (last_over_time(mph_context_window[$__range]))",
+          "expr": "sum by (service_instance_id) (last_over_time(mph_context_tokens[$__range])) / sum by (service_instance_id) (last_over_time(mph_context_window[$__range]))",
           "instant": true,
           "range": false,
           "format": "table",
           "legendFormat": "Context used"
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (service_instance_id) (last_over_time(mph_context_compactions_total[$__range]))",
+          "instant": true,
+          "range": false,
+          "format": "table",
+          "legendFormat": "Compactions"
         }
       ],
       "transformations": [
@@ -1550,18 +1563,20 @@
               "Time": true
             },
             "indexByName": {
-              "mph_run_id": 0,
+              "service_instance_id": 0,
               "Value #A": 1,
               "Value #B": 2,
               "Value #C": 3,
-              "Value #D": 4
+              "Value #D": 4,
+              "Value #E": 5
             },
             "renameByName": {
-              "mph_run_id": "Run id",
+              "service_instance_id": "Run id",
               "Value #A": "Tokens",
               "Value #B": "Iterations",
               "Value #C": "Tool calls",
-              "Value #D": "Context used"
+              "Value #D": "Context used",
+              "Value #E": "Compactions"
             }
           }
         }
@@ -1620,6 +1635,227 @@
           }
         ]
       }
+    },
+    {
+      "type": "row",
+      "id": 107,
+      "title": "Compaction",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 112
+      },
+      "panels": [],
+      "description": ""
+    },
+    {
+      "id": 50,
+      "type": "stat",
+      "title": "Compactions in range by outcome",
+      "description": "Applied means the rewritten history shrank, reverted means the summary did not shrink it, failed means the summary call errored or came back empty.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mph-prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 113
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "expr": "sum by (mph_context_compaction_outcome) (increase(mph_context_compactions_total[$__range]))",
+          "instant": true,
+          "range": false,
+          "format": "time_series",
+          "legendFormat": "{{mph_context_compaction_outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 51,
+      "type": "stat",
+      "title": "Tokens reclaimed in range",
+      "description": "Total context tokens reclaimed by applied compactions. Recorded only on applied, so an idle period reads as No data rather than 0.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mph-prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 113
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "mappings": []
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "expr": "sum(increase(mph_context_tokens_reclaimed_sum[$__range]))",
+          "instant": true,
+          "range": false,
+          "format": "time_series",
+          "legendFormat": "reclaimed"
+        }
+      ]
+    },
+    {
+      "id": 52,
+      "type": "timeseries",
+      "title": "Compaction summary latency p50 / p95",
+      "description": "The summary is one bounded Chat with no tools, so latency scales roughly with history size.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mph-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 113
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "mean",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(mph_context_compaction_duration_bucket[$__rate_interval])))",
+          "range": true,
+          "instant": false,
+          "format": "time_series",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "mph-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(mph_context_compaction_duration_bucket[$__rate_interval])))",
+          "range": true,
+          "instant": false,
+          "format": "time_series",
+          "legendFormat": "p95"
+        }
+      ]
     }
   ]
 }
