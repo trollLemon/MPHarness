@@ -3,6 +3,7 @@ package validation
 import (
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,12 +32,12 @@ type ContentFinding struct {
 	Snippet string
 }
 
-func isTextFile(path string) bool {
-	f, err := os.Open(path)
+func isTextFile(fsys fs.FS, name string) bool {
+	f, err := fsys.Open(name)
 	if err != nil {
 		return false
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	buf := make([]byte, 512)
 	n, err := f.Read(buf)
 	if err != nil && err != io.EOF {
@@ -63,26 +64,35 @@ func ScanContentDir(dir string) ([]ContentFinding, error) {
 		return nil, fmt.Errorf("content_dir %q is not a directory", clean)
 	}
 
+	// os.Root refuses to follow symlinks that escape the tree, so a file
+	// swapped for a symlink mid-walk cannot redirect the read.
+	root, err := os.OpenRoot(clean)
+	if err != nil {
+		return nil, fmt.Errorf("open content_dir %q: %w", clean, err)
+	}
+	defer func() { _ = root.Close() }()
+	fsys := root.FS()
+
 	var findings []ContentFinding
 
-	err = filepath.WalkDir(clean, func(path string, d os.DirEntry, walkErr error) error {
+	err = fs.WalkDir(fsys, ".", func(name string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
 		if d.IsDir() {
 			return nil
 		}
-		if d.Type()&os.ModeSymlink != 0 {
+		if d.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
-		if !isTextFile(path) {
+		if !isTextFile(fsys, name) {
 			return nil
 		}
-		f, err := os.Open(path)
+		f, err := fsys.Open(name)
 		if err != nil {
 			return nil
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		const maxRead = 1024 * 1024
 		limited := io.LimitReader(f, maxRead+1)
 		data, err := io.ReadAll(limited)
@@ -94,7 +104,6 @@ func ScanContentDir(dir string) ([]ContentFinding, error) {
 		}
 		content := string(data)
 		lower := strings.ToLower(content)
-		rel, _ := filepath.Rel(clean, path)
 		for _, pat := range suspiciousPatterns {
 			if strings.Contains(lower, pat) {
 				idx := strings.Index(lower, pat)
@@ -112,7 +121,7 @@ func ScanContentDir(dir string) ([]ContentFinding, error) {
 					snippet = snippet[:120] + "…"
 				}
 				findings = append(findings, ContentFinding{
-					File:    rel,
+					File:    name,
 					Pattern: pat,
 					Snippet: snippet,
 				})

@@ -53,12 +53,14 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "    top_p: 0.95\n")
 	_, _ = fmt.Fprintf(w, "    top_k: 40\n")
 	_, _ = fmt.Fprintf(w, "    tool_choice: auto   # auto|required|none\n")
+	_, _ = fmt.Fprintf(w, "    max_output_tokens: %d\n", config.DefaultLLMMaxOutputTokens)
 	_, _ = fmt.Fprintf(w, "    context_window: 8192 # 0 = auto-tune\n")
 	_, _ = fmt.Fprintf(w, "  agent:                # optional, agent loop params\n")
 	_, _ = fmt.Fprintf(w, "    max_iterations: %d\n", config.DefaultMaxIterations)
 	_, _ = fmt.Fprintf(w, "    chat_timeout: %s\n", config.DefaultChatTimeout)
 	_, _ = fmt.Fprintf(w, "    total_timeout: %s\n", config.DefaultTotalTimeout)
-	_, _ = fmt.Fprintf(w, "    max_output_bytes: %d\n", config.DefaultMaxOutputBytes)
+	_, _ = fmt.Fprintf(w, "    max_output_bytes: 0   # per tool result cap; 0 = derive from context_window\n")
+	_, _ = fmt.Fprintf(w, "    send_reasoning: true # replay reasoning_content into later turns\n")
 	_, _ = fmt.Fprintf(w, "  truncation:           # optional, telemetry payload caps in bytes\n")
 	_, _ = fmt.Fprintf(w, "    command_output: %d\n", config.DefaultCommandOutputBytes)
 	_, _ = fmt.Fprintf(w, "    log_content: %d\n", config.DefaultLogContentBytes)
@@ -183,10 +185,11 @@ func run() error {
 	}()
 
 	llmCfg := agent.LLMConfig{
-		Temperature: cfg.LLM.Temperature,
-		TopP:        cfg.LLM.TopP,
-		TopK:        cfg.LLM.TopK,
-		ToolChoice:  cfg.LLM.ToolChoice,
+		Temperature:     cfg.LLM.Temperature,
+		TopP:            cfg.LLM.TopP,
+		TopK:            cfg.LLM.TopK,
+		ToolChoice:      cfg.LLM.ToolChoice,
+		MaxOutputTokens: cfg.LLM.MaxOutputTokens,
 	}
 
 	agt := agent.NewAgent(

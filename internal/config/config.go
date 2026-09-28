@@ -27,10 +27,13 @@ const VMContentDir = "/home/ubuntu/content"
 // Agent defaults. Named so the help text in cmd/mph cannot drift from the values
 // applyDefaults actually installs.
 const (
-	DefaultMaxIterations  = 10
-	DefaultChatTimeout    = 300 * time.Second
-	DefaultTotalTimeout   = 30 * time.Minute
-	DefaultMaxOutputBytes = 64 * 1024
+	DefaultMaxIterations = 10
+	DefaultChatTimeout   = 300 * time.Second
+	DefaultTotalTimeout  = 30 * time.Minute
+
+	// DefaultLLMMaxOutputTokens caps one model turn so a runaway completion
+	// cannot decode until it exhausts the context window.
+	DefaultLLMMaxOutputTokens = 2048
 )
 
 // Truncation defaults, in bytes. Each caps a different kind of payload on its way
@@ -88,18 +91,31 @@ func (v VMConfig) Validate() error {
 }
 
 type LLMConfig struct {
-	Temperature   float64 `yaml:"temperature"`
-	TopP          float64 `yaml:"top_p"`
-	TopK          int     `yaml:"top_k"`
-	ToolChoice    string  `yaml:"tool_choice"`
-	ContextWindow int     `yaml:"context_window"`
+	Temperature     float64 `yaml:"temperature"`
+	TopP            float64 `yaml:"top_p"`
+	TopK            int     `yaml:"top_k"`
+	ToolChoice      string  `yaml:"tool_choice"`
+	ContextWindow   int     `yaml:"context_window"`
+	MaxOutputTokens int     `yaml:"max_output_tokens"`
 }
 
 type AgentConfig struct {
-	MaxIterations  int      `yaml:"max_iterations"`
-	ChatTimeout    Duration `yaml:"chat_timeout"`
-	TotalTimeout   Duration `yaml:"total_timeout"`
-	MaxOutputBytes int      `yaml:"max_output_bytes"`
+	MaxIterations int      `yaml:"max_iterations"`
+	ChatTimeout   Duration `yaml:"chat_timeout"`
+	TotalTimeout  Duration `yaml:"total_timeout"`
+	// MaxOutputBytes caps one tool result handed to the model. Zero means the
+	// agent derives a cap from the context window the model actually loaded,
+	// which the harness auto-tunes to the host and the user never picks.
+	MaxOutputBytes int `yaml:"max_output_bytes"`
+	// SendReasoning replays the model's reasoning_content into later turns. It
+	// is a pointer so an omitted block can be told apart from an explicit false;
+	// it defaults to true.
+	SendReasoning *bool `yaml:"send_reasoning"`
+}
+
+// Reasoning reports whether reasoning_content is replayed into the conversation.
+func (a AgentConfig) Reasoning() bool {
+	return a.SendReasoning == nil || *a.SendReasoning
 }
 
 // TruncationConfig caps payload sizes on their way into telemetry. A value of 0
@@ -290,9 +306,13 @@ func Parse(data []byte) (Config, error) {
 	if time.Duration(cfg.Agent.TotalTimeout) == 0 {
 		cfg.Agent.TotalTimeout = Duration(DefaultTotalTimeout)
 	}
-	if cfg.Agent.MaxOutputBytes == 0 {
-		cfg.Agent.MaxOutputBytes = DefaultMaxOutputBytes
+	if cfg.LLM.MaxOutputTokens == 0 {
+		cfg.LLM.MaxOutputTokens = DefaultLLMMaxOutputTokens
 	}
+	// Agent.MaxOutputBytes is deliberately left at 0 when unset. The agent reads
+	// that as "derive a cap from the live context window"; defaulting it here
+	// would make an explicit user value indistinguishable from the absence of
+	// one, and the window is not known until the model has loaded.
 
 	if cfg.Truncation.CommandOutput <= 0 {
 		cfg.Truncation.CommandOutput = DefaultCommandOutputBytes

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	"github.com/google/uuid"
@@ -131,6 +132,80 @@ func TestTruncate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := truncate(tt.s, tt.n); got != tt.want {
 				t.Fatalf("got %q want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTruncateRuneBoundary(t *testing.T) {
+	// 3-byte rune straddling byte 4; a byte-indexed cut must not split it.
+	s := "aaé"
+	got := truncate(s, 4)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncate produced invalid UTF-8: %q", got)
+	}
+	if !strings.HasPrefix(got, "aaé") {
+		t.Fatalf("got %q want prefix %q", got, "aaé")
+	}
+}
+
+func TestTruncateToolResultKeepsBothEnds(t *testing.T) {
+	s := "HEADMARKER" + strings.Repeat("m", 500) + "TAILMARKER"
+	got := truncateToolResult(s, 200)
+	if !strings.Contains(got, "HEADMARKER") {
+		t.Errorf("lost head: %q", got)
+	}
+	if !strings.Contains(got, "TAILMARKER") {
+		t.Errorf("lost tail: %q", got)
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("invalid UTF-8: %q", got)
+	}
+	if len(got) > 200 {
+		t.Errorf("len %d exceeds budget 200", len(got))
+	}
+	if !strings.Contains(got, "truncated, 200 of 520 bytes") {
+		t.Errorf("missing truncation marker: %q", got)
+	}
+}
+
+func TestTruncateToolResultShortInput(t *testing.T) {
+	if got := truncateToolResult("hello", 4000); got != "hello" {
+		t.Errorf("got %q want hello", got)
+	}
+}
+
+func TestTruncateToolResultRuneBoundary(t *testing.T) {
+	s := "é" + strings.Repeat("x", 400) + "é"
+	got := truncateToolResult(s, 120)
+	if !utf8.ValidString(got) {
+		t.Fatalf("invalid UTF-8: %q", got)
+	}
+}
+
+func TestToolResultBudgetBytes(t *testing.T) {
+	tests := []struct {
+		name          string
+		cfg           config.Config
+		contextWindow int
+		want          int
+	}{
+		{"derived from 8k window", config.Config{}, 8192, 4096},
+		{"derived from 32k window", config.Config{}, 32768, 16384},
+		{"clamped to ceiling on 128k window", config.Config{}, 131072, maxToolResultBytes},
+		{"clamped to floor on tiny window", config.Config{}, 512, minToolResultBytes},
+		{"unknown window falls back", config.Config{}, 0, 4096},
+		{
+			name:          "explicit override wins",
+			cfg:           config.Config{Agent: config.AgentConfig{MaxOutputBytes: 1234}},
+			contextWindow: 8192,
+			want:          1234,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := toolResultBudgetBytes(tt.cfg, tt.contextWindow); got != tt.want {
+				t.Errorf("got %d want %d", got, tt.want)
 			}
 		})
 	}
@@ -376,13 +451,16 @@ func TestBuildChatRequest(t *testing.T) {
 	conv := []model.D{{"role": "user", "content": "task"}}
 	docs := []model.D{{"type": "function"}}
 
-	t.Run("top_k defaults to 1", func(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
 		req := buildChatRequest(conv, docs, LLMConfig{ToolChoice: "auto"})
 		if req["top_k"] != 1 {
 			t.Errorf("top_k %v want 1", req["top_k"])
 		}
-		if req["parallel_tool_calls"] != false {
-			t.Errorf("parallel_tool_calls %v want false", req["parallel_tool_calls"])
+		if req["parallel_tool_calls"] != true {
+			t.Errorf("parallel_tool_calls %v want true", req["parallel_tool_calls"])
+		}
+		if req["max_tokens"] != DefaultMaxOutputTokens {
+			t.Errorf("max_tokens %v want %d", req["max_tokens"], DefaultMaxOutputTokens)
 		}
 		if req["tool_choice"] != "auto" {
 			t.Errorf("tool_choice %v", req["tool_choice"])
@@ -410,6 +488,56 @@ func TestBuildChatRequest(t *testing.T) {
 		}
 		if req["tool_choice"] != "required" {
 			t.Errorf("tool_choice %v want required", req["tool_choice"])
+		}
+	})
+}
+
+func TestBuildChatRequestTopK(t *testing.T) {
+	conv := []model.D{{"role": "user", "content": "task"}}
+	docs := []model.D{{"type": "function"}}
+
+	tests := []struct {
+		name    string
+		llm     LLMConfig
+		wantTop bool
+		wantVal int
+	}{
+		{"greedy default when temperature is zero", LLMConfig{Temperature: 0}, true, 1},
+		{"explicit top_k wins over greedy default", LLMConfig{Temperature: 0, TopK: 40}, true, 40},
+		{"omitted when temperature samples and top_k unset", LLMConfig{Temperature: 0.8}, false, 0},
+		{"explicit top_k kept when temperature samples", LLMConfig{Temperature: 0.8, TopK: 20}, true, 20},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := buildChatRequest(conv, docs, tt.llm)
+			got, present := req["top_k"]
+			if present != tt.wantTop {
+				t.Fatalf("top_k present %v want %v (req=%v)", present, tt.wantTop, req)
+			}
+			if tt.wantTop && got != tt.wantVal {
+				t.Errorf("top_k %v want %d", got, tt.wantVal)
+			}
+		})
+	}
+}
+
+func TestBuildAssistantMessageReasoning(t *testing.T) {
+	msg := &model.ResponseMessage{Content: "hi", Reasoning: "because"}
+
+	t.Run("included by default", func(t *testing.T) {
+		m := buildAssistantMessage(msg, nil)
+		if m["reasoning_content"] != "because" {
+			t.Errorf("reasoning_content %v", m["reasoning_content"])
+		}
+	})
+
+	t.Run("omitted when disabled", func(t *testing.T) {
+		m := buildAssistantMessage(msg, nil, false)
+		if _, ok := m["reasoning_content"]; ok {
+			t.Errorf("reasoning_content present, want omitted: %v", m)
+		}
+		if m["content"] != "hi" {
+			t.Errorf("content %v want hi", m["content"])
 		}
 	})
 }
@@ -805,4 +933,48 @@ func dataPointAttrs(data metricdata.Aggregation) []attribute.Set {
 		return out
 	}
 	return nil
+}
+
+func TestFinalCommandOutput(t *testing.T) {
+	tests := []struct {
+		name    string
+		outputs []string
+		want    string
+	}{
+		{"no outputs", nil, ""},
+		{"single output", []string{"out"}, "out"},
+		{"joined with separator", []string{"a", "b"}, "a\n---\nb"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := finalCommandOutput(tt.outputs); got != tt.want {
+				t.Errorf("got %q want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFinalCommandOutputIsCapped(t *testing.T) {
+	outputs := []string{strings.Repeat("a", 40000), strings.Repeat("b", 40000)}
+	got := finalCommandOutput(outputs)
+	if len(got) > finalOutputBytes {
+		t.Errorf("len %d exceeds cap %d", len(got), finalOutputBytes)
+	}
+	if !strings.Contains(got, "truncated") {
+		t.Errorf("missing truncation marker")
+	}
+}
+
+func TestSystemPromptBatchingGuidance(t *testing.T) {
+	// The prompt must not tell the model to run everything sequentially while
+	// also telling it to batch; the two instructions conflict and a small model
+	// resolves that unpredictably.
+	if contains(systemPrompt, "sequentially") {
+		t.Errorf("system prompt still says 'sequentially', which contradicts the batching section")
+	}
+	for _, want := range []string{"Batching Work", "&&", "single turn"} {
+		if !contains(systemPrompt, want) {
+			t.Errorf("system prompt missing batching guidance %q", want)
+		}
+	}
 }
