@@ -25,6 +25,20 @@ var (
 	errVMShouldNotBeUsed = errors.New("VM already exists and shouldn't be used")
 )
 
+const outputBaseDir = "/tmp/mph-output"
+
+func OutputRunDir(runID string) string {
+	return outputBaseDir + "/" + runID
+}
+
+func outputRunDirCommands(runID string) []string {
+	// mkdir only: wiping the base dir here would delete live captures of
+	// concurrent runs sharing one VM.
+	return []string{
+		fmt.Sprintf("mkdir -p %q", OutputRunDir(runID)),
+	}
+}
+
 func determineIfExistingVMIsOK(name string) error {
 	reader := bufio.NewReader(os.Stdin)
 
@@ -48,7 +62,7 @@ func determineIfExistingVMIsOK(name string) error {
 	}
 }
 
-func Start(ctx context.Context, agt *agent.Agent, client *multipass.Client, cfg config.Config, ignoreExisting, keep bool) error {
+func Start(ctx context.Context, agt *agent.Agent, client *multipass.Client, cfg config.Config, ignoreExisting, keep bool, runID string) error {
 	tracer := otel.Tracer("mph")
 	ctx, span := tracer.Start(ctx, "mph.run", trace.WithAttributes(
 		attribute.String("mph.vm.name", cfg.VM.Name),
@@ -103,6 +117,18 @@ func Start(ctx context.Context, agt *agent.Agent, client *multipass.Client, cfg 
 			span.SetStatus(codes.Error, err.Error())
 			return err
 		}
+	}
+
+	if rid := strings.TrimSpace(runID); rid != "" {
+		for _, cmd := range outputRunDirCommands(rid) {
+			if _, err := client.Exec(ctx, cfg.VM.Name, cmd, cfg.Truncation.ToolResult); err != nil {
+				err = fmt.Errorf("output run dir setup failed: %w", err)
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+				return err
+			}
+		}
+		span.SetAttributes(attribute.String("mph.output.dir", OutputRunDir(rid)))
 	}
 
 	if strings.TrimSpace(cfg.ContentDir) != "" {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -51,6 +52,7 @@ type Config struct {
 	Endpoint           string
 	ServiceName        string
 	ResourceAttributes map[string]string
+	RunID              string
 }
 
 func Setup(cfg Config) (func(context.Context) error, error) {
@@ -74,6 +76,9 @@ func Setup(cfg Config) (func(context.Context) error, error) {
 	}
 	for k, v := range cfg.ResourceAttributes {
 		attrs = append(attrs, attribute.String(k, v))
+	}
+	if strings.TrimSpace(cfg.RunID) != "" {
+		attrs = append(attrs, attribute.String("service.instance.id", cfg.RunID))
 	}
 
 	res, err := resource.New(ctx,
@@ -211,27 +216,8 @@ func LogEvent(ctx context.Context, logger zerolog.Logger, level zerolog.Level, m
 		evt = nil
 	} else {
 		evt.CallerSkipFrame(1)
-		for k, v := range fields {
-			switch val := v.(type) {
-			case string:
-				evt = evt.Str(k, val)
-			case int:
-				evt = evt.Int(k, val)
-			case int64:
-				evt = evt.Int64(k, val)
-			case bool:
-				evt = evt.Bool(k, val)
-			case float64:
-				evt = evt.Float64(k, val)
-			case json.RawMessage:
-				evt = evt.RawJSON(k, val)
-			case []byte:
-				evt = evt.Bytes(k, val)
-			case error:
-				evt = evt.AnErr(k, val)
-			default:
-				evt = evt.Interface(k, v)
-			}
+		for _, k := range orderedFieldKeys(fields) {
+			evt = appendField(evt, k, fields[k])
 		}
 		evt.Msg(msg)
 	}
@@ -267,6 +253,48 @@ func LogEvent(ctx context.Context, logger zerolog.Logger, level zerolog.Level, m
 		rec.AddAttributes(kv)
 	}
 	global.Logger("mph").Emit(ctx, rec)
+}
+
+// orderedFieldKeys puts identity fields first so a log line reads who and what
+// before the payload blobs.
+func orderedFieldKeys(fields map[string]any) []string {
+	keys := make([]string, 0, len(fields))
+	seen := map[string]bool{}
+	for _, k := range []string{"iteration", "tool", "id", "part", "outcome"} {
+		if _, ok := fields[k]; ok {
+			keys = append(keys, k)
+			seen[k] = true
+		}
+	}
+	for k := range fields {
+		if !seen[k] {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+func appendField(evt *zerolog.Event, k string, v any) *zerolog.Event {
+	switch val := v.(type) {
+	case string:
+		return evt.Str(k, val)
+	case int:
+		return evt.Int(k, val)
+	case int64:
+		return evt.Int64(k, val)
+	case bool:
+		return evt.Bool(k, val)
+	case float64:
+		return evt.Float64(k, val)
+	case json.RawMessage:
+		return evt.RawJSON(k, val)
+	case []byte:
+		return evt.Bytes(k, val)
+	case error:
+		return evt.AnErr(k, val)
+	default:
+		return evt.Interface(k, v)
+	}
 }
 
 func convertLevel(level zerolog.Level) otellog.Severity {

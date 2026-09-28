@@ -1,8 +1,10 @@
 package otel
 
 import (
+	"bytes"
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -239,4 +241,26 @@ func TestTraceAttrs(t *testing.T) {
 			t.Fatalf("traceAttrs(ended span) = %v, want 2 attributes", got)
 		}
 	})
+}
+
+func TestLogEventFieldOrder(t *testing.T) {
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf)
+	for range 20 {
+		buf.Reset()
+		LogEvent(context.Background(), logger, zerolog.InfoLevel, "tool succeeded", map[string]any{
+			"result":    strings.Repeat("x", 5000),
+			"id":        "call-1",
+			"tool":      "multipass_exec",
+			"iteration": 2,
+		})
+		line := buf.String()
+		tool := strings.Index(line, `"tool"`)
+		id := strings.Index(line, `"id"`)
+		iter := strings.Index(line, `"iteration"`)
+		result := strings.Index(line, `"result"`)
+		if !(iter < tool && tool < id && id < result) {
+			t.Fatalf("fields out of order: %q...", line[:120])
+		}
+	}
 }
