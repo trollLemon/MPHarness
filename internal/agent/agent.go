@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
-	"uuid"
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	"github.com/rs/zerolog"
@@ -19,10 +18,12 @@ import (
 	"github.com/trollLemon/MPHarness/internal/config"
 	"github.com/trollLemon/MPHarness/internal/multipass"
 	mphotel "github.com/trollLemon/MPHarness/internal/otel"
+	"github.com/trollLemon/MPHarness/internal/output"
 )
 
 type Kronk interface {
 	Chat(ctx context.Context, req model.D) (model.ChatResponse, error)
+	Tokenize(ctx context.Context, d model.D) (model.TokenizeResponse, error)
 	ModelConfig() model.Config
 }
 
@@ -52,10 +53,6 @@ const (
 	minToolResultBytes = 2 * 1024
 	maxToolResultBytes = 64 * 1024
 
-	// toolResultHeadPercent splits the surviving budget between the head and the
-	// tail, favouring the head where the command and its context appear.
-	toolResultHeadPercent = 70
-
 	// assumedContextWindow is used when the model reports no window, so the
 	// budget is still bounded rather than falling back to an unbounded payload.
 	assumedContextWindow = 8192
@@ -72,15 +69,11 @@ func finalCommandOutput(commandOutputs []string) string {
 	if len(commandOutputs) == 0 {
 		return ""
 	}
-	return truncateToolResult(strings.Join(commandOutputs, "\n---\n"), finalOutputBytes)
+	return truncate(strings.Join(commandOutputs, "\n---\n"), finalOutputBytes)
 }
 
-// toolResultBudgetBytes returns the cap for one tool result handed to the model.
-// An explicit agent.max_output_bytes wins; otherwise the cap tracks the context
-// window the model actually loaded, which the harness auto-tunes to the host
-// VRAM and the user never picks. A fixed byte cap is therefore wrong in both
-// directions: harmless on a large window, and on a small one a single result can
-// exceed the whole window and overflow the run on its first iteration.
+// toolResultBudgetBytes sizes the auto-capture inline cutoff: below it a
+// captured result returns inline, above it the model gets a handle.
 func toolResultBudgetBytes(cfg config.Config, contextWindow int) int {
 	if cfg.Agent.MaxOutputBytes > 0 {
 		return cfg.Agent.MaxOutputBytes
@@ -99,9 +92,10 @@ type Agent struct {
 	chatTimeout   time.Duration
 	totalTimeout  time.Duration
 	llmConfig     LLMConfig
+	runID         string
 }
 
-func NewAgent(log zerolog.Logger, krn Kronk, maxIterations int, chatTimeout time.Duration, totalTimeout time.Duration, llmConfig LLMConfig) *Agent {
+func NewAgent(log zerolog.Logger, krn Kronk, maxIterations int, chatTimeout time.Duration, totalTimeout time.Duration, llmConfig LLMConfig, runID string) *Agent {
 	if llmConfig.ToolChoice == "" {
 		llmConfig.ToolChoice = "auto"
 	}
@@ -113,6 +107,7 @@ func NewAgent(log zerolog.Logger, krn Kronk, maxIterations int, chatTimeout time
 		chatTimeout:   chatTimeout,
 		totalTimeout:  totalTimeout,
 		llmConfig:     llmConfig,
+		runID:         runID,
 	}
 }
 
@@ -120,13 +115,12 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *multipass.
 	ctx, cancel := context.WithTimeout(ctx, a.totalTimeout)
 	defer cancel()
 
-	toolDocs := buildToolDocuments()
+	toolDocs := buildToolDocuments(conf)
 	a.log.Info().Int("tools", len(toolDocs)).Msg("tool documents built")
 
 	conversation := buildInitialConversation(conf)
 
-	runUuid := uuid.NewV7()
-	runID := runUuid.String()
+	runID := a.runID
 	ctx = withRunID(ctx, runID)
 
 	var commandOutputs []string
@@ -140,8 +134,20 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *multipass.
 
 	toolResultBudget := toolResultBudgetBytes(conf, a.krn.ModelConfig().ContextWindow())
 
+	var store *output.Store
+	if conf.Output.Enabled {
+		store = output.NewStore(cli, conf.VM.Name, "/tmp/mph-output/"+runID, conf.Output, int64(toolResultBudget), conf.AllowedCommands)
+	}
+
+	compactionAttempts := 0
+	compactionsApplied := 0
 	for iter := 0; iter < a.maxIterations; iter++ {
-		res, err := a.runIteration(ctx, iter, conversation, toolDocs, commandOutputs, cli, conf, lastContextTokens, toolResultBudget)
+		var outcome string
+		conversation, lastContextTokens, compactionAttempts, outcome = a.maybeCompact(ctx, iter, conversation, store, conf, lastContextTokens, toolResultBudget, compactionAttempts)
+		if outcome == "applied" {
+			compactionsApplied++
+		}
+		res, err := a.runIteration(ctx, iter, conversation, toolDocs, commandOutputs, cli, conf, store, lastContextTokens)
 		if err != nil {
 			return err
 		}
@@ -164,6 +170,17 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *multipass.
 		a.log.Info().Msg("agent completed with no command output or final answer")
 	}
 
+	contextUsedPercent := 0.0
+	if window := a.krn.ModelConfig().ContextWindow(); window > 0 {
+		contextUsedPercent = float64(lastContextTokens) / float64(window) * 100
+	}
+	a.log.Info().
+		Float64("context_used_percent", contextUsedPercent).
+		Int("compactions_applied", compactionsApplied).
+		Int("compaction_attempts", compactionAttempts).
+		Msg("run complete")
+	fmt.Printf("Run stats: context used=%.1f%% compactions applied=%d\n", contextUsedPercent, compactionsApplied)
+
 	return nil
 }
 
@@ -180,7 +197,7 @@ type iterationResult struct {
 func (a *Agent) runIteration(
 	ctx context.Context, iter int, conversation, toolDocs []model.D,
 	commandOutputs []string, cli *multipass.Client, conf config.Config,
-	lastContextTokens int64, toolResultBudget int,
+	store *output.Store, lastContextTokens int64,
 ) (res *iterationResult, err error) {
 	res = &iterationResult{
 		conversation:   conversation,
@@ -191,7 +208,7 @@ func (a *Agent) runIteration(
 	iterCtx, iterSpan := getAgentTracer().Start(ctx, "mph.agent.iteration",
 		trace.WithAttributes(runSpanAttrs(ctx, attribute.Int("mph.iteration", iter+1))...))
 	if iterationsCounter != nil {
-		iterationsCounter.Add(iterCtx, 1, runAttrs(iterCtx), metric.WithAttributes(attribute.Int("mph.iteration", iter+1)))
+		iterationsCounter.Add(iterCtx, 1, metric.WithAttributes(attribute.Int("mph.iteration", iter+1)))
 	}
 
 	iterLog := a.log.With().Ctx(iterCtx).Logger()
@@ -206,7 +223,9 @@ func (a *Agent) runIteration(
 		return res, err
 	}
 
-	lastContextTokens = recordTokenUsage(iterCtx, iterSpan, iterLog, lastContextTokens, resp.Usage)
+	if resp.Usage != nil {
+		lastContextTokens = recordTokenUsage(iterCtx, iterSpan, iterLog, resp.Usage)
+	}
 	res.contextTokens = lastContextTokens
 
 	msg, finishReason, shouldBreak := a.extractAssistantMessage(resp)
@@ -247,7 +266,7 @@ func (a *Agent) runIteration(
 	toolCallDocs := a.buildToolCallDocsWithContext(iterCtx, toolCalls, iter)
 	res.conversation = appendToConversation(conversation, buildAssistantMessage(msg, toolCallDocs, conf.Agent.Reasoning()))
 
-	toolResponses, newOutputs := a.executeToolCalls(iterCtx, cli, conf, toolCalls, toolResultBudget)
+	toolResponses, newOutputs := a.executeToolCalls(iterCtx, cli, conf, store, toolCalls)
 	res.commandOutputs = append(res.commandOutputs, newOutputs...)
 	res.conversation = appendToConversation(res.conversation, toolResponses...)
 
@@ -359,14 +378,14 @@ func (a *Agent) buildToolCallDocsWithContext(ctx context.Context, toolCalls []mo
 	return docs
 }
 
-func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg config.Config, toolCalls []model.ResponseToolCall, resultBudget int) ([]model.D, []string) {
+func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg config.Config, store *output.Store, toolCalls []model.ResponseToolCall) ([]model.D, []string) {
 	var toolResponses []model.D
 	var commandOutputs []string
 
 	span := trace.SpanFromContext(ctx)
 	for _, tc := range toolCalls {
 		start := time.Now()
-		result, err := Call(ctx, cli, cfg, tc.Function.Name, map[string]any(tc.Function.Arguments))
+		result, err := Call(ctx, cli, cfg, store, tc.Function.Name, map[string]any(tc.Function.Arguments))
 		duration := time.Since(start)
 		durationSec := duration.Seconds()
 		durationMs := duration.Milliseconds()
@@ -381,7 +400,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg
 			})
 			content = buildToolErrorContent(err)
 			if toolFailuresCounter != nil {
-				toolFailuresCounter.Add(ctx, 1, runAttrs(ctx), metric.WithAttributes(attribute.String("mph.tool.name", tc.Function.Name)))
+				toolFailuresCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("mph.tool.name", tc.Function.Name)))
 			}
 			span.AddEvent("mph.agent.tool_result", trace.WithAttributes(
 				attribute.String("mph.tool.name", tc.Function.Name),
@@ -390,8 +409,32 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg
 				attribute.String("mph.tool.result", truncate(err.Error(), cfg.Truncation.ToolResult)),
 				attribute.Int64("mph.tool.duration_ms", durationMs),
 			))
+		} else if isToolEnvelope(result) {
+			status = "SUCCESS"
+			mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "tool succeeded", map[string]any{
+				"tool":   tc.Function.Name,
+				"id":     tc.ID,
+				"result": truncate(result, cfg.Truncation.ToolResult),
+			})
+			if isCaptureEnvelope(result) {
+				if id := capturedOutputID(result); id != "" {
+					commandOutputs = append(commandOutputs, fmt.Sprintf("<captured output_id=%s>", id))
+					mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "command output too large for inline context, captured to file", map[string]any{
+						"tool":      tc.Function.Name,
+						"id":        tc.ID,
+						"output_id": id,
+					})
+				}
+			}
+			content = result
+			span.AddEvent("mph.agent.tool_result", trace.WithAttributes(
+				attribute.String("mph.tool.name", tc.Function.Name),
+				attribute.String("mph.tool.id", tc.ID),
+				attribute.String("mph.tool.status", status),
+				attribute.String("mph.tool.result", truncate(result, cfg.Truncation.ToolResult)),
+				attribute.Int64("mph.tool.duration_ms", durationMs),
+			))
 		} else {
-			result = truncateToolResult(result, resultBudget)
 			status = "SUCCESS"
 			mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "tool succeeded", map[string]any{
 				"tool":   tc.Function.Name,
@@ -414,10 +457,10 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg
 			))
 		}
 		if toolCallsCounter != nil {
-			toolCallsCounter.Add(ctx, 1, runAttrs(ctx), metric.WithAttributes(attribute.String("mph.tool.name", tc.Function.Name)))
+			toolCallsCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("mph.tool.name", tc.Function.Name)))
 		}
 		if toolDurationHist != nil {
-			toolDurationHist.Record(ctx, durationSec, runAttrs(ctx), metric.WithAttributes(
+			toolDurationHist.Record(ctx, durationSec, metric.WithAttributes(
 				attribute.String("mph.tool.name", tc.Function.Name),
 				attribute.String("mph.tool.status", status),
 			))
@@ -439,46 +482,12 @@ func truncate(s string, n int) string {
 	return fmt.Sprintf("%s…(truncated, %d of %d bytes)", trimPartialRuneTail(s[:n]), n, len(s))
 }
 
-// truncateToolResult caps a tool result at n bytes for the model, keeping both
-// ends. Command output usually carries its signal at the end (errors, summary
-// lines, footers), so a head-only cut drops the part the model needs. The
-// marker stays so the model knows output is missing. Only the n <= 0 and
-// too-short cases pass through; the cap itself is fixed per result when the
-// result is created, never revised afterwards, because rewriting an earlier
-// message invalidates the inference server's prefix cache and forces a full
-// re-prefill of the conversation.
-func truncateToolResult(s string, n int) string {
-	if n <= 0 || len(s) <= n {
-		return s
-	}
-	marker := fmt.Sprintf("\n…(truncated, %d of %d bytes; head and tail shown)…\n", n, len(s))
-	budget := n - len(marker)
-	if budget <= 0 {
-		return truncate(s, n)
-	}
-	head := budget * toolResultHeadPercent / 100
-	tail := budget - head
-	return trimPartialRuneTail(s[:head]) + marker + trimPartialRuneHead(s[len(s)-tail:])
-}
-
 // trimPartialRuneTail drops a trailing partial UTF-8 sequence so a byte-indexed
 // cut never splits a rune.
 func trimPartialRuneTail(s string) string {
 	for len(s) > 0 {
 		if r, size := utf8.DecodeLastRuneInString(s); r == utf8.RuneError && size <= 1 {
 			s = s[:len(s)-1]
-			continue
-		}
-		break
-	}
-	return s
-}
-
-// trimPartialRuneHead drops a leading partial UTF-8 sequence.
-func trimPartialRuneHead(s string) string {
-	for len(s) > 0 {
-		if r, size := utf8.DecodeRuneInString(s); r == utf8.RuneError && size <= 1 {
-			s = s[1:]
 			continue
 		}
 		break

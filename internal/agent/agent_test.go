@@ -10,7 +10,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
-	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -25,9 +24,11 @@ type mockKronk struct {
 	responses    []model.ChatResponse
 	errs         []error
 	calls        int
+	respIdx      int
 	captured     []model.D
 	chatFunc     func(context.Context, model.D) (model.ChatResponse, error)
 	contextWidth int
+	failHandover bool
 }
 
 func (m *mockKronk) ModelConfig() model.Config {
@@ -42,7 +43,16 @@ func (m *mockKronk) Chat(ctx context.Context, req model.D) (model.ChatResponse, 
 	if m.chatFunc != nil {
 		return m.chatFunc(ctx, req)
 	}
-	idx := m.calls
+	if isCompactionRequest(req) {
+		m.calls++
+		m.captured = append(m.captured, req)
+		if m.failHandover {
+			return model.ChatResponse{}, context.DeadlineExceeded
+		}
+		return chatResp("work summary", "", model.FinishReasonStop, nil, nil), nil
+	}
+	idx := m.respIdx
+	m.respIdx++
 	m.calls++
 	m.captured = append(m.captured, req)
 	if idx < len(m.responses) {
@@ -53,6 +63,28 @@ func (m *mockKronk) Chat(ctx context.Context, req model.D) (model.ChatResponse, 
 		return m.responses[idx], err
 	}
 	return model.ChatResponse{}, nil
+}
+
+func isCompactionRequest(req model.D) bool {
+	msgs, _ := req["messages"].([]model.D)
+	for _, m := range msgs {
+		if c, _ := m["content"].(string); c != "" && len(c) > 40 && contains(c, "handover") {
+			return true
+		}
+	}
+	if s, _ := req["system"].(string); contains(s, "handover") {
+		return true
+	}
+	return false
+}
+
+func (m *mockKronk) Tokenize(_ context.Context, d model.D) (model.TokenizeResponse, error) {
+	input, _ := d["input"].(string)
+	n := len(input) / bytesPerToken
+	if n < 1 && len(input) > 0 {
+		n = 1
+	}
+	return model.TokenizeResponse{Tokens: n}, nil
 }
 
 func strPtr(s string) *string { return &s }
@@ -106,7 +138,7 @@ func TestLLMConfig(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			a := NewAgent(zerolog.Nop(), &mockKronk{}, 3, time.Second, 5*time.Second, tt.cfg)
+			a := NewAgent(zerolog.Nop(), &mockKronk{}, 3, time.Second, 5*time.Second, tt.cfg, "")
 			if a.llmConfig.Temperature != tt.want.Temperature || a.llmConfig.TopP != tt.want.TopP || a.llmConfig.TopK != tt.want.TopK || a.llmConfig.ToolChoice != tt.want.ToolChoice {
 				t.Fatalf("got %+v want %+v", a.llmConfig, tt.want)
 			}
@@ -146,40 +178,6 @@ func TestTruncateRuneBoundary(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, "aaé") {
 		t.Fatalf("got %q want prefix %q", got, "aaé")
-	}
-}
-
-func TestTruncateToolResultKeepsBothEnds(t *testing.T) {
-	s := "HEADMARKER" + strings.Repeat("m", 500) + "TAILMARKER"
-	got := truncateToolResult(s, 200)
-	if !strings.Contains(got, "HEADMARKER") {
-		t.Errorf("lost head: %q", got)
-	}
-	if !strings.Contains(got, "TAILMARKER") {
-		t.Errorf("lost tail: %q", got)
-	}
-	if !utf8.ValidString(got) {
-		t.Errorf("invalid UTF-8: %q", got)
-	}
-	if len(got) > 200 {
-		t.Errorf("len %d exceeds budget 200", len(got))
-	}
-	if !strings.Contains(got, "truncated, 200 of 520 bytes") {
-		t.Errorf("missing truncation marker: %q", got)
-	}
-}
-
-func TestTruncateToolResultShortInput(t *testing.T) {
-	if got := truncateToolResult("hello", 4000); got != "hello" {
-		t.Errorf("got %q want hello", got)
-	}
-}
-
-func TestTruncateToolResultRuneBoundary(t *testing.T) {
-	s := "é" + strings.Repeat("x", 400) + "é"
-	got := truncateToolResult(s, 120)
-	if !utf8.ValidString(got) {
-		t.Fatalf("invalid UTF-8: %q", got)
 	}
 }
 
@@ -267,7 +265,7 @@ func contains(s, sub string) bool {
 }
 
 func TestBuildToolDocuments(t *testing.T) {
-	docs := buildToolDocuments()
+	docs := buildToolDocuments(config.Config{})
 	if len(docs) == 0 {
 		t.Fatalf("no tool docs")
 	}
@@ -336,7 +334,7 @@ func TestExtractAssistantMessage(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			a := NewAgent(zerolog.Nop(), &mockKronk{}, 3, time.Second, 5*time.Second, defaultLLMConfig())
+			a := NewAgent(zerolog.Nop(), &mockKronk{}, 3, time.Second, 5*time.Second, defaultLLMConfig(), "")
 			msg, fr, shouldBreak := a.extractAssistantMessage(tt.resp)
 			if shouldBreak != tt.wantBreak {
 				t.Fatalf("break %v want %v", shouldBreak, tt.wantBreak)
@@ -371,7 +369,7 @@ func TestShouldTerminateWithoutToolCalls(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			a := NewAgent(zerolog.Nop(), &mockKronk{}, 3, time.Second, 5*time.Second, defaultLLMConfig())
+			a := NewAgent(zerolog.Nop(), &mockKronk{}, 3, time.Second, 5*time.Second, defaultLLMConfig(), "")
 			if got := a.shouldTerminateWithoutToolCalls(tt.calls, tt.reason, 0); got != tt.want {
 				t.Fatalf("got %v want %v", got, tt.want)
 			}
@@ -394,7 +392,7 @@ func TestBuildToolCallDocs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			a := NewAgent(zerolog.Nop(), &mockKronk{}, 3, time.Second, 5*time.Second, defaultLLMConfig())
+			a := NewAgent(zerolog.Nop(), &mockKronk{}, 3, time.Second, 5*time.Second, defaultLLMConfig(), "")
 			docs := a.buildToolCallDocs(tt.calls, 0)
 			if len(docs) != 1 {
 				t.Fatalf("docs len %d", len(docs))
@@ -735,7 +733,7 @@ func TestExecute(t *testing.T) {
 			if tt.name == "uses LLMConfig" {
 				llmCfg = LLMConfig{Temperature: 0.7, TopP: 0.9, TopK: 5, ToolChoice: "required"}
 			}
-			agent := NewAgent(log, tt.mock, tt.maxIter, time.Second, 5*time.Second, llmCfg)
+			agent := NewAgent(log, tt.mock, tt.maxIter, time.Second, 5*time.Second, llmCfg, "")
 			conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
 			// adjust VM name for first test
 			if tt.name == "no tool calls success" {
@@ -784,7 +782,7 @@ func TestCallChatUsesTimeout(t *testing.T) {
 			return chatResp("ok", "", model.FinishReasonStop, nil, nil), nil
 		},
 	}
-	agent := NewAgent(log, mock, 3, 2*time.Second, 5*time.Second, defaultLLMConfig())
+	agent := NewAgent(log, mock, 3, 2*time.Second, 5*time.Second, defaultLLMConfig(), "")
 	_, err := agent.callChat(context.Background(), model.D{"messages": []model.D{}}, 0)
 	if err != nil {
 		t.Fatalf("callChat failed: %v", err)
@@ -804,13 +802,14 @@ func TestExecuteTagsMetricsWithRunID(t *testing.T) {
 		tokensHist, tpsHist, iterationsCounter = nil, nil, nil
 		toolDurationHist, toolCallsCounter, toolFailuresCounter = nil, nil, nil
 		contextWindowGauge, contextTokensGauge = nil, nil
+		compactionsCounter, compactionDurationHist, tokensReclaimedHist = nil, nil, nil
 	})
 	mock := &mockKronk{
 		contextWidth: 32768,
 		responses: []model.ChatResponse{chatResp("done", "", model.FinishReasonStop, nil,
 			&model.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120, TokensPerSecond: 8.5})},
 	}
-	agent := NewAgent(zerolog.Nop(), mock, 2, time.Second, 5*time.Second, defaultLLMConfig())
+	agent := NewAgent(zerolog.Nop(), mock, 2, time.Second, 5*time.Second, defaultLLMConfig(), "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5")
 	conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
 	if err := agent.Execute(context.Background(), conf, multipass.New(zerolog.Nop())); err != nil {
 		t.Fatalf("execute: %v", err)
@@ -822,22 +821,18 @@ func TestExecuteTagsMetricsWithRunID(t *testing.T) {
 	}
 
 	seen := map[string]bool{}
-	runIDs := map[string]bool{}
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
 			seen[m.Name] = true
-			attrs := dataPointAttrs(m.Data)
-			if len(attrs) == 0 {
-				t.Errorf("metric %q produced no data points", m.Name)
-				continue
-			}
-			for _, set := range attrs {
-				v, ok := set.Value("mph.run.id")
-				if !ok || v.AsString() == "" {
-					t.Fatalf("metric %q missing mph.run.id attribute (attrs: %s)", m.Name, set.Encoded(attribute.DefaultEncoder()))
-					continue
+			for _, set := range dataPointAttrs(m.Data) {
+				if v, ok := set.Value("mph.run.id"); ok {
+					t.Fatalf("metric %q must not carry mph.run.id, got %q", m.Name, v.AsString())
 				}
-				runIDs[v.AsString()] = true
+			}
+			if m.Name == "mph.context.window" || m.Name == "mph.context.tokens" {
+				if _, ok := m.Data.(metricdata.Gauge[int64]); !ok {
+					t.Errorf("metric %q must be Int64Gauge, got %T", m.Name, m.Data)
+				}
 			}
 		}
 	}
@@ -850,13 +845,9 @@ func TestExecuteTagsMetricsWithRunID(t *testing.T) {
 			t.Errorf("metric %q was never recorded", name)
 		}
 	}
-	if len(runIDs) != 1 {
-		t.Fatalf("want exactly one run id across all metrics, got %d: %v", len(runIDs), runIDs)
-	}
-	for id := range runIDs {
-		if _, err := uuid.Parse(id); err != nil {
-			t.Errorf("run id %q is not a uuid: %v", id, err)
-		}
+
+	if got := runSpanAttrs(withRunID(context.Background(), "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5")); len(got) == 0 {
+		t.Fatalf("runSpanAttrs must still carry mph.run.id on spans")
 	}
 }
 
@@ -957,8 +948,8 @@ func TestFinalCommandOutput(t *testing.T) {
 func TestFinalCommandOutputIsCapped(t *testing.T) {
 	outputs := []string{strings.Repeat("a", 40000), strings.Repeat("b", 40000)}
 	got := finalCommandOutput(outputs)
-	if len(got) > finalOutputBytes {
-		t.Errorf("len %d exceeds cap %d", len(got), finalOutputBytes)
+	if len(got) > finalOutputBytes+64 {
+		t.Errorf("len %d exceeds cap %d plus marker", len(got), finalOutputBytes)
 	}
 	if !strings.Contains(got, "truncated") {
 		t.Errorf("missing truncation marker")
