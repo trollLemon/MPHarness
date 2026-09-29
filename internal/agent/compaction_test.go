@@ -59,13 +59,18 @@ func lastGaugeValue(t *testing.T, reader *sdkmetric.ManualReader, name string) i
 }
 
 func TestCompactionFiresAtThreshold(t *testing.T) {
-	first := chatResp("step", "", model.FinishReasonTool, []model.ResponseToolCall{
-		{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{Name: "multipass_info", Arguments: model.ToolCallArguments{}}},
-	}, &model.Usage{PromptTokens: 7000, CompletionTokens: 500, TotalTokens: 7500})
-	second := chatResp("final", "", model.FinishReasonStop, nil, &model.Usage{PromptTokens: 1000, CompletionTokens: 50, TotalTokens: 1050})
+	bigStep := func(usage *model.Usage) model.ChatResponse {
+		return chatResp(strings.Repeat("s", 4000), "", model.FinishReasonTool, []model.ResponseToolCall{
+			{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{Name: "multipass_info", Arguments: model.ToolCallArguments{}}},
+		}, usage)
+	}
 	mock := &mockKronk{
 		contextWidth: 8192,
-		responses:    []model.ChatResponse{first, second},
+		responses: []model.ChatResponse{
+			bigStep(&model.Usage{PromptTokens: 3500, CompletionTokens: 500, TotalTokens: 4000}),
+			bigStep(&model.Usage{PromptTokens: 7000, CompletionTokens: 500, TotalTokens: 7500}),
+			chatResp("final", "", model.FinishReasonStop, nil, &model.Usage{PromptTokens: 1000, CompletionTokens: 50, TotalTokens: 1050}),
+		},
 	}
 	agt := NewAgent(zerolog.Nop(), mock, 5, time.Second, 30*time.Second, defaultLLMConfig(), "run-compact-1")
 	conf := config.Config{
@@ -112,12 +117,16 @@ func TestCompactionDisabledSkips(t *testing.T) {
 
 func TestCompactionGaugeDropsAfterApply(t *testing.T) {
 	reader := newManualReader(t)
+	bigStep := func(usage *model.Usage) model.ChatResponse {
+		return chatResp(strings.Repeat("s", 4000), "", model.FinishReasonTool, []model.ResponseToolCall{
+			{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{Name: "multipass_info", Arguments: model.ToolCallArguments{}}},
+		}, usage)
+	}
 	mock := &mockKronk{
 		contextWidth: 8192,
 		responses: []model.ChatResponse{
-			chatResp("step", "", model.FinishReasonTool, []model.ResponseToolCall{
-				{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{Name: "multipass_info", Arguments: model.ToolCallArguments{}}},
-			}, &model.Usage{TotalTokens: 7500}),
+			bigStep(&model.Usage{TotalTokens: 4000}),
+			bigStep(&model.Usage{TotalTokens: 7500}),
 			chatResp("final", "", model.FinishReasonStop, nil, &model.Usage{TotalTokens: 1050}),
 		},
 	}
@@ -154,7 +163,7 @@ func TestCompactionGaugeDropsAfterApply(t *testing.T) {
 
 func TestCompactionFailuresStopAfterMaxAttempts(t *testing.T) {
 	makeToolResp := func() model.ChatResponse {
-		return chatResp("step", "", model.FinishReasonTool, []model.ResponseToolCall{
+		return chatResp(strings.Repeat("s", 4000), "", model.FinishReasonTool, []model.ResponseToolCall{
 			{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{Name: "multipass_info", Arguments: model.ToolCallArguments{}}},
 		}, &model.Usage{TotalTokens: 7500})
 	}
@@ -188,6 +197,34 @@ func TestCompactionFailuresStopAfterMaxAttempts(t *testing.T) {
 	}
 	if handovers != 3 {
 		t.Fatalf("want exactly maxAttempts handover calls, got %d", handovers)
+	}
+}
+
+func TestRevertedDoesNotBurnAttempts(t *testing.T) {
+	mock := &mockKronk{contextWidth: 8192}
+	agt := NewAgent(zerolog.Nop(), mock, 5, time.Second, 30*time.Second, defaultLLMConfig(), "run-revert")
+	conf := config.Config{
+		VM:     config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
+		Model:  "m",
+		Prompt: "task",
+		Compaction: config.CompactionConfig{
+			Enabled: true, Threshold: 0.8, MaxSummaryTokens: 512,
+			RecentTurns: 1, MinMessages: 2, MaxAttempts: 3,
+		},
+	}
+	tiny := []model.D{
+		{"role": "system", "content": "sys"},
+		{"role": "user", "content": "task"},
+	}
+	_, _, attempts, outcome := agt.maybeCompact(context.Background(), 0, tiny, nil, conf, 7500, 4096, 0, 0)
+	if outcome != "reverted" {
+		t.Fatalf("want reverted for tiny history, got %q", outcome)
+	}
+	if attempts != 0 {
+		t.Fatalf("revert must not burn the failure budget, attempts=%d", attempts)
+	}
+	if mock.calls != 0 {
+		t.Fatalf("pre-check revert must skip the summarizer call, got %d calls", mock.calls)
 	}
 }
 

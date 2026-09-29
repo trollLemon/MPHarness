@@ -487,3 +487,18 @@ func TestStoreReadErrors(t *testing.T) {
 		t.Fatalf("want offset >= 1 error")
 	}
 }
+
+func TestLookupErrorGuidesModel(t *testing.T) {
+	empty := NewStore(&fakeExec{fn: func(name, cmd string) (string, error) { return "", nil }},
+		"vm", "/tmp/mph-output/run1", testCfg(), 4096, nil)
+	_, err := empty.Search(context.Background(), SearchArgs{OutputID: "0", Pattern: "x"})
+	if err == nil || !strings.Contains(err.Error(), "no active handles") {
+		t.Fatalf("empty registry must say there are no handles, got %v", err)
+	}
+	empty.handles["oid-1"] = Handle{ID: "oid-1", TotalLines: 4}
+	empty.handles["oid-2"] = Handle{ID: "oid-2", TotalLines: 4}
+	_, err = empty.Read(context.Background(), "output", 1, 10)
+	if err == nil || !strings.Contains(err.Error(), "oid-1") || !strings.Contains(err.Error(), "never invent") {
+		t.Fatalf("error must list valid ids, got %v", err)
+	}
+}

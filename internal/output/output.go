@@ -365,11 +365,19 @@ func (s *Store) Capture(ctx context.Context, command string, force bool) (Result
 }
 
 func (s *Store) lookup(outputID string) (Handle, error) {
-	h, ok := s.handles[strings.TrimSpace(outputID)]
-	if !ok {
-		return Handle{}, fmt.Errorf("unknown output_id %q", outputID)
+	id := strings.TrimSpace(outputID)
+	if h, ok := s.handles[id]; ok {
+		return h, nil
 	}
-	return h, nil
+	if len(s.handles) == 0 {
+		return Handle{}, fmt.Errorf("unknown output_id %q (no active handles; use multipass_exec for new commands, not output_search/output_read)", outputID)
+	}
+	ids := make([]string, 0, len(s.handles))
+	for k := range s.handles {
+		ids = append(ids, k)
+	}
+	sort.Strings(ids)
+	return Handle{}, fmt.Errorf("unknown output_id %q (active handles: %s; never invent an output_id)", outputID, strings.Join(ids, ", "))
 }
 
 func (s *Store) resolveMaxMatches() int {

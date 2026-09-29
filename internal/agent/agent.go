@@ -143,7 +143,7 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *multipass.
 	compactionsApplied := 0
 	for iter := 0; iter < a.maxIterations; iter++ {
 		var outcome string
-		conversation, lastContextTokens, compactionAttempts, outcome = a.maybeCompact(ctx, iter, conversation, store, conf, lastContextTokens, toolResultBudget, compactionAttempts)
+		conversation, lastContextTokens, compactionAttempts, outcome = a.maybeCompact(ctx, iter, conversation, store, conf, lastContextTokens, toolResultBudget, compactionAttempts, compactionsApplied)
 		if outcome == "applied" {
 			compactionsApplied++
 		}
