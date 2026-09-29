@@ -41,36 +41,61 @@ const sampleInfoJSON = `{
 }`
 
 func TestInfo(t *testing.T) {
-	bin := writeFakeBin(t, `cat <<'EOF'
-`+sampleInfoJSON+`
-EOF
-`)
-	c := &Client{bin: bin, log: zerolog.Nop()}
-
-	raw, err := c.Info(context.Background(), "test-vm")
-	if err != nil {
-		t.Fatalf("Info failed: %v", err)
-	}
-	if strings.TrimSpace(raw) != strings.TrimSpace(sampleInfoJSON) {
-		t.Errorf("unexpected raw output:\n%s\nwant:\n%s", raw, sampleInfoJSON)
-	}
-}
-
-func TestInfoEmptyName(t *testing.T) {
-	c := &Client{bin: "multipass", log: zerolog.Nop()}
-	if _, err := c.Info(context.Background(), "  "); err == nil {
-		t.Fatalf("expected error for empty name")
-	}
-}
-
-func TestInfoInstanceNotFound(t *testing.T) {
-	bin := writeFakeBin(t, `echo "info failed: instance \"ghost\" does not exist" >&2
+	tests := []struct {
+		name      string
+		script    string
+		vm        string
+		wantRaw   string
+		wantErrIs error
+		wantErr   bool
+	}{
+		{
+			name:    "returns raw payload",
+			script:  "cat <<'EOF'\n" + sampleInfoJSON + "\nEOF\n",
+			vm:      "test-vm",
+			wantRaw: sampleInfoJSON,
+		},
+		{
+			name:    "empty name rejected",
+			vm:      "  ",
+			wantErr: true,
+		},
+		{
+			name: "instance not found maps to sentinel",
+			script: `echo "info failed: instance \"ghost\" does not exist" >&2
 exit 2
-`)
-	c := &Client{bin: bin, log: zerolog.Nop()}
+`,
+			vm:        "ghost",
+			wantErrIs: ErrInstanceNotFound,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bin := "multipass"
+			if tt.script != "" {
+				bin = writeFakeBin(t, tt.script)
+			}
+			c := &Client{bin: bin, log: zerolog.Nop()}
 
-	_, err := c.Info(context.Background(), "ghost")
-	if !errors.Is(err, ErrInstanceNotFound) {
-		t.Fatalf("expected ErrInstanceNotFound, got %v", err)
+			raw, err := c.Info(context.Background(), tt.vm)
+			if tt.wantErrIs != nil {
+				if !errors.Is(err, tt.wantErrIs) {
+					t.Fatalf("expected %v, got %v", tt.wantErrIs, err)
+				}
+				return
+			}
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q", tt.vm)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Info failed: %v", err)
+			}
+			if strings.TrimSpace(raw) != strings.TrimSpace(tt.wantRaw) {
+				t.Errorf("unexpected raw output:\n%s\nwant:\n%s", raw, tt.wantRaw)
+			}
+		})
 	}
 }

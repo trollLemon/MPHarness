@@ -68,7 +68,7 @@ func (c *Client) Info(ctx context.Context, name string) (string, error) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
-		c.log.Debug().Err(err).Str("vm", name).Str("output", msg).Msg("multipass info failed")
+		c.log.Debug().Err(err).Str("vm", name).Str("out", msg).Msg("multipass info failed")
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		if isInstanceNotFound(msg) {
@@ -116,7 +116,7 @@ func (c *Client) Launch(ctx context.Context, vm config.VMConfig) error {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
-		c.log.Debug().Err(err).Str("vm", vm.Name).Str("output", msg).Msg("failed to launch VM")
+		c.log.Debug().Err(err).Str("vm", vm.Name).Str("out", msg).Msg("failed to launch VM")
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("%w: %s", ErrFailedToLaunch, msg)
@@ -147,13 +147,13 @@ func (c *Client) Exec(ctx context.Context, name string, command string, maxAttrB
 	execArgs := []string{"exec", name, "--", "bash", "-c", command}
 	span.SetAttributes(attribute.StringSlice("multipass.args", execArgs))
 
-	c.log.Info().Msgf("Running %s", command)
+	c.log.Debug().Str("vm", name).Str("cmd", command).Msgf("Running %s", command)
 
 	cmd := exec.CommandContext(ctx, c.bin, execArgs...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
-		c.log.Debug().Err(err).Str("vm", name).Str("command", command).Str("args", strings.Join(execArgs, ",")).Msg("multipass exec failed")
+		c.log.Debug().Err(err).Str("vm", name).Str("cmd", command).Str("args", strings.Join(execArgs, ",")).Msg("multipass exec failed")
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return "", fmt.Errorf("multipass exec %q %q failed: %w: %s", name, command, err, msg)
@@ -182,7 +182,7 @@ func (c *Client) Transfer(ctx context.Context, vmName, hostPath, vmDest string) 
 	))
 	defer span.End()
 
-	c.log.Info().Str("vm", vmName).Str("source", hostPath).Str("dest", vmDest).Msg("transferring content to VM")
+	c.log.Info().Str("vm", vmName).Str("src", hostPath).Str("dst", vmDest).Msg("transferring content to VM")
 
 	args := []string{"transfer", "--recursive", "--parents", hostPath, fmt.Sprintf("%s:%s", vmName, vmDest)}
 	span.SetAttributes(attribute.StringSlice("multipass.args", args))
@@ -191,13 +191,13 @@ func (c *Client) Transfer(ctx context.Context, vmName, hostPath, vmDest string) 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
-		c.log.Debug().Err(err).Str("vm", vmName).Str("source", hostPath).Str("dest", vmDest).Str("output", msg).Msg("multipass transfer failed")
+		c.log.Debug().Err(err).Str("vm", vmName).Str("src", hostPath).Str("dst", vmDest).Str("out", msg).Msg("multipass transfer failed")
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("%w: %s", ErrTransferFailed, msg)
 	}
 
-	c.log.Info().Str("vm", vmName).Str("source", hostPath).Str("dest", vmDest).Msg("transfer complete")
+	c.log.Info().Str("vm", vmName).Str("src", hostPath).Str("dst", vmDest).Msg("transfer complete")
 	return nil
 }
 
@@ -227,7 +227,7 @@ func (c *Client) Delete(ctx context.Context, name string, purge bool) error {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
-		c.log.Debug().Err(err).Str("vm", name).Bool("purge", purge).Str("output", msg).Msg("multipass delete failed")
+		c.log.Debug().Err(err).Str("vm", name).Bool("purge", purge).Str("out", msg).Msg("multipass delete failed")
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("multipass delete %q failed: %w: %s", name, err, msg)
