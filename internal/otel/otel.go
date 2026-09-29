@@ -189,7 +189,7 @@ func (h Hook) Run(e *zerolog.Event, level zerolog.Level, msg string) {
 	rec.SetObservedTimestamp(time.Now())
 	rec.SetSeverity(convertLevel(level))
 	rec.SetSeverityText(level.String())
-	rec.SetBody(otellog.StringValue(msg))
+	rec.SetBody(attribute.StringValue(msg))
 	for _, kv := range traceAttrs(ctx) {
 		rec.AddAttributes(kv)
 	}
@@ -199,14 +199,14 @@ func (h Hook) Run(e *zerolog.Event, level zerolog.Level, msg string) {
 // traceAttrs exposes the active span as record attributes. The log SDK's
 // Record has no dedicated trace/span fields, so correlation is carried as
 // attributes instead; without them log lines cannot be linked to a trace.
-func traceAttrs(ctx context.Context) []otellog.KeyValue {
+func traceAttrs(ctx context.Context) []attribute.KeyValue {
 	sc := trace.SpanContextFromContext(ctx)
 	if !sc.IsValid() {
 		return nil
 	}
-	return []otellog.KeyValue{
-		otellog.String("trace_id", sc.TraceID().String()),
-		otellog.String("span_id", sc.SpanID().String()),
+	return []attribute.KeyValue{
+		attribute.String("trace_id", sc.TraceID().String()),
+		attribute.String("span_id", sc.SpanID().String()),
 	}
 }
 
@@ -228,27 +228,27 @@ func LogEvent(ctx context.Context, logger zerolog.Logger, level zerolog.Level, m
 	rec.SetObservedTimestamp(time.Now())
 	rec.SetSeverity(convertLevel(level))
 	rec.SetSeverityText(level.String())
-	rec.SetBody(otellog.StringValue(msg))
+	rec.SetBody(attribute.StringValue(msg))
 	for k, v := range fields {
 		switch val := v.(type) {
 		case string:
-			rec.AddAttributes(otellog.String(k, val))
+			rec.AddAttributes(attribute.String(k, val))
 		case int:
-			rec.AddAttributes(otellog.Int(k, val))
+			rec.AddAttributes(attribute.Int(k, val))
 		case int64:
-			rec.AddAttributes(otellog.Int64(k, val))
+			rec.AddAttributes(attribute.Int64(k, val))
 		case bool:
-			rec.AddAttributes(otellog.Bool(k, val))
+			rec.AddAttributes(attribute.Bool(k, val))
 		case float64:
-			rec.AddAttributes(otellog.Float64(k, val))
+			rec.AddAttributes(attribute.Float64(k, val))
 		case json.RawMessage:
-			rec.AddAttributes(otellog.String(k, string(val)))
+			rec.AddAttributes(attribute.String(k, string(val)))
 		case []byte:
-			rec.AddAttributes(otellog.String(k, string(val)))
+			rec.AddAttributes(attribute.String(k, string(val)))
 		case error:
-			rec.AddAttributes(otellog.String(k, val.Error()))
+			rec.AddAttributes(attribute.String(k, val.Error()))
 		default:
-			rec.AddAttributes(otellog.String(k, fmt.Sprint(v)))
+			rec.AddAttributes(attribute.String(k, fmt.Sprint(v)))
 		}
 	}
 	for _, kv := range traceAttrs(ctx) {
