@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -255,13 +257,35 @@ func LogEvent(ctx context.Context, logger zerolog.Logger, level zerolog.Level, m
 	global.Logger("mph").Emit(ctx, rec)
 }
 
+// payloadKeyOrder lists the blob fields that must close a log line, in the
+// order they should appear. Every entry is a key the codebase actually emits;
+// adding a speculative one makes the list look authoritative when it is not.
+var payloadKeyOrder = []string{"args", "text", "out", "command_output"}
+
 // orderedFieldKeys puts identity fields first so a log line reads who and what
-// before the payload blobs.
+// before the payload blobs. Blob fields always sort last in payloadKeyOrder so
+// the large payload closes the line. Middle fields sort alphabetically so the
+// field order is stable across runs.
 func orderedFieldKeys(fields map[string]any) []string {
 	keys := make([]string, 0, len(fields))
 	seen := map[string]bool{}
-	for _, k := range []string{"iteration", "tool", "id", "part", "outcome"} {
+	for _, k := range []string{"iter", "iteration", "tool", "id", "part", "finish", "finish_reason", "outcome"} {
 		if _, ok := fields[k]; ok {
+			keys = append(keys, k)
+			seen[k] = true
+		}
+	}
+	var middle []string
+	for k := range fields {
+		if seen[k] || isPayloadKey(k) {
+			continue
+		}
+		middle = append(middle, k)
+	}
+	sort.Strings(middle)
+	keys = append(keys, middle...)
+	for _, k := range payloadKeyOrder {
+		if _, ok := fields[k]; ok && !seen[k] {
 			keys = append(keys, k)
 			seen[k] = true
 		}
@@ -272,6 +296,10 @@ func orderedFieldKeys(fields map[string]any) []string {
 		}
 	}
 	return keys
+}
+
+func isPayloadKey(k string) bool {
+	return slices.Contains(payloadKeyOrder, k)
 }
 
 func appendField(evt *zerolog.Event, k string, v any) *zerolog.Event {
