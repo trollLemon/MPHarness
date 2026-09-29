@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 )
@@ -26,55 +27,93 @@ func conv(n int) []model.D {
 }
 
 func TestShouldCompact(t *testing.T) {
-	if !ShouldCompact(8000, 10000, 0.8, 10, 6) {
-		t.Fatalf("want compact at threshold")
+	tests := []struct {
+		name      string
+		tokens    int64
+		window    int64
+		threshold float64
+		msgs      int
+		minMsgs   int
+		want      bool
+	}{
+		{"at threshold", 8000, 10000, 0.8, 10, 6, true},
+		{"below threshold", 7999, 10000, 0.8, 10, 6, false},
+		{"short history", 9000, 10000, 0.8, 3, 6, false},
+		{"unknown window", 9000, 0, 0.8, 10, 6, false},
+		{"zero usage", 0, 10000, 0.8, 10, 6, false},
 	}
-	if ShouldCompact(7999, 10000, 0.8, 10, 6) {
-		t.Fatalf("below threshold must not compact")
-	}
-	if ShouldCompact(9000, 10000, 0.8, 3, 6) {
-		t.Fatalf("short history must not compact")
-	}
-	if ShouldCompact(9000, 0, 0.8, 10, 6) {
-		t.Fatalf("unknown window must not compact")
-	}
-}
-
-func TestRewriteKeepsSystemAndTask(t *testing.T) {
-	conversation := []model.D{
-		{"role": "system", "content": "SYS-BYTES"},
-		{"role": "user", "content": "Task:\nrun ls"},
-		{"role": "assistant", "content": "doing"},
-		{"role": "tool", "name": "multipass_exec", "content": "out"},
-		{"role": "assistant", "content": "done"},
-		{"role": "tool", "name": "multipass_exec", "content": "out2"},
-	}
-	handles := []HandleInfo{{ID: "oid-1", Path: "/tmp/x", TotalLines: 10, TotalBytes: 100, Command: "cat big"}}
-	got, outcome, _ := Compact(context.Background(), conversation, handles, 2048, 3, 4000, &fakeSummarizer{summary: "did stuff"}, nil, 0)
-	if outcome != "applied" {
-		t.Fatalf("outcome %q", outcome)
-	}
-	if len(got) != 2 {
-		t.Fatalf("want exactly 2 messages, got %d", len(got))
-	}
-	if got[0]["content"] != "SYS-BYTES" {
-		t.Fatalf("system must be byte-for-byte, got %v", got[0]["content"])
-	}
-	body, _ := got[1]["content"].(string)
-	for _, want := range []string{"## Task", "run ls", "did stuff", "oid-1", "after 0 compactions", "never invent one"} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("missing %q in %q", want, body)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ShouldCompact(tt.tokens, tt.window, tt.threshold, tt.msgs, tt.minMsgs); got != tt.want {
+				t.Fatalf("got %v want %v", got, tt.want)
+			}
+		})
 	}
 }
 
-func TestActiveOutputsPresentWhenModelOmits(t *testing.T) {
-	conversation := conv(8)
-	handles := []HandleInfo{{ID: "must-survive", Path: "/tmp/y", TotalLines: 5, TotalBytes: 50, Command: "ls"}}
-	got, _, _ := Compact(context.Background(), conversation, handles, 2048, 1, 4000, &fakeSummarizer{summary: "no handles mentioned"}, nil, 0)
-	body, _ := got[1]["content"].(string)
-	if !strings.Contains(body, "must-survive") {
-		t.Fatalf("handle must survive deterministically: %q", body)
+func TestCompactHandover(t *testing.T) {
+	tests := []struct {
+		name         string
+		conversation []model.D
+		handles      []HandleInfo
+		summary      string
+		applied      int
+		wantOutcome  string
+		wantSystem   string
+		wantSubs     []string
+	}{
+		{
+			name: "rewrite keeps system and task",
+			conversation: []model.D{
+				{"role": "system", "content": "SYS-BYTES"},
+				{"role": "user", "content": "Task:\nrun ls"},
+				{"role": "assistant", "content": "doing"},
+				{"role": "tool", "name": "multipass_exec", "content": "out"},
+				{"role": "assistant", "content": "done"},
+				{"role": "tool", "name": "multipass_exec", "content": "out2"},
+			},
+			handles:     []HandleInfo{{ID: "oid-1", Path: "/tmp/x", TotalLines: 10, TotalBytes: 100, Command: "cat big"}},
+			summary:     "did stuff",
+			wantOutcome: "applied",
+			wantSystem:  "SYS-BYTES",
+			wantSubs:    []string{"## Task", "run ls", "did stuff", "oid-1", "after 0 compactions", "never invent one"},
+		},
+		{
+			name:         "handles survive when the model omits them",
+			conversation: conv(8),
+			handles:      []HandleInfo{{ID: "must-survive", Path: "/tmp/y", TotalLines: 5, TotalBytes: 50, Command: "ls"}},
+			summary:      "no handles mentioned",
+			wantOutcome:  "applied",
+			wantSubs:     []string{"must-survive"},
+		},
+		{
+			name:         "handover carries the compaction count",
+			conversation: conv(8),
+			summary:      "did stuff",
+			applied:      3,
+			wantOutcome:  "applied",
+			wantSubs:     []string{"after 3 compactions", "do not call output_search or output_read"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, outcome, _ := Compact(context.Background(), tt.conversation, tt.handles, 2048, 3, 4000, &fakeSummarizer{summary: tt.summary}, nil, tt.applied)
+			if outcome != tt.wantOutcome {
+				t.Fatalf("outcome %q want %q", outcome, tt.wantOutcome)
+			}
+			if len(got) != 2 {
+				t.Fatalf("want exactly 2 messages, got %d", len(got))
+			}
+			if tt.wantSystem != "" && got[0]["content"] != tt.wantSystem {
+				t.Fatalf("system must be byte-for-byte, got %v", got[0]["content"])
+			}
+			body, _ := got[1]["content"].(string)
+			for _, want := range tt.wantSubs {
+				if !strings.Contains(body, want) {
+					t.Fatalf("missing %q in %q", want, body)
+				}
+			}
+		})
 	}
 }
 
@@ -87,14 +126,25 @@ func TestShrinkGuardReverts(t *testing.T) {
 }
 
 func TestFailureKeepsOriginal(t *testing.T) {
-	conversation := conv(8)
-	got, outcome, _ := Compact(context.Background(), conversation, nil, 2048, 3, 4000, &fakeSummarizer{err: context.DeadlineExceeded}, nil, 0)
-	if outcome != "failed" || len(got) != len(conversation) {
-		t.Fatalf("want failed with original, got %q len %d", outcome, len(got))
+	tests := []struct {
+		name    string
+		summary string
+		err     error
+	}{
+		{"summarizer error", "", context.DeadlineExceeded},
+		{"blank summary", "  ", nil},
 	}
-	got, outcome, _ = Compact(context.Background(), conversation, nil, 2048, 3, 4000, &fakeSummarizer{summary: "  "}, nil, 0)
-	if outcome != "failed" {
-		t.Fatalf("empty summary must fail, got %q", outcome)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conversation := conv(8)
+			got, outcome, _ := Compact(context.Background(), conversation, nil, 2048, 3, 4000, &fakeSummarizer{summary: tt.summary, err: tt.err}, nil, 0)
+			if outcome != "failed" {
+				t.Fatalf("want failed, got %q", outcome)
+			}
+			if len(got) != len(conversation) {
+				t.Fatalf("want original kept, got len %d want %d", len(got), len(conversation))
+			}
+		})
 	}
 }
 
@@ -215,17 +265,87 @@ func TestRevertedReportsSummaryBytes(t *testing.T) {
 }
 
 func TestBuildUserMessageGuidesHandles(t *testing.T) {
-	empty := BuildUserMessage("do things", "Completed: x. Remaining: y.", nil, "recent", 1)
-	for _, want := range []string{"after 1 compaction", "do not call output_search or output_read", "Completed: x"} {
-		if !strings.Contains(empty, want) {
-			t.Fatalf("missing %q in %q", want, empty)
-		}
+	tests := []struct {
+		name     string
+		handles  []HandleInfo
+		applied  int
+		wantSubs []string
+	}{
+		{
+			name:     "no handles forbids output tools",
+			applied:  1,
+			wantSubs: []string{"after 1 compaction", "do not call output_search or output_read", "Completed: x"},
+		},
+		{
+			name:     "listed handles must not be invented",
+			handles:  []HandleInfo{{ID: "oid-9", TotalLines: 3, TotalBytes: 30, Command: "ls"}},
+			wantSubs: []string{"oid-9", "never invent one", "after 0 compactions"},
+		},
 	}
-	withHandle := BuildUserMessage("do things", "Completed: x. Remaining: y.",
-		[]HandleInfo{{ID: "oid-9", TotalLines: 3, TotalBytes: 30, Command: "ls"}}, "recent", 0)
-	for _, want := range []string{"oid-9", "never invent one"} {
-		if !strings.Contains(withHandle, want) {
-			t.Fatalf("missing %q in %q", want, withHandle)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := BuildUserMessage("do things", "Completed: x. Remaining: y.", tt.handles, "recent", tt.applied)
+			for _, want := range tt.wantSubs {
+				if !strings.Contains(got, want) {
+					t.Fatalf("missing %q in %q", want, got)
+				}
+			}
+		})
+	}
+}
+
+// A cut in the middle of a multi-byte rune yields invalid UTF-8, which some
+// tokenizers and JSON encoders reject outright.
+func TestTruncateHeadKeepsValidUTF8(t *testing.T) {
+	tests := []struct {
+		name string
+		s    string
+		n    int
+	}{
+		{"cut lands mid rune", strings.Repeat("a", 5) + "日本語テキスト", 8},
+		{"cut lands on rune start", strings.Repeat("a", 5) + "日本語テキスト", 9},
+		{"emoji surrogate pair", strings.Repeat("a", 3) + "🙂🙂🙂", 5},
+		{"no truncation", "short", 100},
+		{"zero budget", "anything", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateHead(tt.s, tt.n)
+			if !utf8.ValidString(got) {
+				t.Fatalf("invalid UTF-8: %q", got)
+			}
+			if body := strings.TrimSuffix(got, "…(truncated)"); !strings.HasPrefix(tt.s, body) {
+				t.Fatalf("truncation is not a prefix of the input: %q", got)
+			}
+		})
+	}
+}
+
+// A single long assistant message must respect the budget like every other
+// role; tool results are capped but assistant prose is not.
+func TestRenderHistoryCapsAssistantContent(t *testing.T) {
+	conversation := []model.D{
+		{"role": "assistant", "content": strings.Repeat("a", 100000)},
+	}
+	rendered := RenderHistory(conversation, 100)
+	if len(rendered) > 500 {
+		t.Fatalf("assistant content not capped: %d bytes", len(rendered))
+	}
+}
+
+// budget is a per-message allowance, so a long conversation renders to
+// len(messages)*budget with no global limit. The summarizer prompt has to stay
+// bounded regardless of how many turns went by.
+func TestRenderHistoryBoundsTotalSize(t *testing.T) {
+	var conversation []model.D
+	for i := 0; i < 400; i++ {
+		conversation = append(conversation, model.D{
+			"role": "assistant", "content": strings.Repeat("a", 1000),
+			"reasoning_content": strings.Repeat("r", 1000),
+		})
+	}
+	rendered := RenderHistory(conversation, 1000)
+	if len(rendered) > 8*1000 {
+		t.Fatalf("rendered history has no total bound: %d bytes", len(rendered))
 	}
 }

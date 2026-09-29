@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 )
@@ -35,19 +36,38 @@ func ShouldCompact(contextTokens, window int64, threshold float64, numMessages, 
 	return float64(contextTokens) >= threshold*float64(window)
 }
 
+// totalBudgetFactor bounds the whole render. budget is a per-message allowance,
+// so on its own a long conversation renders to len(messages)*budget and the
+// summarizer prompt grows without limit.
+const totalBudgetFactor = 8
+
 // RenderHistory creates a string containing the message history up to this point.
-// NOTE: some messages are truncated based on the budget variable.
+// NOTE: messages are truncated to budget each, and the total is capped at
+// budget*totalBudgetFactor.
 func RenderHistory(conversation []model.D, budget int) string {
 	var b strings.Builder
+	remaining := budget * totalBudgetFactor
+	write := func(s string) {
+		if remaining <= 0 {
+			return
+		}
+		if len(s) > remaining {
+			s = cutPrefix(s, remaining)
+			remaining = 0
+		} else {
+			remaining -= len(s)
+		}
+		b.WriteString(s)
+	}
 	for _, m := range conversation {
 		role, _ := m["role"].(string)
 		switch role {
 		case "assistant":
 			if c, _ := m["content"].(string); c != "" {
-				b.WriteString(c + "\n")
+				write(truncateHead(c, budget) + "\n")
 			}
 			if r, _ := m["reasoning_content"].(string); r != "" {
-				b.WriteString(truncateHead(r, budget/4) + "\n")
+				write(truncateHead(r, budget/4) + "\n")
 			}
 			if tcs, ok := m["tool_calls"].([]model.D); ok {
 				for _, tc := range tcs {
@@ -58,28 +78,43 @@ func RenderHistory(conversation []model.D, budget int) string {
 						if len(cmd) > 200 {
 							cmd = cmd[:200] + "…"
 						}
-						fmt.Fprintf(&b, "tool: %s(%s)\n", name, cmd)
+						write(fmt.Sprintf("tool: %s(%s)\n", name, cmd))
 					}
 				}
 			}
 		case "tool":
 			name, _ := m["name"].(string)
 			content, _ := m["content"].(string)
-			fmt.Fprintf(&b, "tool result %s: %s\n", name, truncateHead(content, budget))
+			write(fmt.Sprintf("tool result %s: %s\n", name, truncateHead(content, budget)))
 		case "user":
 			if c, _ := m["content"].(string); c != "" {
-				b.WriteString("user: " + truncateHead(c, budget) + "\n")
+				write("user: " + truncateHead(c, budget) + "\n")
 			}
 		}
 	}
 	return b.String()
 }
 
+// cutPrefix returns the first n bytes of s, backed off to the nearest rune
+// boundary so the result is always valid UTF-8.
+func cutPrefix(s string, n int) string {
+	if n >= len(s) {
+		return s
+	}
+	head := s[:n]
+	for len(head) > 0 && !utf8.ValidString(head) {
+		head = head[:len(head)-1]
+	}
+	return head
+}
+
+// truncateHead keeps the first n bytes, backing off to the nearest rune
+// boundary so the result is always valid UTF-8.
 func truncateHead(s string, n int) string {
 	if n <= 0 || len(s) <= n {
 		return s
 	}
-	return s[:n] + "…(truncated)"
+	return cutPrefix(s, n) + "…(truncated)"
 }
 
 // minSummaryBudgetTokens floors the adaptive summary budget.
