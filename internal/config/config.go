@@ -49,7 +49,6 @@ const (
 // Output and compaction defaults. Copying this example unchanged gets current
 // behaviour plus the new features at their default settings.
 const (
-	DefaultOutputChunkLines      = 500
 	DefaultOutputMaxCommandBytes = 64 * 1024 * 1024
 	DefaultOutputMaxTotalBytes   = 512 * 1024 * 1024
 	DefaultOutputSearchMatches   = 200
@@ -280,7 +279,6 @@ func parseSize(s string) (int64, error) {
 type OutputConfig struct {
 	Enabled          bool   `yaml:"enabled"`
 	Mode             string `yaml:"mode"`
-	ChunkLines       int    `yaml:"chunk_lines"`
 	InlineMaxSize    Size   `yaml:"inline_max_size"`
 	MaxCommandSize   Size   `yaml:"max_command_size"`
 	MaxTotalSize     Size   `yaml:"max_total_size"`
@@ -293,9 +291,6 @@ func (o OutputConfig) Validate() error {
 	}
 	if o.Mode != "auto" && o.Mode != "always" {
 		return fmt.Errorf("output.mode must be auto or always, got %q", o.Mode)
-	}
-	if o.ChunkLines <= 0 {
-		return fmt.Errorf("output.chunk_lines must be > 0, got %d", o.ChunkLines)
 	}
 	if o.SearchMaxMatches < 0 {
 		return fmt.Errorf("output.search_max_matches must be >= 0, got %d", o.SearchMaxMatches)
@@ -520,7 +515,7 @@ func Parse(data []byte) (Config, error) {
 
 	if !hasOutput {
 		cfg.Output = OutputConfig{
-			Enabled: true, Mode: "auto", ChunkLines: DefaultOutputChunkLines,
+			Enabled: true, Mode: "auto",
 			MaxCommandSize: DefaultOutputMaxCommandBytes, MaxTotalSize: DefaultOutputMaxTotalBytes,
 			SearchMaxMatches: DefaultOutputSearchMatches,
 		}
@@ -533,9 +528,6 @@ func Parse(data []byte) (Config, error) {
 		if cfg.Output.Mode == "" {
 			cfg.Output.Mode = "auto"
 		}
-		if cfg.Output.ChunkLines == 0 {
-			cfg.Output.ChunkLines = DefaultOutputChunkLines
-		}
 		if int64(cfg.Output.MaxCommandSize) == 0 {
 			if _, ok := probe.Output["max_command_size"]; !ok {
 				cfg.Output.MaxCommandSize = DefaultOutputMaxCommandBytes
@@ -546,8 +538,11 @@ func Parse(data []byte) (Config, error) {
 				cfg.Output.MaxTotalSize = DefaultOutputMaxTotalBytes
 			}
 		}
+		// An explicit 0 disables the cap, so only default an absent key.
 		if cfg.Output.SearchMaxMatches == 0 {
-			cfg.Output.SearchMaxMatches = DefaultOutputSearchMatches
+			if _, ok := probe.Output["search_max_matches"]; !ok {
+				cfg.Output.SearchMaxMatches = DefaultOutputSearchMatches
+			}
 		}
 	}
 

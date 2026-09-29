@@ -386,141 +386,161 @@ func TestParseAgentOutputBudget(t *testing.T) {
 }
 
 func TestSizeParsing(t *testing.T) {
+	base := "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\n"
 	tests := []struct {
-		yaml string
-		want int64
+		name    string
+		yaml    string
+		want    int64
+		wantErr bool
 	}{
-		{`vm:
-  disk: 20G
-  ram: 4G
-  cpu: 2
-model: m
-prompt: p
-output:
-  max_command_size: 64MiB
-`, 64 * 1024 * 1024},
-		{`vm:
-  disk: 20G
-  ram: 4G
-  cpu: 2
-model: m
-prompt: p
-output:
-  max_command_size: 512MiB
-`, 512 * 1024 * 1024},
-		{`vm:
-  disk: 20G
-  ram: 4G
-  cpu: 2
-model: m
-prompt: p
-output:
-  max_command_size: 1GiB
-`, 1024 * 1024 * 1024},
-		{`vm:
-  disk: 20G
-  ram: 4G
-  cpu: 2
-model: m
-prompt: p
-output:
-  max_command_size: 1024
-`, 1024},
+		{"mebibytes", base + "output:\n  max_command_size: 64MiB\n", 64 * 1024 * 1024, false},
+		{"larger mebibytes", base + "output:\n  max_command_size: 512MiB\n", 512 * 1024 * 1024, false},
+		{"gibibytes", base + "output:\n  max_command_size: 1GiB\n", 1024 * 1024 * 1024, false},
+		{"bare bytes", base + "output:\n  max_command_size: 1024\n", 1024, false},
+		{"invalid suffix", base + "output:\n  max_command_size: 10XB\n", 0, true},
 	}
-	for i, tt := range tests {
-		cfg, err := Parse([]byte(tt.yaml))
-		if err != nil {
-			t.Fatalf("case %d: %v", i, err)
-		}
-		if int64(cfg.Output.MaxCommandSize) != tt.want {
-			t.Errorf("case %d: got %d want %d", i, int64(cfg.Output.MaxCommandSize), tt.want)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(tt.yaml))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for invalid size")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if int64(cfg.Output.MaxCommandSize) != tt.want {
+				t.Errorf("got %d want %d", int64(cfg.Output.MaxCommandSize), tt.want)
+			}
+		})
 	}
 }
 
-func TestSizeInvalid(t *testing.T) {
-	_, err := Parse([]byte("vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\noutput:\n  max_command_size: 10XB\n"))
-	if err == nil {
-		t.Fatalf("expected error for invalid size")
+func TestParseOutputCompaction(t *testing.T) {
+	base := "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\n"
+	tests := []struct {
+		name  string
+		yaml  string
+		check func(t *testing.T, cfg Config)
+	}{
+		{
+			name: "absent blocks take defaults",
+			yaml: base,
+			check: func(t *testing.T, cfg Config) {
+				if !cfg.Output.Enabled || cfg.Output.Mode != "auto" {
+					t.Errorf("output defaults: %+v", cfg.Output)
+				}
+				if int64(cfg.Output.MaxCommandSize) != DefaultOutputMaxCommandBytes {
+					t.Errorf("max_command_size %d", int64(cfg.Output.MaxCommandSize))
+				}
+				if int64(cfg.Output.MaxTotalSize) != DefaultOutputMaxTotalBytes {
+					t.Errorf("max_total_size %d", int64(cfg.Output.MaxTotalSize))
+				}
+				if cfg.Output.SearchMaxMatches != 200 {
+					t.Errorf("search_max_matches %d", cfg.Output.SearchMaxMatches)
+				}
+				if !cfg.Compaction.Enabled || cfg.Compaction.Threshold != 0.8 || cfg.Compaction.MaxSummaryTokens != 2048 {
+					t.Errorf("compaction defaults: %+v", cfg.Compaction)
+				}
+				if cfg.Compaction.RecentTurns != 3 || cfg.Compaction.MinMessages != 6 || cfg.Compaction.MaxAttempts != 3 {
+					t.Errorf("compaction defaults: %+v", cfg.Compaction)
+				}
+			},
+		},
+		{
+			name: "output can be disabled",
+			yaml: base + "output:\n  enabled: false\n",
+			check: func(t *testing.T, cfg Config) {
+				if cfg.Output.Enabled {
+					t.Errorf("expected output disabled")
+				}
+			},
+		},
+		{
+			name: "block without enabled opts in",
+			yaml: base + "output:\n  mode: always\ncompaction:\n  threshold: 0.7\n",
+			check: func(t *testing.T, cfg Config) {
+				if !cfg.Output.Enabled || cfg.Output.Mode != "always" {
+					t.Errorf("output: %+v", cfg.Output)
+				}
+				if !cfg.Compaction.Enabled || cfg.Compaction.Threshold != 0.7 {
+					t.Errorf("compaction: %+v", cfg.Compaction)
+				}
+			},
+		},
+		{
+			name: "explicit recent_turns zero is kept",
+			yaml: base + "compaction:\n  recent_turns: 0\n",
+			check: func(t *testing.T, cfg Config) {
+				if cfg.Compaction.RecentTurns != 0 {
+					t.Errorf("explicit recent_turns: 0 must be kept, got %d", cfg.Compaction.RecentTurns)
+				}
+			},
+		},
+		{
+			name: "explicit zero size disables cap",
+			yaml: base + "output:\n  max_command_size: 0\n  max_total_size: 0\n",
+			check: func(t *testing.T, cfg Config) {
+				if int64(cfg.Output.MaxCommandSize) != 0 || int64(cfg.Output.MaxTotalSize) != 0 {
+					t.Errorf("explicit 0 must stay disabled, got %+v", cfg.Output)
+				}
+			},
+		},
 	}
-}
-
-func TestOutputCompactionDefaults(t *testing.T) {
-	cfg, err := Parse([]byte("vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\n"))
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if !cfg.Output.Enabled || cfg.Output.Mode != "auto" || cfg.Output.ChunkLines != 500 {
-		t.Errorf("output defaults: %+v", cfg.Output)
-	}
-	if int64(cfg.Output.MaxCommandSize) != DefaultOutputMaxCommandBytes {
-		t.Errorf("max_command_size %d", int64(cfg.Output.MaxCommandSize))
-	}
-	if int64(cfg.Output.MaxTotalSize) != DefaultOutputMaxTotalBytes {
-		t.Errorf("max_total_size %d", int64(cfg.Output.MaxTotalSize))
-	}
-	if cfg.Output.SearchMaxMatches != 200 {
-		t.Errorf("search_max_matches %d", cfg.Output.SearchMaxMatches)
-	}
-	if !cfg.Compaction.Enabled || cfg.Compaction.Threshold != 0.8 || cfg.Compaction.MaxSummaryTokens != 2048 {
-		t.Errorf("compaction defaults: %+v", cfg.Compaction)
-	}
-	if cfg.Compaction.RecentTurns != 3 || cfg.Compaction.MinMessages != 6 || cfg.Compaction.MaxAttempts != 3 {
-		t.Errorf("compaction defaults: %+v", cfg.Compaction)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(tt.yaml))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			tt.check(t, cfg)
+		})
 	}
 }
 
 func TestOutputValidation(t *testing.T) {
-	for _, y := range []string{
-		"vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\noutput:\n  enabled: true\n  mode: bogus\n",
-		"vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\ncompaction:\n  enabled: true\n  threshold: 0.4\n",
-		"vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\ncompaction:\n  enabled: true\n  threshold: 0.99\n",
-	} {
-		if _, err := Parse([]byte(y)); err == nil {
-			t.Errorf("expected validation error for %q", y)
-		}
+	tests := []struct {
+		name string
+		yaml string
+	}{
+		{"bogus output mode", "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\noutput:\n  enabled: true\n  mode: bogus\n"},
+		{"compaction threshold too low", "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\ncompaction:\n  enabled: true\n  threshold: 0.4\n"},
+		{"compaction threshold too high", "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\ncompaction:\n  enabled: true\n  threshold: 0.99\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := Parse([]byte(tt.yaml)); err == nil {
+				t.Errorf("expected validation error for %q", tt.yaml)
+			}
+		})
 	}
 }
 
-func TestOutputDisabled(t *testing.T) {
-	cfg, err := Parse([]byte("vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\noutput:\n  enabled: false\n"))
-	if err != nil {
-		t.Fatalf("parse: %v", err)
+// The size caps treat an explicit 0 as "disabled" and only default a key the
+// user left out. search_max_matches must behave the same way, otherwise a
+// deliberate 0 is silently rewritten to 200 and the cap cannot be lifted.
+func TestSearchMaxMatchesZeroMeansUnlimited(t *testing.T) {
+	base := "vm:\n  name: vm\n  cpu: 1\n  ram: 1G\n  disk: 5G\nmodel: m\nprompt: p\noutput:\n  enabled: true\n"
+	tests := []struct {
+		name string
+		yaml string
+		want int
+	}{
+		{"omitted falls back to the default", base, DefaultOutputSearchMatches},
+		{"explicit zero is honoured", base + "  search_max_matches: 0\n", 0},
+		{"explicit value is honoured", base + "  search_max_matches: 7\n", 7},
 	}
-	if cfg.Output.Enabled {
-		t.Errorf("expected output disabled")
-	}
-}
-
-func TestBlockWithoutEnabledOptsIn(t *testing.T) {
-	cfg, err := Parse([]byte("vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\noutput:\n  mode: always\ncompaction:\n  threshold: 0.7\n"))
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if !cfg.Output.Enabled || cfg.Output.Mode != "always" {
-		t.Errorf("output: %+v", cfg.Output)
-	}
-	if !cfg.Compaction.Enabled || cfg.Compaction.Threshold != 0.7 {
-		t.Errorf("compaction: %+v", cfg.Compaction)
-	}
-}
-
-func TestExplicitRecentTurnsZeroKept(t *testing.T) {
-	cfg, err := Parse([]byte("vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\ncompaction:\n  recent_turns: 0\n"))
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if cfg.Compaction.RecentTurns != 0 {
-		t.Errorf("explicit recent_turns: 0 must be kept, got %d", cfg.Compaction.RecentTurns)
-	}
-}
-
-func TestExplicitZeroSizeDisablesCap(t *testing.T) {
-	cfg, err := Parse([]byte("vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\noutput:\n  max_command_size: 0\n  max_total_size: 0\n"))
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if int64(cfg.Output.MaxCommandSize) != 0 || int64(cfg.Output.MaxTotalSize) != 0 {
-		t.Errorf("explicit 0 must stay disabled, got %+v", cfg.Output)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(tt.yaml))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if cfg.Output.SearchMaxMatches != tt.want {
+				t.Fatalf("search_max_matches %d want %d", cfg.Output.SearchMaxMatches, tt.want)
+			}
+		})
 	}
 }
