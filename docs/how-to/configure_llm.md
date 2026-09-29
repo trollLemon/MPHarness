@@ -69,13 +69,12 @@ agent:
 
 Timeout values accept **Go duration strings** (`"60s"`, `"10m"`, `"1h"`, `"300s"`) or raw integers (interpreted as seconds). For example, `chat_timeout: 600` = 600 seconds, `chat_timeout: "10m"` = 10 minutes.
 
-## Chunked command output
+## Captured command output
 
 ```yaml
 output:
   enabled: true
   mode: auto               # auto = model opts in per call; always = every capture
-  chunk_lines: 500
   inline_max_size: 0       # 0 = use the derived tool-result budget
   max_command_size: 64MiB
   max_total_size: 512MiB
@@ -86,13 +85,12 @@ output:
 |-----|---------|--------|
 | `enabled` | `true` | `false` restores exactly today's behaviour. |
 | `mode` | `auto` | `always` captures every command to a file. In `auto` the model sees uncaptured output untruncated, so set `always` if runaway output is a concern. |
-| `chunk_lines` | `500` | Lines per chunk file. |
 | `inline_max_size` | `0` | Inline cutoff; `0` = derived tool-result budget. |
 | `max_command_size` | `64MiB` | Per-capture ceiling. |
 | `max_total_size` | `512MiB` | Per-run cumulative ceiling. |
-| `search_max_matches` | `200` | Default cap for `output_search`. |
+| `search_max_matches` | `200` | Cap on line numbers returned by `output_search`; `0` = unlimited. |
 
-A capture with `chunks: 0` means the command produced no output.
+A capture is written to a single raw file. `output_search` greps that file directly, so every returned match is an absolute line number and nothing is hidden behind a chunk boundary. A search with an empty `matches` list means the capture has no such line.
 
 Sizes accept `64MiB`, `512MiB`, `1GiB`, a bare integer as bytes, or empty as zero.
 

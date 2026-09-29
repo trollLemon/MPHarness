@@ -42,7 +42,7 @@ Tool dispatch (`Call`, `callExec`, `callInfo`) lives in `internal/agent/spec.go`
 | `internal/harness` | Orchestrates VM lifecycle: checks if VM exists, launches if needed, prompts to reuse existing VM (unless `-i`), copies `content_dir` to `VMContentDir` via `mkdir -p` + `Transfer` under child span `mph.vm.content` (if set), runs the agent with the root `mph.run` ctx, and deletes VM after task (unless `-k`). Creates root span `mph.run` (now includes `mph.content_dir`) and child `mph.vm.create`/`delete`/`content` spans around `Launch`/`Delete`/`Transfer` (which themselves create `multipass.*` children). |
 | `internal/multipass` | A thin wrapper around the `multipass` CLI binary. Each method (`Info`/`Launch`/`Exec`/`Delete`/`Transfer`) creates a `multipass.*` span (`multipass.command`, `mph.vm.name`, `mph.command` truncated 4000, `multipass.args`). `Transfer` wraps `multipass transfer --recursive --parents`. |
 | `internal/validation` | Parses a shell command into an AST (via `mvdan.cc/sh/syntax`) and checks every executed command against the allowlist; fails closed on anything it cannot verify. |
-| `internal/output` | VM-side output store: capture (`<cmd> > <raw> 2>&1`), `split -l` chunking, handle registry, POSIX ERE `output_search` over chunk files. Paths derive only from the registry. |
+| `internal/output` | VM-side output store: capture (`<cmd> > <raw> 2>&1`), handle registry, POSIX ERE `output_search` over the raw capture file. Paths derive only from the registry. |
 | `internal/compact` | Threshold check, compaction prompt, history rendering, two-message rewrite via a `Summarizer` seam. Independent of `output`; receives `[]output.Handle`. |
 
 ## Runtime flow
