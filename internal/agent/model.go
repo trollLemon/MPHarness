@@ -69,7 +69,7 @@ func NewKronk(mp models.Path, logger zerolog.Logger, contextWindow int) (*kronk.
 		return nil, fmt.Errorf("unable to create inference model: %w", err)
 	}
 
-	logger.Debug().Str("system_info", fmt.Sprint(krn.SystemInfo())).Msg("system info")
+	logger.Debug().Str("sys", fmt.Sprint(krn.SystemInfo())).Msg("system info")
 
 	cfg := krn.ModelConfig()
 	mi := krn.ModelInfo()
@@ -84,20 +84,20 @@ func NewKronk(mp models.Path, logger zerolog.Logger, contextWindow int) (*kronk.
 	}
 
 	logger.Debug().
-		Str("context_window", fmt.Sprint(cfg.ContextWindow())).
-		Str("cache_type_k", fmt.Sprint(cfg.CacheTypeK)).
-		Str("cache_type_v", fmt.Sprint(cfg.CacheTypeV)).
-		Str("flash_attention", fmt.Sprint(cfg.FlashAttention())).
-		Str("prefill_batch_size", fmt.Sprint(cfg.PrefillBatchSize())).
+		Str("ctx_win", fmt.Sprint(cfg.ContextWindow())).
+		Str("cache_k", fmt.Sprint(cfg.CacheTypeK)).
+		Str("cache_v", fmt.Sprint(cfg.CacheTypeV)).
+		Str("flash", fmt.Sprint(cfg.FlashAttention())).
+		Str("prefill_bs", fmt.Sprint(cfg.PrefillBatchSize())).
 		Str("template", mi.Template.FileName).
 		Str("grammar", fmt.Sprint(cfg.DefaultParams.Grammar != "")).
-		Str("n_seq_max", fmt.Sprint(cfg.NSeqMax())).
-		Str("vram_total_mib", fmt.Sprint(mi.VRAMTotal/(1024*1024))).
-		Str("slot_memory_mib", fmt.Sprint(mi.SlotMemory/(1024*1024))).
-		Str("model_size_mb", fmt.Sprint(mi.Size/(1000*1000))).
-		Str("incremental_cache", fmt.Sprint(cfg.IncrementalCache())).
-		Str("n_gpu_layers", nGpuLayers).
-		Str("split_mode", splitMode).
+		Str("seq_max", fmt.Sprint(cfg.NSeqMax())).
+		Str("vram_mib", fmt.Sprint(mi.VRAMTotal/(1024*1024))).
+		Str("slot_mib", fmt.Sprint(mi.SlotMemory/(1024*1024))).
+		Str("size_mb", fmt.Sprint(mi.Size/(1000*1000))).
+		Str("incr_cache", fmt.Sprint(cfg.IncrementalCache())).
+		Str("gpu_layers", nGpuLayers).
+		Str("split", splitMode).
 		Msg("model config")
 
 	logger.Info().Msg("Finished loading model")

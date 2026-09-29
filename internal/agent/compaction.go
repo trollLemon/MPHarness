@@ -72,31 +72,35 @@ func outputHandleInfos(handles []output.Handle) []compact.HandleInfo {
 	return infos
 }
 
-func (a *Agent) maybeCompact(ctx context.Context, iter int, conversation []model.D, store *output.Store, cfg config.Config, lastContextTokens int64, toolResultBudget, attempts, compactionsApplied int) ([]model.D, int64, int, string) {
+// maybeCompact rewrites the conversation in place when the measured context has
+// reached the threshold, and returns the outcome. All state it reads and
+// updates lives on the Agent.
+func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) string {
 	cc := cfg.Compaction
-	if !cc.Enabled || attempts >= cc.MaxAttempts {
-		return conversation, lastContextTokens, attempts, ""
+	if !cc.Enabled || a.compactionAttempts >= cc.MaxAttempts {
+		return ""
 	}
 	window := a.krn.ModelConfig().ContextWindow()
-	if !compact.ShouldCompact(lastContextTokens, int64(window), cc.Threshold, len(conversation), cc.MinMessages) {
-		return conversation, lastContextTokens, attempts, ""
+	if !compact.ShouldCompact(a.contextTokens, int64(window), cc.Threshold, len(a.conversation), cc.MinMessages) {
+		return ""
 	}
 	var infos []compact.HandleInfo
-	if store != nil {
-		infos = outputHandleInfos(store.Handles())
+	if a.store != nil {
+		infos = outputHandleInfos(a.store.Handles())
 	}
 
 	compCtx, compSpan := getAgentTracer().Start(ctx, "mph.context.compaction",
-		trace.WithAttributes(runSpanAttrs(ctx, attribute.Int("mph.iteration", iter+1))...))
+		trace.WithAttributes(runSpanAttrs(ctx, attribute.Int("mph.iteration", a.iteration+1))...))
 	defer compSpan.End()
 
 	start := time.Now()
 	summarizer := &agentSummarizer{krn: a.krn, chatTimeout: a.chatTimeout}
 	estimate := func(s string) int { return a.estimateTokens(compCtx, s) }
-	newConv, outcome, summaryLen := compact.Compact(compCtx, conversation, infos, cc.MaxSummaryTokens, cc.RecentTurns, toolResultBudget, summarizer, estimate, compactionsApplied)
+	before := a.contextTokens
+	newConv, outcome, summaryLen := compact.Compact(compCtx, a.conversation, infos, cc.MaxSummaryTokens, cc.RecentTurns, a.toolResultBudget, summarizer, estimate, a.compactionsApplied)
 	duration := time.Since(start)
 
-	after := lastContextTokens
+	after := before
 	summaryBytes := summaryLen
 	if outcome == "applied" && len(newConv) == 2 {
 		after = 0
@@ -105,33 +109,35 @@ func (a *Agent) maybeCompact(ctx context.Context, iter int, conversation []model
 				after += int64(estimate(c))
 			}
 		}
+		a.conversation = newConv
+		a.contextTokens = after
 	}
 	compSpan.SetAttributes(
 		attribute.String("mph.context.compaction.outcome", outcome),
-		attribute.Int64("mph.context.tokens.before", lastContextTokens),
+		attribute.Int64("mph.context.tokens.before", before),
 		attribute.Int64("mph.context.tokens.after", after),
 		attribute.Int("mph.context.compaction.summary_bytes", summaryBytes),
 		attribute.Int("mph.context.compaction.handles", len(infos)),
-		attribute.Int("mph.context.compactions_applied", compactionsApplied),
+		attribute.Int("mph.context.compactions_applied", a.compactionsApplied),
 	)
 	compLog := a.log.With().Ctx(compCtx).Logger()
 	compLog.Warn().
-		Int64("tokens_before", lastContextTokens).
-		Int64("tokens_after", after).
-		Float64("threshold", cc.Threshold).
-		Int("summary_bytes", summaryBytes).
+		Int("iter", a.iteration+1).
+		Int64("tok_before", before).
+		Int64("tok_after", after).
+		Float64("thr", cc.Threshold).
+		Int("summary", summaryBytes).
 		Int("handles", len(infos)).
-		Int("compactions_applied", compactionsApplied).
-		Int("attempt", attempts+1).
-		Int("iteration", iter+1).
-		Int64("duration_ms", duration.Milliseconds()).
+		Int("compacted", a.compactionsApplied).
+		Int("try", a.compactionAttempts+1).
+		Int64("dur_ms", duration.Milliseconds()).
 		Str("outcome", outcome).
 		Msg("context compaction")
 	mphotel.LogEvent(compCtx, a.log, zerolog.WarnLevel, "context compaction", map[string]any{
-		"outcome": outcome, "tokens_before": lastContextTokens, "tokens_after": after,
-		"threshold": cc.Threshold, "summary_bytes": summaryBytes, "handles": len(infos),
-		"compactions_applied": compactionsApplied,
-		"attempt": attempts + 1, "iteration": iter + 1, "duration_ms": duration.Milliseconds(),
+		"iter": a.iteration + 1, "outcome": outcome, "tok_before": before, "tok_after": after,
+		"thr": cc.Threshold, "summary": summaryBytes, "handles": len(infos),
+		"compacted": a.compactionsApplied,
+		"try":       a.compactionAttempts + 1, "dur_ms": duration.Milliseconds(),
 	})
 	if compactionsCounter != nil {
 		compactionsCounter.Add(compCtx, 1, metric.WithAttributes(attribute.String("mph.context.compaction.outcome", outcome)))
@@ -145,17 +151,23 @@ func (a *Agent) maybeCompact(ctx context.Context, iter int, conversation []model
 		// Rewriting history invalidates the inference prefix cache. Accepted:
 		// one re-prefill of a small prompt buys back thousands of tokens.
 		if tokensReclaimedHist != nil {
-			tokensReclaimedHist.Record(compCtx, lastContextTokens-after)
+			tokensReclaimedHist.Record(compCtx, before-after)
 		}
 		if contextTokensGauge != nil {
 			contextTokensGauge.Record(compCtx, after)
 		}
-		return newConv, after, attempts, outcome
+		a.compactionsApplied++
+		// A compaction that worked proves the summarizer and handover are
+		// healthy, so the failure budget is restored. Otherwise one failure
+		// anywhere in a long run disables compaction for good.
+		a.compactionAttempts = 0
+		return outcome
 	case "reverted", "skipped":
 		// Not worth it yet (or nothing to do): the next attempt with a longer
 		// history may win, so this must not consume the failure budget.
-		return conversation, lastContextTokens, attempts, outcome
+		return outcome
 	default:
-		return conversation, lastContextTokens, attempts + 1, outcome
+		a.compactionAttempts++
+		return outcome
 	}
 }

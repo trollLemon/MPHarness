@@ -123,9 +123,9 @@ func recordContextWindow(ctx context.Context, krn Kronk) {
 	contextWindowGauge.Record(ctx, int64(window))
 }
 
-func recordTokenUsage(ctx context.Context, span trace.Span, log zerolog.Logger, usage *model.Usage) int64 {
+func recordTokenUsage(ctx context.Context, span trace.Span, log zerolog.Logger, usage *model.Usage) {
 	if usage == nil {
-		return 0
+		return
 	}
 	mphotel.LogEvent(ctx, log, zerolog.InfoLevel, "token usage", map[string]any{
 		"prompt_tokens":     usage.PromptTokens,
@@ -151,7 +151,8 @@ func recordTokenUsage(ctx context.Context, span trace.Span, log zerolog.Logger, 
 	if contextTokensGauge != nil {
 		contextTokensGauge.Record(ctx, current)
 	}
-	return current
+
+	return
 }
 
 func addToolCallEvents(span trace.Span, toolCalls []model.ResponseToolCall, maxArgs int) {
