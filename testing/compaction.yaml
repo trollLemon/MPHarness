@@ -4,12 +4,17 @@ vm:
   ram: 2G
   cpu: 1
   image: bionic
-model: unsloth/Qwen3-0.6B-Q8_0
+model: unsloth/Qwen3-4B-Q8_0
 allowed_commands:
   - coreUtils
+  - hostname
 llm:
   temperature: 0.0
   tool_choice: auto
+  # Small window so the 0.51 threshold (≈2090 tokens) is reachable in a few
+  # turns. 0.51 is already the validation floor; shrinking the window is the
+  # lever that moves the bar.
+  context_window: 4096
 agent:
   max_iterations: 12
   chat_timeout: 300s
@@ -32,7 +37,7 @@ compaction:
   min_messages: 6
   max_attempts: 3
 prompt: |
-  Inside the Multipass VM, do the following, one step per turn, waiting for each result before the next step:
+  Inside the Multipass VM, do the following:
   1. Run uname -a and note the kernel release field.
   2. Write that release string into /tmp/steps.txt.
   3. Append the output of hostname as a second line in /tmp/steps.txt.
