@@ -72,10 +72,9 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "    service_name: %s\n", mphotel.DefaultServiceName)
 	_, _ = fmt.Fprintf(w, "    resource_attributes:\n")
 	_, _ = fmt.Fprintf(w, "      environment: dev\n")
-	_, _ = fmt.Fprintf(w, "  output:               # optional, chunked command output\n")
+	_, _ = fmt.Fprintf(w, "  output:               # optional, captured command output\n")
 	_, _ = fmt.Fprintf(w, "    enabled: true\n")
 	_, _ = fmt.Fprintf(w, "    mode: auto          # auto|always\n")
-	_, _ = fmt.Fprintf(w, "    chunk_lines: %d\n", config.DefaultOutputChunkLines)
 	_, _ = fmt.Fprintf(w, "    inline_max_size: 0   # 0 = derive from tool-result budget\n")
 	_, _ = fmt.Fprintf(w, "    max_command_size: 64MiB\n")
 	_, _ = fmt.Fprintf(w, "    max_total_size: 512MiB\n")
@@ -163,29 +162,30 @@ func run() error {
 			}
 		}()
 		log.Logger = log.Logger.Hook(mphotel.NewHook("mph"))
-		log.Info().Str("otel.endpoint", otelCfg.Endpoint).Str("otel.service_name", otelCfg.ServiceName).Msg("otel enabled")
+		log.Info().Str("endpoint", otelCfg.Endpoint).Str("svc", otelCfg.ServiceName).Msg("otel enabled")
 	}
 
 	log.Info().
-		Str("config", configPath).
+		Str("cfg", configPath).
 		Str("vm", cfg.VM.Name).
 		Str("model", cfg.Model).
-		Str("content_dir", cfg.ContentDir).
-		Strs("allowed_commands", cfg.AllowedCommandsList()).
-		Float64("llm.temperature", cfg.LLM.Temperature).
-		Float64("llm.top_p", cfg.LLM.TopP).
-		Int("llm.top_k", cfg.LLM.TopK).
-		Str("llm.tool_choice", cfg.LLM.ToolChoice).
-		Int("llm.context_window", cfg.LLM.ContextWindow).
-		Int("agent.max_iterations", cfg.Agent.MaxIterations).
-		Str("agent.chat_timeout", time.Duration(cfg.Agent.ChatTimeout).String()).
-		Str("agent.total_timeout", time.Duration(cfg.Agent.TotalTimeout).String()).
-		Bool("otel.enabled", otelCfg.Enabled).
-		Bool("output.enabled", cfg.Output.Enabled).
-		Str("output.mode", cfg.Output.Mode).
-		Bool("compaction.enabled", cfg.Compaction.Enabled).
-		Float64("compaction.threshold", cfg.Compaction.Threshold).
+		Str("dir", cfg.ContentDir).
+		Int("cmds", len(cfg.AllowedCommandsList())).
+		Float64("temp", cfg.LLM.Temperature).
+		Float64("top_p", cfg.LLM.TopP).
+		Int("top_k", cfg.LLM.TopK).
+		Str("tools", cfg.LLM.ToolChoice).
+		Int("ctx_win", cfg.LLM.ContextWindow).
+		Int("iters", cfg.Agent.MaxIterations).
+		Str("chat_to", time.Duration(cfg.Agent.ChatTimeout).String()).
+		Str("total_to", time.Duration(cfg.Agent.TotalTimeout).String()).
+		Bool("otel", otelCfg.Enabled).
+		Bool("out_on", cfg.Output.Enabled).
+		Str("out_mode", cfg.Output.Mode).
+		Bool("compact", cfg.Compaction.Enabled).
+		Float64("compact_thr", cfg.Compaction.Threshold).
 		Msg("loaded config")
+	log.Debug().Strs("cmds", cfg.AllowedCommandsList()).Msg("allowed commands")
 
 	ctx := context.Background()
 
@@ -229,6 +229,12 @@ func run() error {
 
 func setupLogger(verbose, pretty bool) {
 	zerolog.TimeFieldFormat = time.RFC3339
+	zerolog.CallerMarshalFunc = func(_ uintptr, file string, line int) string {
+		if i := strings.LastIndexByte(file, '/'); i >= 0 {
+			file = file[i+1:]
+		}
+		return file + ":" + strings.TrimSpace(fmt.Sprint(line))
+	}
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	if verbose {
 		zerolog.SetGlobalLevel(zerolog.DebugLevel)
