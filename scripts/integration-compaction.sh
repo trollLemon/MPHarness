@@ -1,6 +1,6 @@
 #!/bin/sh
 # Integration smoke for conversation compaction on a tiny deterministic model.
-# Needs a Multipass VM and the 0.6B model; run with the OTel stack up
+# Needs a Multipass VM and the 14B reasoning model; run with the OTel stack up
 # (make otel-up).
 set -eu
 
@@ -16,7 +16,7 @@ make build
 OUT="$(mktemp)"
 trap 'rm -f "$OUT"' EXIT
 
-"$BIN" -pretty "$FIXTURE" 2>&1 | tee "$OUT"
+"$BIN" -pretty -verbose "$FIXTURE" 2>&1 | tee "$OUT"
 
 fail() {
   echo "integration-compaction: FAIL: $1" >&2

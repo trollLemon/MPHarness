@@ -1,52 +1,33 @@
+# configuration which triggers an early compaction step. 
+# for speed, we use a smaller model; its not too great at tool calls after compaction, but the point of this test is 
+# that we get a compaction. Larger models will perform better. 
+
 vm:
   name: mph-compact
   disk: 10G
   ram: 2G
   cpu: 1
   image: bionic
-model: unsloth/Qwen3-4B-Q8_0
-allowed_commands:
-  - coreUtils
-  - hostname
+model: unsloth/Qwen3-0.6B-Q8_0
 llm:
   temperature: 0.0
   tool_choice: auto
-  # Small window so the 0.51 threshold (≈2090 tokens) is reachable in a few
-  # turns. 0.51 is already the validation floor; shrinking the window is the
-  # lever that moves the bar.
   context_window: 4096
 agent:
-  max_iterations: 12
+  max_iterations: 5
   chat_timeout: 300s
   total_timeout: 30m
-output:
-  enabled: true
-  mode: auto
-  chunk_lines: 500
-  inline_max_size: 0
-  max_command_size: 64MiB
-  max_total_size: 512MiB
-  search_max_matches: 200
 compaction:
   enabled: true
-  # NOTE: the design spec text suggests 0.25 here, but compaction.threshold is
-  # validated to (0.5, 0.95]; 0.51 still fires early against kronk's 8K cap.
-  threshold: 0.51
+  threshold: 0.71
   max_summary_tokens: 512
-  recent_turns: 3
   min_messages: 6
   max_attempts: 3
 prompt: |
   Inside the Multipass VM, do the following:
   1. Run uname -a and note the kernel release field.
-  2. Write that release string into /tmp/steps.txt.
-  3. Append the output of hostname as a second line in /tmp/steps.txt.
-  4. Append the output of whoami as a third line in /tmp/steps.txt.
-  5. Read back /tmp/steps.txt and report all three lines.
+  2. Write that release string into ./tmp/steps.txt.
+  3. Append the output of hostname as a second line in ./tmp/steps.txt.
+  4. Append the output of whoami as a third line in ./tmp/steps.txt.
+  5. Read back ./tmp/steps.txt and report all three lines.
   Summarise the results.
-otel:
-  enabled: true
-  endpoint: localhost:4317
-  service_name: mph-compact
-  resource_attributes:
-    environment: dev
