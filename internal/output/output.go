@@ -465,9 +465,7 @@ func parseGrepOutput(out, marker string) (lines []string, exit int, hasMarker bo
 		}
 		break
 	}
-	for _, line := range all {
-		lines = append(lines, line)
-	}
+	lines = append(lines, all...)
 	return lines, exit, hasMarker
 }
 

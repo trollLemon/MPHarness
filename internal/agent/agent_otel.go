@@ -151,8 +151,6 @@ func recordTokenUsage(ctx context.Context, span trace.Span, log zerolog.Logger, 
 	if contextTokensGauge != nil {
 		contextTokensGauge.Record(ctx, current)
 	}
-
-	return
 }
 
 func addToolCallEvents(span trace.Span, toolCalls []model.ResponseToolCall, maxArgs int) {

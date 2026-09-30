@@ -252,7 +252,7 @@ func TestLogEventFieldOrder(t *testing.T) {
 		id := strings.Index(line, `"id"`)
 		iter := strings.Index(line, `"iter"`)
 		out := strings.Index(line, `"out"`)
-		if !(iter < tool && tool < id && id < out) {
+		if tool <= iter || id <= tool || out <= id {
 			t.Fatalf("fields out of order: %q...", line[:120])
 		}
 	}
@@ -279,7 +279,7 @@ func TestLogEventPayloadLast(t *testing.T) {
 		if iter < 0 || tool < 0 || id < 0 || args < 0 || out < 0 {
 			t.Fatalf("missing keys: %q", line)
 		}
-		if !(iter < tool && tool < id && id < args && args < out) {
+		if tool <= iter || id <= tool || args <= id || out <= args {
 			t.Fatalf("payload not last / out of order: %q", line)
 		}
 	}

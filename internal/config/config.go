@@ -229,30 +229,22 @@ func parseSize(s string) (int64, error) {
 	}
 	numStr := t[:i]
 	sufStr := strings.ToUpper(strings.TrimSpace(t[i:]))
-	var mult int64 = 1
+	var mult int64
 	switch sufStr {
 	case "", "B":
 		mult = 1
-	case "K", "KB", "KIB":
-		if sufStr == "K" {
-			mult = 1024
-		} else if sufStr == "KIB" {
-			mult = 1024
-		} else {
-			mult = 1000
-		}
-	case "M", "MB", "MIB":
-		if sufStr == "MB" {
-			mult = 1000 * 1000
-		} else {
-			mult = 1024 * 1024
-		}
-	case "G", "GB", "GIB":
-		if sufStr == "GB" {
-			mult = 1000 * 1000 * 1000
-		} else {
-			mult = 1024 * 1024 * 1024
-		}
+	case "K", "KIB":
+		mult = 1024
+	case "KB":
+		mult = 1000
+	case "M", "MIB":
+		mult = 1024 * 1024
+	case "MB":
+		mult = 1000 * 1000
+	case "G", "GIB":
+		mult = 1024 * 1024 * 1024
+	case "GB":
+		mult = 1000 * 1000 * 1000
 	default:
 		return 0, fmt.Errorf("invalid size %q", s)
 	}
