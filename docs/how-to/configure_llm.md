@@ -101,7 +101,6 @@ compaction:
   enabled: true
   threshold: 0.8           # fraction of the context window; validated to (0.5, 0.95]
   max_summary_tokens: 2048
-  recent_turns: 3
   min_messages: 6
   max_attempts: 3
 ```
