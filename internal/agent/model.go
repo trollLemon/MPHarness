@@ -13,8 +13,9 @@ import (
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+
+	mphotel "github.com/trollLemon/MPHarness/internal/otel"
 )
 
 // InitializeModelFiles initializes llama.cpp libbraries and model files.
@@ -36,14 +37,12 @@ func InitializeModelFiles(ctx context.Context, logger zerolog.Logger, modelSourc
 
 	modelMgr, err := models.New()
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+		mphotel.FailSpan(span, err)
 		return models.Path{}, fmt.Errorf("initialize model manager: %w", err)
 	}
 	mp, err := modelMgr.Download(ctx, alog, modelSource)
 	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+		mphotel.FailSpan(span, err)
 		return models.Path{}, fmt.Errorf("install model %q: %w", modelSource, err)
 	}
 

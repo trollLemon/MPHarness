@@ -6,12 +6,10 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
@@ -19,6 +17,7 @@ import (
 	"github.com/trollLemon/MPHarness/internal/multipass"
 	mphotel "github.com/trollLemon/MPHarness/internal/otel"
 	"github.com/trollLemon/MPHarness/internal/output"
+	"github.com/trollLemon/MPHarness/internal/textutil"
 )
 
 type Kronk interface {
@@ -27,20 +26,7 @@ type Kronk interface {
 	ModelConfig() model.Config
 }
 
-type LLMConfig struct {
-	Temperature     float64 `json:"temperature" yaml:"temperature"`
-	TopP            float64 `json:"top_p" yaml:"top_p"`
-	TopK            int     `json:"top_k" yaml:"top_k"`
-	ToolChoice      string  `json:"tool_choice" yaml:"tool_choice"`
-	MaxOutputTokens int     `json:"max_output_tokens" yaml:"max_output_tokens"`
-}
-
 const (
-	// DefaultMaxOutputTokens caps one model turn. Without it a runaway completion
-	// can decode until it exhausts the context window, which trips the length
-	// nudge and costs a whole extra iteration.
-	DefaultMaxOutputTokens = 2048
-
 	// toolResultWindowDivisor sets each tool result to roughly 1/divisor of the
 	// live context window, leaving room for the remaining iterations, the
 	// assistant turns, and the tool call documents.
@@ -67,7 +53,7 @@ func finalCommandOutput(commandOutputs []string) string {
 	if len(commandOutputs) == 0 {
 		return ""
 	}
-	return truncate(strings.Join(commandOutputs, "\n---\n"), finalOutputBytes)
+	return textutil.Truncate(strings.Join(commandOutputs, "\n---\n"), finalOutputBytes)
 }
 
 func toolResultBudgetBytes(cfg config.Config, contextWindow int) int {
@@ -85,19 +71,20 @@ func toolResultBudgetBytes(cfg config.Config, contextWindow int) int {
 // being threaded through every signature, so the per-iteration helpers read as
 // what they do instead of what they carry.
 type Agent struct {
-	log           zerolog.Logger // Run-scoped logger, already tagged component=agent.
-	krn           Kronk          // Model backend: chat, tokenize, and model metadata.
-	maxIterations int            // Hard cap on inference rounds before the run stops.
-	chatTimeout   time.Duration  // Budget for one chat call; guards a stalled model.
-	totalTimeout  time.Duration  // Budget for the whole run; bounds every iteration.
-	llmConfig     LLMConfig      // Sampling and output limits sent with each request.
-	runID         string         // Identifies this run in logs, spans, and output paths.
+	log           zerolog.Logger   // Run-scoped logger, already tagged component=agent.
+	krn           Kronk            // Model backend: chat, tokenize, and model metadata.
+	maxIterations int              // Hard cap on inference rounds before the run stops.
+	chatTimeout   time.Duration    // Budget for one chat call; guards a stalled model.
+	totalTimeout  time.Duration    // Budget for the whole run; bounds every iteration.
+	llmConfig     config.LLMConfig // Sampling and output limits sent with each request.
+	runID         string           // Identifies this run in logs, spans, and output paths.
 
 	conversation       []model.D     // Full message history, including tool results.
 	toolDocs           []model.D     // Tool schemas sent alongside every request.
 	commandOutputs     []string      // Captured command results, in the order they ran.
 	store              *output.Store // Captured output handles, or nil when disabled.
 	contextTokens      int64         // Live context size, driving compaction and metrics.
+	fixedOverhead      int64         // Per-request cost outside the messages: tool schemas and template framing.
 	iteration          int           // Zero-based index of the round now running.
 	compactionAttempts int           // Failed compactions; budget for the current one.
 	compactionsApplied int           // Compactions that succeeded this run.
@@ -105,21 +92,29 @@ type Agent struct {
 	done               bool          // Set when the agent should stop looping.
 }
 
-// NewAgent builds an Agent for a single run. A zero ToolChoice defaults to
-// "auto" so callers can leave sampling config unset.
-func NewAgent(log zerolog.Logger, krn Kronk, maxIterations int, chatTimeout time.Duration, totalTimeout time.Duration, llmConfig LLMConfig, runID string) *Agent {
-	if llmConfig.ToolChoice == "" {
-		llmConfig.ToolChoice = "auto"
+// Options carries the per-run bounds NewAgent needs.
+type Options struct {
+	MaxIterations int
+	ChatTimeout   time.Duration
+	TotalTimeout  time.Duration
+	LLM           config.LLMConfig
+	RunID         string
+}
+
+// NewAgent builds an Agent for a single run.
+func NewAgent(log zerolog.Logger, krn Kronk, opts Options) *Agent {
+	if opts.LLM.ToolChoice == "" {
+		opts.LLM.ToolChoice = "auto"
 	}
 	log = log.With().Str("component", "agent").Logger()
 	return &Agent{
 		log:           log,
 		krn:           krn,
-		maxIterations: maxIterations,
-		chatTimeout:   chatTimeout,
-		totalTimeout:  totalTimeout,
-		llmConfig:     llmConfig,
-		runID:         runID,
+		maxIterations: opts.MaxIterations,
+		chatTimeout:   opts.ChatTimeout,
+		totalTimeout:  opts.TotalTimeout,
+		llmConfig:     opts.LLM,
+		runID:         opts.RunID,
 	}
 }
 
@@ -138,7 +133,7 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *multipass.
 	a.toolResultBudget = toolResultBudgetBytes(conf, a.krn.ModelConfig().ContextWindow())
 
 	if conf.Output.Enabled {
-		a.store = output.NewStore(cli, conf.VM.Name, "/tmp/mph-output/"+a.runID, conf.Output, int64(a.toolResultBudget), conf.AllowedCommands)
+		a.store = output.NewStore(cli, conf.VM.Name, config.OutputRunDir(a.runID), conf.Output, int64(a.toolResultBudget), conf.AllowedCommands)
 	}
 
 	a.log.Info().Int("tools", len(a.toolDocs)).Msg("tool documents built")
@@ -156,7 +151,7 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *multipass.
 
 	if len(a.commandOutputs) > 0 {
 		final := finalCommandOutput(a.commandOutputs)
-		a.log.Info().Str("out", truncate(final, conf.Truncation.CommandOutput)).Msg("final command output")
+		a.log.Info().Str("out", textutil.Truncate(final, conf.Truncation.CommandOutput)).Msg("final command output")
 		fmt.Println(final)
 	} else {
 		a.log.Info().Msg("agent completed with no command output or final answer")
@@ -191,8 +186,7 @@ func (a *Agent) runIteration(ctx context.Context, cli *multipass.Client, conf co
 
 	resp, err := a.callChat(iterCtx, buildChatRequest(a.conversation, a.toolDocs, a.llmConfig), iter)
 	if err != nil {
-		iterSpan.RecordError(err)
-		iterSpan.SetStatus(codes.Error, err.Error())
+		mphotel.FailSpan(iterSpan, err)
 		iterSpan.End()
 		return err
 	}
@@ -204,6 +198,9 @@ func (a *Agent) runIteration(ctx context.Context, cli *multipass.Client, conf co
 	if resp.Usage != nil {
 		a.contextTokens = int64(resp.Usage.TotalTokens)
 	}
+	// Measured before the assistant message lands, so a.conversation is still
+	// exactly what the request carried.
+	a.fixedOverhead = a.measureFixedOverhead(iterCtx, resp.Usage)
 
 	msg, finishReason, shouldBreak := a.extractAssistantMessage(resp)
 	iterSpan.SetAttributes(attribute.String("mph.finish_reason", finishReason))
@@ -253,7 +250,7 @@ func (a *Agent) runIteration(ctx context.Context, cli *multipass.Client, conf co
 	toolCallDocs := a.buildToolCallDocsWithContext(iterCtx, toolCalls, iter)
 	a.conversation = appendToConversation(a.conversation, buildAssistantMessage(msg, toolCallDocs, conf.Agent.Reasoning()))
 
-	toolResponses, newOutputs := a.executeToolCalls(iterCtx, cli, conf, a.store, toolCalls)
+	toolResponses, newOutputs := a.executeToolCalls(iterCtx, cli, conf, toolCalls)
 	a.commandOutputs = append(a.commandOutputs, newOutputs...)
 	a.conversation = appendToConversation(a.conversation, toolResponses...)
 	a.addToolTokens(iterCtx, toolResponses)
@@ -300,7 +297,7 @@ func logModelPart(ctx context.Context, log zerolog.Logger, iter int, part, text 
 	mphotel.LogEvent(ctx, log, zerolog.InfoLevel, "model output", map[string]any{
 		"iter": iter + 1,
 		"part": part,
-		"text": truncate(text, maxContent),
+		"text": textutil.Truncate(text, maxContent),
 	})
 }
 
@@ -347,16 +344,8 @@ func (a *Agent) shouldTerminateWithoutToolCalls(toolCalls []model.ResponseToolCa
 	if len(toolCalls) != 0 {
 		return false
 	}
-	if finishReason == model.FinishReasonStop || finishReason == model.FinishReasonLength || finishReason == "" {
-		a.log.Info().Int("iter", iter+1).Str("finish", finishReason).Msg("agent finished without tool calls")
-		return true
-	}
-	a.log.Info().Str("finish", finishReason).Msg("no tool calls, ending loop")
+	a.log.Info().Int("iter", iter+1).Str("finish", finishReason).Msg("agent finished without tool calls")
 	return true
-}
-
-func (a *Agent) buildToolCallDocs(toolCalls []model.ResponseToolCall, iter int) []model.D {
-	return a.buildToolCallDocsWithContext(context.Background(), toolCalls, iter)
 }
 
 func (a *Agent) buildToolCallDocsWithContext(ctx context.Context, toolCalls []model.ResponseToolCall, iter int) []model.D {
@@ -382,21 +371,32 @@ func (a *Agent) buildToolCallDocsWithContext(ctx context.Context, toolCalls []mo
 	return docs
 }
 
-func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg config.Config, store *output.Store, toolCalls []model.ResponseToolCall) ([]model.D, []string) {
+func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg config.Config, toolCalls []model.ResponseToolCall) ([]model.D, []string) {
 	var toolResponses []model.D
 	var commandOutputs []string
 
 	span := trace.SpanFromContext(ctx)
 	for _, tc := range toolCalls {
 		start := time.Now()
-		result, err := Call(ctx, cli, cfg, store, tc.Function.Name, map[string]any(tc.Function.Arguments))
+		result, err := Call(ctx, cli, cfg, a.store, tc.Function.Name, map[string]any(tc.Function.Arguments))
 		duration := time.Since(start)
-		durationSec := duration.Seconds()
-		durationMs := duration.Milliseconds()
+
+		status := "SUCCESS"
+		detail := result
 		var content string
-		var status string
-		if err != nil {
+
+		if err == nil {
+			mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "tool succeeded", map[string]any{
+				"tool": tc.Function.Name,
+				"id":   tc.ID,
+				"out":  textutil.Truncate(result, cfg.Truncation.ToolResult),
+			})
+		}
+
+		switch {
+		case err != nil:
 			status = "FAILED"
+			detail = err.Error()
 			mphotel.LogEvent(ctx, a.log, zerolog.ErrorLevel, "tool execution failed", map[string]any{
 				"tool":  tc.Function.Name,
 				"id":    tc.ID,
@@ -406,20 +406,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg
 			if toolFailuresCounter != nil {
 				toolFailuresCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("mph.tool.name", tc.Function.Name)))
 			}
-			span.AddEvent("mph.agent.tool_result", trace.WithAttributes(
-				attribute.String("mph.tool.name", tc.Function.Name),
-				attribute.String("mph.tool.id", tc.ID),
-				attribute.String("mph.tool.status", status),
-				attribute.String("mph.tool.result", truncate(err.Error(), cfg.Truncation.ToolResult)),
-				attribute.Int64("mph.tool.duration_ms", durationMs),
-			))
-		} else if isToolEnvelope(result) {
-			status = "SUCCESS"
-			mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "tool succeeded", map[string]any{
-				"tool": tc.Function.Name,
-				"id":   tc.ID,
-				"out":  truncate(result, cfg.Truncation.ToolResult),
-			})
+		case isToolEnvelope(result):
 			if isCaptureEnvelope(result) {
 				if id := capturedOutputID(result); id != "" {
 					commandOutputs = append(commandOutputs, fmt.Sprintf("<captured output_id=%s>", id))
@@ -431,40 +418,29 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg
 				}
 			}
 			content = result
-			span.AddEvent("mph.agent.tool_result", trace.WithAttributes(
-				attribute.String("mph.tool.name", tc.Function.Name),
-				attribute.String("mph.tool.id", tc.ID),
-				attribute.String("mph.tool.status", status),
-				attribute.String("mph.tool.result", truncate(result, cfg.Truncation.ToolResult)),
-				attribute.Int64("mph.tool.duration_ms", durationMs),
-			))
-		} else {
-			status = "SUCCESS"
-			mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "tool succeeded", map[string]any{
-				"tool": tc.Function.Name,
-				"id":   tc.ID,
-				"out":  truncate(result, cfg.Truncation.ToolResult),
-			})
+		default:
 			if tc.Function.Name == "multipass_exec" {
 				commandOutputs = append(commandOutputs, result)
 				mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "command output", map[string]any{
-					"command_output": truncate(result, cfg.Truncation.CommandOutput),
+					"command_output": textutil.Truncate(result, cfg.Truncation.CommandOutput),
 				})
 			}
 			content = buildToolSuccessContent(tc.Function.Name, result)
-			span.AddEvent("mph.agent.tool_result", trace.WithAttributes(
-				attribute.String("mph.tool.name", tc.Function.Name),
-				attribute.String("mph.tool.id", tc.ID),
-				attribute.String("mph.tool.status", status),
-				attribute.String("mph.tool.result", truncate(result, cfg.Truncation.ToolResult)),
-				attribute.Int64("mph.tool.duration_ms", durationMs),
-			))
 		}
+
+		span.AddEvent("mph.agent.tool_result", trace.WithAttributes(
+			attribute.String("mph.tool.name", tc.Function.Name),
+			attribute.String("mph.tool.id", tc.ID),
+			attribute.String("mph.tool.status", status),
+			attribute.String("mph.tool.result", textutil.Truncate(detail, cfg.Truncation.ToolResult)),
+			attribute.Int64("mph.tool.duration_ms", duration.Milliseconds()),
+		))
+
 		if toolCallsCounter != nil {
 			toolCallsCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("mph.tool.name", tc.Function.Name)))
 		}
 		if toolDurationHist != nil {
-			toolDurationHist.Record(ctx, durationSec, metric.WithAttributes(
+			toolDurationHist.Record(ctx, duration.Seconds(), metric.WithAttributes(
 				attribute.String("mph.tool.name", tc.Function.Name),
 				attribute.String("mph.tool.status", status),
 			))
@@ -474,22 +450,4 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg
 	}
 
 	return toolResponses, commandOutputs
-}
-
-func truncate(s string, n int) string {
-	if n <= 0 || len(s) <= n {
-		return s
-	}
-	return fmt.Sprintf("%s…(truncated, %d of %d bytes)", trimPartialRuneTail(s[:n]), n, len(s))
-}
-
-func trimPartialRuneTail(s string) string {
-	for len(s) > 0 {
-		if r, size := utf8.DecodeLastRuneInString(s); r == utf8.RuneError && size <= 1 {
-			s = s[:len(s)-1]
-			continue
-		}
-		break
-	}
-	return s
 }

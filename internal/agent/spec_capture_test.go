@@ -357,11 +357,18 @@ func TestCaptureLogsAttributionLine(t *testing.T) {
 		}
 	}}
 	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10, nil)
-	agt := NewAgent(zerolog.New(&buf), &mockKronk{}, 1, time.Second, time.Second, defaultLLMConfig(), "run-1")
+	agt := NewAgent(zerolog.New(&buf), &mockKronk{}, Options{
+		MaxIterations: 1,
+		ChatTimeout:   time.Second,
+		TotalTimeout:  time.Second,
+		LLM:           defaultLLMConfig(),
+		RunID:         "run-1",
+	})
+	agt.store = store
 	tc := model.ResponseToolCall{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{
 		Name: "multipass_exec", Arguments: model.ToolCallArguments{"command": "echo hi"},
 	}}
-	_, outputs := agt.executeToolCalls(context.Background(), multipass.New(zerolog.Nop()), cfg, store, []model.ResponseToolCall{tc})
+	_, outputs := agt.executeToolCalls(context.Background(), multipass.New(zerolog.Nop()), cfg, []model.ResponseToolCall{tc})
 	if len(outputs) != 1 || !strings.HasPrefix(outputs[0], "<captured output_id=") {
 		t.Fatalf("want capture placeholder, got %v", outputs)
 	}
@@ -398,11 +405,18 @@ func TestExecuteToolCallsLogsPerCommandOutput(t *testing.T) {
 		return "", nil
 	}}
 	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 1<<20, nil)
-	agt := NewAgent(zerolog.New(&buf), &mockKronk{}, 1, time.Second, time.Second, defaultLLMConfig(), "run-cmdlog")
+	agt := NewAgent(zerolog.New(&buf), &mockKronk{}, Options{
+		MaxIterations: 1,
+		ChatTimeout:   time.Second,
+		TotalTimeout:  time.Second,
+		LLM:           defaultLLMConfig(),
+		RunID:         "run-cmdlog",
+	})
+	agt.store = store
 	tc := model.ResponseToolCall{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{
 		Name: "multipass_exec", Arguments: model.ToolCallArguments{"command": "echo hi", "capture": true},
 	}}
-	agt.executeToolCalls(context.Background(), multipass.New(zerolog.Nop()), cfg, store, []model.ResponseToolCall{tc})
+	agt.executeToolCalls(context.Background(), multipass.New(zerolog.Nop()), cfg, []model.ResponseToolCall{tc})
 
 	found := false
 	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {

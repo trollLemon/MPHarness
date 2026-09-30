@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	mphotel "github.com/trollLemon/MPHarness/internal/otel"
+	"github.com/trollLemon/MPHarness/internal/textutil"
 )
 
 var (
@@ -56,12 +57,8 @@ func getAgentTracer() trace.Tracer {
 	return otel.Tracer("mph")
 }
 
-func getAgentMeter() metric.Meter {
-	return otel.Meter("mph")
-}
-
 func initAgentMetrics() {
-	meter := getAgentMeter()
+	meter := otel.Meter("mph")
 	var err error
 	tokensHist, err = meter.Int64Histogram("mph.tokens")
 	if err != nil {
@@ -159,7 +156,7 @@ func addToolCallEvents(span trace.Span, toolCalls []model.ResponseToolCall, maxA
 		span.AddEvent("mph.agent.tool_call", trace.WithAttributes(
 			attribute.String("mph.tool.name", tc.Function.Name),
 			attribute.String("mph.tool.id", tc.ID),
-			attribute.String("mph.tool.arguments", truncate(string(argsJSON), maxArgs)),
+			attribute.String("mph.tool.arguments", textutil.Truncate(string(argsJSON), maxArgs)),
 		))
 	}
 }

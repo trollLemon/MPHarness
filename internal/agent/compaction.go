@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
@@ -33,6 +35,9 @@ func (s *agentSummarizer) Summarize(ctx context.Context, systemPrompt, renderedH
 		},
 		"temperature": 0,
 		"max_tokens":  maxTokens,
+		// Thinking would spend the summary's own token budget on <think> and
+		// return no content, which compaction reports as outcome=failed.
+		"enable_thinking": false,
 	}
 	resp, err := s.krn.Chat(callCtx, req)
 	if err != nil {
@@ -48,7 +53,11 @@ func (s *agentSummarizer) Summarize(ctx context.Context, systemPrompt, renderedH
 	if msg == nil {
 		return "", nil
 	}
-	return msg.Content, nil
+	if msg.Content != "" {
+		return msg.Content, nil
+	}
+
+	return "", errors.New("summary response contained no `content` tokens.")
 }
 
 func (a *Agent) estimateTokens(ctx context.Context, text string) int {
@@ -61,11 +70,36 @@ func (a *Agent) estimateTokens(ctx context.Context, text string) int {
 	return len(text) / bytesPerToken
 }
 
+// measureFixedOverhead splits a request's reported prompt cost into the messages
+// and the per-request overhead around them (tool schemas and template framing).
+// Only the overhead survives compaction, so it has to be carried into the
+// post-compaction figure instead of being assumed away.
+func (a *Agent) measureFixedOverhead(ctx context.Context, usage *model.Usage) int64 {
+	if usage != nil && usage.PromptTokens > 0 {
+		estimate := func(s string) int { return a.estimateTokens(ctx, s) }
+		if n := int64(usage.PromptTokens) - int64(compact.EstimateConversation(a.conversation, estimate)); n > 0 {
+			return n
+		}
+	}
+	// Usage without a prompt count, or an estimate that already overshoots it.
+	return a.schemaOverheadTokens(ctx)
+}
+
+// schemaOverheadTokens is the floor for the overhead: every request carries the
+// tool schemas, whatever the reported usage says.
+func (a *Agent) schemaOverheadTokens(ctx context.Context) int64 {
+	schemas, err := json.Marshal(a.toolDocs)
+	if err != nil {
+		return 0
+	}
+	return int64(a.estimateTokens(ctx, string(schemas)))
+}
+
 func outputHandleInfos(handles []output.Handle) []compact.HandleInfo {
 	infos := make([]compact.HandleInfo, 0, len(handles))
 	for _, h := range handles {
 		infos = append(infos, compact.HandleInfo{
-			ID: h.ID, Path: h.Path, TotalLines: h.TotalLines,
+			ID: h.ID, TotalLines: h.TotalLines,
 			TotalBytes: h.TotalBytes, Command: h.Command,
 		})
 	}
@@ -96,14 +130,16 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) string {
 	start := time.Now()
 	summarizer := &agentSummarizer{krn: a.krn, chatTimeout: a.chatTimeout}
 	estimate := func(s string) int { return a.estimateTokens(compCtx, s) }
+	overhead := a.schemaOverheadTokens(compCtx)
 	before := a.contextTokens
-	newConv, outcome, summaryLen := compact.Compact(compCtx, a.conversation, infos, cc.MaxSummaryTokens, cc.RecentTurns, a.toolResultBudget, summarizer, estimate, a.compactionsApplied)
+	win := compact.Window{Size: window, FixedOverhead: int(overhead)}
+	newConv, outcome, summaryLen := compact.Compact(compCtx, a.conversation, infos, cc.MaxSummaryTokens, a.toolResultBudget, win, summarizer, estimate, a.compactionsApplied)
 	duration := time.Since(start)
 
 	after := before
 	summaryBytes := summaryLen
 	if outcome == "applied" && len(newConv) == 2 {
-		after = 0
+		after = overhead
 		for _, m := range newConv {
 			if c, _ := m["content"].(string); c != "" {
 				after += int64(estimate(c))
@@ -121,19 +157,7 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) string {
 		attribute.Int("mph.context.compactions_applied", a.compactionsApplied),
 	)
 	compLog := a.log.With().Ctx(compCtx).Logger()
-	compLog.Warn().
-		Int("iter", a.iteration+1).
-		Int64("tok_before", before).
-		Int64("tok_after", after).
-		Float64("thr", cc.Threshold).
-		Int("summary", summaryBytes).
-		Int("handles", len(infos)).
-		Int("compacted", a.compactionsApplied).
-		Int("try", a.compactionAttempts+1).
-		Int64("dur_ms", duration.Milliseconds()).
-		Str("outcome", outcome).
-		Msg("context compaction")
-	mphotel.LogEvent(compCtx, a.log, zerolog.WarnLevel, "context compaction", map[string]any{
+	mphotel.LogEvent(compCtx, compLog, zerolog.WarnLevel, "context compaction", map[string]any{
 		"iter": a.iteration + 1, "outcome": outcome, "tok_before": before, "tok_after": after,
 		"thr": cc.Threshold, "summary": summaryBytes, "handles": len(infos),
 		"compacted": a.compactionsApplied,
@@ -161,6 +185,11 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) string {
 		// healthy, so the failure budget is restored. Otherwise one failure
 		// anywhere in a long run disables compaction for good.
 		a.compactionAttempts = 0
+
+		mphotel.LogEvent(compCtx, compLog, zerolog.InfoLevel, "context compaction", map[string]any{
+			"compacted": newConv,
+		})
+
 		return outcome
 	case "reverted", "skipped":
 		// Not worth it yet (or nothing to do): the next attempt with a longer

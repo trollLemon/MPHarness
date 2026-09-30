@@ -10,6 +10,7 @@ import (
 	"github.com/trollLemon/MPHarness/internal/config"
 	"github.com/trollLemon/MPHarness/internal/multipass"
 	"github.com/trollLemon/MPHarness/internal/output"
+	"github.com/trollLemon/MPHarness/internal/textutil"
 	"github.com/trollLemon/MPHarness/internal/validation"
 )
 
@@ -175,7 +176,7 @@ func Call(ctx context.Context, cli *multipass.Client, cfg config.Config, store *
 	case "multipass_exec":
 		return callExec(ctx, cli, cfg, store, args)
 	case "multipass_info":
-		return callInfo(ctx, cli, cfg)
+		return cli.Info(ctx, cfg.VM.Name)
 	case "output_search":
 		return callOutputSearch(ctx, cfg, store, args)
 	case "output_read":
@@ -183,14 +184,6 @@ func Call(ctx context.Context, cli *multipass.Client, cfg config.Config, store *
 	default:
 		return "", fmt.Errorf("unknown tool %q", name)
 	}
-}
-
-func callInfo(ctx context.Context, cli *multipass.Client, cfg config.Config) (string, error) {
-	raw, err := cli.Info(ctx, cfg.VM.Name)
-	if err != nil {
-		return "", err
-	}
-	return raw, nil
 }
 
 func callExec(ctx context.Context, cli *multipass.Client, cfg config.Config, store *output.Store, args map[string]any) (string, error) {
@@ -266,8 +259,10 @@ func buildCaptureSuccessContent(h *output.Handle) string {
 }
 
 func buildSearchSuccessContent(res output.SearchResult) string {
-	matches := make([]int, 0, len(res.Matches))
-	matches = append(matches, res.Matches...)
+	matches := res.Matches
+	if matches == nil {
+		matches = []int{}
+	}
 	b, _ := json.Marshal(map[string]any{
 		"status": "SUCCESS",
 		"data": map[string]any{"result": map[string]any{
@@ -321,12 +316,9 @@ func argInt(args map[string]any, key string) int {
 }
 
 func buildReadSuccessContent(res output.ReadResult) string {
-	lines := make([]any, 0, len(res.Lines))
-	for _, l := range res.Lines {
-		lines = append(lines, l)
-	}
+	lines := res.Lines
 	if lines == nil {
-		lines = []any{}
+		lines = []string{}
 	}
 	b, _ := json.Marshal(map[string]any{
 		"status": "SUCCESS",
@@ -460,10 +452,10 @@ func buildLengthNudgeMessages(msg *model.ResponseMessage, maxContent int) []mode
 	if msg.Reasoning != "" || msg.Content != "" {
 		nudgedAssistant := model.D{"role": "assistant"}
 		if msg.Content != "" {
-			nudgedAssistant["content"] = truncate(msg.Content, maxContent)
+			nudgedAssistant["content"] = textutil.Truncate(msg.Content, maxContent)
 		}
 		if msg.Reasoning != "" {
-			nudgedAssistant["reasoning_content"] = truncate(msg.Reasoning, maxContent)
+			nudgedAssistant["reasoning_content"] = textutil.Truncate(msg.Reasoning, maxContent)
 		}
 		msgs = append(msgs, nudgedAssistant)
 	}
@@ -473,10 +465,10 @@ func buildLengthNudgeMessages(msg *model.ResponseMessage, maxContent int) []mode
 	})
 }
 
-func buildChatRequest(conversation, toolDocs []model.D, llmConfig LLMConfig) model.D {
+func buildChatRequest(conversation, toolDocs []model.D, llmConfig config.LLMConfig) model.D {
 	maxOutputTokens := llmConfig.MaxOutputTokens
 	if maxOutputTokens <= 0 {
-		maxOutputTokens = DefaultMaxOutputTokens
+		maxOutputTokens = config.DefaultLLMMaxOutputTokens
 	}
 	req := model.D{
 		"messages":    conversation,
