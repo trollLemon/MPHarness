@@ -773,6 +773,22 @@ func TestAssistantMessageShapeLogged(t *testing.T) {
 	}
 }
 
+func TestExecuteReportsNoOutputWithoutError(t *testing.T) {
+	mock := &mockKronk{responses: []model.ChatResponse{
+		chatResp("", "", model.FinishReasonStop, nil, &model.Usage{TotalTokens: 1}),
+	}}
+	agt := NewAgent(zerolog.Nop(), mock, 1, time.Second, 5*time.Second, defaultLLMConfig(), "run-empty")
+	conf := config.Config{
+		VM:     config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
+		Model:  "m",
+		Prompt: "task",
+	}
+
+	if err := agt.Execute(context.Background(), conf, multipass.New(zerolog.Nop())); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+}
+
 func TestExecute(t *testing.T) {
 	tests := []struct {
 		name      string

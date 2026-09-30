@@ -96,7 +96,6 @@ type Agent struct {
 	conversation       []model.D     // Full message history, including tool results.
 	toolDocs           []model.D     // Tool schemas sent alongside every request.
 	commandOutputs     []string      // Captured command results, in the order they ran.
-	lastAssistant      string        // Most recent non-empty model reply, for reporting.
 	store              *output.Store // Captured output handles, or nil when disabled.
 	contextTokens      int64         // Live context size, driving compaction and metrics.
 	iteration          int           // Zero-based index of the round now running.
@@ -159,8 +158,6 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *multipass.
 		final := finalCommandOutput(a.commandOutputs)
 		a.log.Info().Str("out", truncate(final, conf.Truncation.CommandOutput)).Msg("final command output")
 		fmt.Println(final)
-	} else if a.lastAssistant != "" {
-		a.log.Info().Str("out", truncate(a.lastAssistant, conf.Truncation.LogContent)).Msg("agent final answer (no command output)")
 	} else {
 		a.log.Info().Msg("agent completed with no command output or final answer")
 	}
