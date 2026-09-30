@@ -94,11 +94,11 @@ func (s *Store) Handles() []Handle {
 	return out
 }
 
-// DecideInline reports whether a captured command's output should be returned
+// decideInline reports whether a captured command's output should be returned
 // inline to the agent rather than as a handle. Callers reach this only once the
 // output has actually been captured, so the non-forced "auto" case (run it
 // directly instead) is handled by Capture before any bytes are written.
-func DecideInline(mode string, size, cutoff int64) bool {
+func decideInline(mode string, size, cutoff int64) bool {
 	if mode == "always" {
 		return false
 	}
@@ -108,13 +108,14 @@ func DecideInline(mode string, size, cutoff int64) bool {
 	return size < cutoff
 }
 
-// EffectiveCutoff returns the cutoff size for output, given the derived budget, and the given configuration.
-// This function prefers the cfg.InlineMaxSize value, if that is 0 the function returns derivedBudget.
-func EffectiveCutoff(cfg config.OutputConfig, derivedBudget int) int64 {
+// effectiveCutoff returns the cutoff size for output, given the derived budget,
+// and the given configuration. It prefers cfg.InlineMaxSize; if that is 0 it
+// returns derivedBudget.
+func effectiveCutoff(cfg config.OutputConfig, derivedBudget int64) int64 {
 	if int64(cfg.InlineMaxSize) > 0 {
 		return int64(cfg.InlineMaxSize)
 	}
-	return int64(derivedBudget)
+	return derivedBudget
 }
 
 // ValidatePattern validates a regex search pattern.
@@ -135,14 +136,6 @@ func ValidatePattern(pattern string) error {
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-func cleanCommand(command string) (string, error) {
-	cmd := strings.TrimSpace(command)
-	if cmd == "" {
-		return "", fmt.Errorf("command is required")
-	}
-	return cmd, nil
 }
 
 func (s *Store) mode() string {
@@ -278,7 +271,7 @@ func (s *Store) checkCaps(size int64) error {
 }
 
 func (s *Store) shouldInline(mode string, size int64) bool {
-	return DecideInline(mode, size, EffectiveCutoff(s.cfg, int(s.inlineCutoff)))
+	return decideInline(mode, size, effectiveCutoff(s.cfg, s.inlineCutoff))
 }
 
 func (s *Store) materializeInline(ctx context.Context, subdir, raw string, size int64, exit int) (Result, error) {
@@ -302,7 +295,12 @@ func (s *Store) materializeHandle(ctx context.Context, cmd, oid, raw string, siz
 	if err != nil {
 		return Result{}, fmt.Errorf("capture line count failed: %w", err)
 	}
-	totalLines, _ := strconv.Atoi(strings.TrimSpace(linesOut))
+	// A zero here would make every later Read silently return nothing while
+	// still reporting total_lines: 0, so the parse failure has to surface.
+	totalLines, err := strconv.Atoi(strings.TrimSpace(linesOut))
+	if err != nil {
+		return Result{}, fmt.Errorf("capture line count failed: unexpected line count %q", strings.TrimSpace(linesOut))
+	}
 	h := Handle{
 		ID: oid, Path: raw,
 		TotalLines: totalLines, TotalBytes: size,
@@ -314,9 +312,9 @@ func (s *Store) materializeHandle(ctx context.Context, cmd, oid, raw string, siz
 }
 
 func (s *Store) Capture(ctx context.Context, command string, force bool) (Result, error) {
-	cmd, err := cleanCommand(command)
-	if err != nil {
-		return Result{}, err
+	cmd := strings.TrimSpace(command)
+	if cmd == "" {
+		return Result{}, fmt.Errorf("command is required")
 	}
 	if err := validation.ValidateShellCommand(s.allowed, cmd); err != nil {
 		return Result{}, err
@@ -389,12 +387,6 @@ func (s *Store) lookup(outputID string) (Handle, error) {
 	}
 	sort.Strings(ids)
 	return Handle{}, fmt.Errorf("unknown output_id %q (active handles: %s; never invent an output_id)", outputID, strings.Join(ids, ", "))
-}
-
-// resolveMaxMatches returns the per-search cap on reported line numbers, or 0
-// for unlimited.
-func (s *Store) resolveMaxMatches() int {
-	return s.cfg.SearchMaxMatches
 }
 
 func buildGrepCmd(rawPath, pattern string, fixed, ignoreCase bool, maxM int, marker string) string {
@@ -508,7 +500,7 @@ func (s *Store) Search(ctx context.Context, args SearchArgs) (SearchResult, erro
 			return SearchResult{}, err
 		}
 	}
-	maxM := s.resolveMaxMatches()
+	maxM := s.cfg.SearchMaxMatches
 	marker := "__MPH_GREP_EXIT_" + strings.ReplaceAll(h.ID, "-", "") + ":"
 
 	out, execErr := s.client.Exec(ctx, s.vm, buildGrepCmd(h.Path, args.Pattern, args.FixedString, args.IgnoreCase, maxM, marker), 0)

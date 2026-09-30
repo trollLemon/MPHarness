@@ -36,10 +36,6 @@ func outputRunDirCommands(runID string) []string {
 	}
 }
 
-// promptExistingVM asks whether an existing VM may be reused. The reader is a
-// parameter so the retry loop keeps one buffered reader: a fresh bufio.Reader
-// per prompt discards everything the previous one read past the first newline,
-// so a piped retry answer would be lost.
 func promptExistingVM(r *bufio.Reader, w io.Writer, name string) error {
 	fmt.Fprintf(w, "VM with name %s already exists, continue with the current VM? [y/n] ", name)
 

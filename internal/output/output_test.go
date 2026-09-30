@@ -39,7 +39,7 @@ func TestDecideInline(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := DecideInline(tt.mode, tt.size, tt.cutoff); got != tt.want {
+			if got := decideInline(tt.mode, tt.size, tt.cutoff); got != tt.want {
 				t.Fatalf("got %v want %v", got, tt.want)
 			}
 		})
@@ -376,30 +376,38 @@ func TestSearchExitMapping(t *testing.T) {
 	}
 }
 
-func TestCleanCommand(t *testing.T) {
-	tests := []struct {
-		name    string
-		in      string
-		want    string
-		wantErr bool
-	}{
-		{"trims whitespace", "  echo hi ", "echo hi", false},
-		{"blank is an error", "   ", "", true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := cleanCommand(tt.in)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("want error for blank command")
-				}
-				return
-			}
-			if err != nil || got != tt.want {
-				t.Fatalf("got %q %v want %q", got, err, tt.want)
-			}
-		})
-	}
+func TestCaptureTrimsAndRejectsBlankCommand(t *testing.T) {
+	t.Run("trims", func(t *testing.T) {
+		var gotCmd string
+		f := &fakeExec{fn: func(name, cmd string) (string, error) {
+			gotCmd = cmd
+			return "hi", nil
+		}}
+		s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096, nil)
+
+		res, err := s.Capture(context.Background(), "  echo hi  ", false)
+		if err != nil {
+			t.Fatalf("Capture: %v", err)
+		}
+		if res.Inline != "hi" {
+			t.Fatalf("inline %q want %q", res.Inline, "hi")
+		}
+		if gotCmd != "echo hi" {
+			t.Fatalf("command must be trimmed before exec, got %q", gotCmd)
+		}
+	})
+
+	t.Run("blank is an error", func(t *testing.T) {
+		f := &fakeExec{fn: func(name, cmd string) (string, error) {
+			t.Fatalf("a blank command must not reach the VM: %q", cmd)
+			return "", nil
+		}}
+		s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096, nil)
+
+		if _, err := s.Capture(context.Background(), "   ", true); err == nil {
+			t.Fatal("blank command must be rejected")
+		}
+	})
 }
 
 func TestCapturePaths(t *testing.T) {
@@ -409,8 +417,6 @@ func TestCapturePaths(t *testing.T) {
 	}
 }
 
-// A capture whose marker never made it back has an unknown exit status.
-// Reporting 0 would tell the model a failed command succeeded.
 func TestRunRedirectMissingMarkerIsAnError(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -450,9 +456,39 @@ func TestRunRedirectMarkerWinsOverExecError(t *testing.T) {
 	}
 }
 
-// ctxAwareExec sees the context it is handed, which the plain fakeExec cannot.
-// A real multipass client runs exec.CommandContext and fails on a done context,
-// so a fake that ignores ctx would report a cancelled capture as succeeding.
+func TestCaptureFailsWhenLineCountUnparseable(t *testing.T) {
+	f := &fakeExec{fn: func(name, cmd string) (string, error) {
+		switch {
+		case strings.Contains(cmd, "df -P"):
+			return "99999999", nil
+		case strings.Contains(cmd, "mkdir"):
+			return "", nil
+		case strings.Contains(cmd, "__MPH_EXIT_"):
+			return echoMarker(cmd, "0"), nil
+		case strings.Contains(cmd, "wc -c"):
+			return "10", nil
+		case strings.Contains(cmd, "wc -l"):
+			return "not a number", nil
+		default:
+			return "", nil
+		}
+	}}
+	cfg := testCfg()
+	cfg.Mode = "always"
+	s := NewStore(f, "vm", "/tmp/mph-output/run1", cfg, 4096, nil)
+
+	res, err := s.Capture(context.Background(), "echo hi", false)
+	if err == nil {
+		t.Fatalf("want error on unparseable wc -l, got %+v", res)
+	}
+	if res.Handle != nil {
+		t.Fatalf("no handle should be registered, got %+v", res.Handle)
+	}
+	if !strings.Contains(err.Error(), "line count") {
+		t.Fatalf("error must name the line count failure, got %v", err)
+	}
+}
+
 type ctxAwareExec struct {
 	fn func(ctx context.Context, name, cmd string) (string, error)
 }
@@ -461,8 +497,6 @@ func (c ctxAwareExec) Exec(ctx context.Context, name, command string, _ int) (st
 	return c.fn(ctx, name, command)
 }
 
-// A command cancelled mid-write must still yield a usable partial capture, so
-// the follow-up stat must not run on the already-cancelled context.
 func TestCaptureTimeoutKeepsPartialOutput(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -508,7 +542,6 @@ func TestCaptureTimeoutKeepsPartialOutput(t *testing.T) {
 	}
 }
 
-// The cap must bound the write, not merely be checked once the disk is full.
 func TestCaptureBoundsTheWrite(t *testing.T) {
 	var gotCmd string
 	f := &fakeExec{fn: func(name, cmd string) (string, error) {
@@ -539,7 +572,6 @@ func TestCaptureBoundsTheWrite(t *testing.T) {
 	}
 }
 
-// total_matches must be a count, not a sentinel that collides with real values.
 func TestSearchTotalMatchesIsARealCount(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -580,8 +612,6 @@ func TestSearchTotalMatchesIsARealCount(t *testing.T) {
 	}
 }
 
-// The marker is harness-generated on the last line; model-written content that
-// merely looks like one must not be read as the exit status.
 func TestParseGrepOutputIgnoresLookalikeContent(t *testing.T) {
 	lines, exit, hasMarker := parseGrepOutput("__MPH_GREP_EXIT_abc:0\n7:hit\n__MPH_GREP_EXIT_abc:1", "__MPH_GREP_EXIT_abc:")
 	if !hasMarker {
@@ -590,8 +620,6 @@ func TestParseGrepOutputIgnoresLookalikeContent(t *testing.T) {
 	if exit != 1 {
 		t.Fatalf("exit %d want 1 (the real trailing marker, not the 0 written by the model)", exit)
 	}
-	// The trailing marker is consumed; the model's own lookalike stays as
-	// ordinary content, and parseGrepLines then drops it as a non-match.
 	if n := parseGrepLines(lines); len(n) != 1 || n[0] != 7 {
 		t.Fatalf("matches %v want [7]", n)
 	}
@@ -870,28 +898,6 @@ func TestCapMatches(t *testing.T) {
 	}
 }
 
-func TestResolveMaxMatches(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  int
-		want int
-	}{
-		{"default config", 200, 200},
-		{"zero means unlimited", 0, 0},
-		{"explicit value kept", 50, 50},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := testCfg()
-			cfg.SearchMaxMatches = tt.cfg
-			s := NewStore(nil, "vm", "/tmp/x", cfg, 0, nil)
-			if got := s.resolveMaxMatches(); got != tt.want {
-				t.Fatalf("got %d want %d", got, tt.want)
-			}
-		})
-	}
-}
-
 func echoMarker(cmd, code string) string {
 	start := strings.Index(cmd, "__MPH_EXIT_")
 	if start < 0 {
@@ -1067,8 +1073,6 @@ func TestStoreRead(t *testing.T) {
 	}
 }
 
-// max_command_size: 0 disables the cap, as the other size limits document.
-// Feeding that straight to `head -c` would truncate every capture to nothing.
 func TestWrapCaptureWithNoCapKeepsFullOutput(t *testing.T) {
 	got := wrapCapture("echo hi", "/tmp/raw.txt", "__MPH_EXIT_abc:", 0)
 	if strings.Contains(got, "head -c") {
