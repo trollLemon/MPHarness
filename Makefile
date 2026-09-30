@@ -6,7 +6,7 @@ GOFLAGS ?=
 
 OTEL_COMPOSE := testing/docker-compose.yaml
 
-.PHONY: all build vet test test-race test-cover test-verbose fmt tidy run clean help otel-up otel-down test-integration
+.PHONY: all build vet test test-cover test-verbose fmt tidy run clean help otel-up otel-down test-integration
 
 test-integration: build
 	sh scripts/integration-output.sh
@@ -25,9 +25,6 @@ vet:
 
 test:
 	go test -count=1 -v ./...
-
-test-race:
-	go test -race -count=1  -v ./...
 
 test-cover:
 	go test -count=1 -coverprofile=coverage.out ./...

@@ -57,7 +57,7 @@ func (s *agentSummarizer) Summarize(ctx context.Context, systemPrompt, renderedH
 		return msg.Content, nil
 	}
 
-	return "", errors.New("summary response contained no `content` tokens.")
+	return "", errors.New("summary response contained no `content` tokens")
 }
 
 func (a *Agent) estimateTokens(ctx context.Context, text string) int {
