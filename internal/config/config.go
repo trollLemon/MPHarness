@@ -24,6 +24,16 @@ var (
 // The harness creates this path and transfers the local directory there before the agent starts.
 const VMContentDir = "/home/ubuntu/content"
 
+// OutputBaseDir is the host-side root for captured command output. One run owns
+// one subdirectory of it. The harness creates that subdirectory inside the VM
+// before the agent starts writing captures.
+const OutputBaseDir = "/tmp/mph-output"
+
+// OutputRunDir is the capture directory for one run.
+func OutputRunDir(runID string) string {
+	return OutputBaseDir + "/" + runID
+}
+
 // Agent defaults. Named so the help text in cmd/mph cannot drift from the values
 // applyDefaults actually installs.
 const (
@@ -55,7 +65,6 @@ const (
 
 	DefaultCompactionThreshold   = 0.8
 	DefaultCompactionMaxTokens   = 2048
-	DefaultCompactionRecentTurns = 3
 	DefaultCompactionMinMessages = 6
 	DefaultCompactionMaxAttempts = 3
 )
@@ -145,8 +154,6 @@ type TruncationConfig struct {
 // Duration wraps time.Duration to support YAML string parsing like "60s", "10m".
 type Duration time.Duration
 
-func (d Duration) Duration() time.Duration { return time.Duration(d) }
-
 func (d Duration) MarshalYAML() (any, error) { return time.Duration(d).String(), nil }
 
 func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
@@ -184,8 +191,6 @@ type OtelConfig struct {
 // and the empty string as zero. 0 means "derive" for inline_max_size and
 // "disabled" for the caps.
 type Size int64
-
-func (s Size) Bytes() int64 { return int64(s) }
 
 func (s Size) MarshalYAML() (any, error) { return int64(s), nil }
 
@@ -297,7 +302,6 @@ type CompactionConfig struct {
 	Enabled          bool    `yaml:"enabled"`
 	Threshold        float64 `yaml:"threshold"`
 	MaxSummaryTokens int     `yaml:"max_summary_tokens"`
-	RecentTurns      int     `yaml:"recent_turns"`
 	MinMessages      int     `yaml:"min_messages"`
 	MaxAttempts      int     `yaml:"max_attempts"`
 }
@@ -311,9 +315,6 @@ func (c CompactionConfig) Validate() error {
 	}
 	if c.MaxSummaryTokens <= 0 {
 		return fmt.Errorf("compaction.max_summary_tokens must be > 0, got %d", c.MaxSummaryTokens)
-	}
-	if c.RecentTurns < 0 {
-		return fmt.Errorf("compaction.recent_turns must be >= 0, got %d", c.RecentTurns)
 	}
 	if c.MinMessages <= 0 {
 		return fmt.Errorf("compaction.min_messages must be > 0, got %d", c.MinMessages)
@@ -367,23 +368,14 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// configRaw is defined at package level to avoid infinite recursion in
-// Config.UnmarshalYAML. Decoding directly into Config would re-enter this
-// method; decoding into an alias without the custom method breaks the cycle.
-// It also lets us decode allowed_commands as []string then convert to
-// map[string]bool.
+// plainConfig strips Config's methods so decoding into it does not re-enter
+// Config.UnmarshalYAML. Config.AllowedCommands is tagged `yaml:"-"`, so
+// inlining this does not collide with configRaw's own allowed_commands field.
+type plainConfig Config
+
 type configRaw struct {
-	VM              VMConfig         `yaml:"vm"`
-	Model           string           `yaml:"model"`
-	Prompt          string           `yaml:"prompt"`
-	AllowedCommands []string         `yaml:"allowed_commands"`
-	ContentDir      string           `yaml:"content_dir"`
-	LLM             LLMConfig        `yaml:"llm"`
-	Agent           AgentConfig      `yaml:"agent"`
-	Truncation      TruncationConfig `yaml:"truncation"`
-	Otel            OtelConfig       `yaml:"otel"`
-	Output          OutputConfig     `yaml:"output"`
-	Compaction      CompactionConfig `yaml:"compaction"`
+	plainConfig     `yaml:",inline"`
+	AllowedCommands []string `yaml:"allowed_commands"`
 }
 
 func (c *Config) UnmarshalYAML(node *yaml.Node) error {
@@ -391,17 +383,9 @@ func (c *Config) UnmarshalYAML(node *yaml.Node) error {
 	if err := node.Decode(&raw); err != nil {
 		return err
 	}
-	c.VM = raw.VM
-	c.Model = raw.Model
-	c.Prompt = raw.Prompt
+	*c = Config(raw.plainConfig)
 	c.AllowedCommands = normalizeAllowedCommands(raw.AllowedCommands)
-	c.ContentDir = strings.TrimSpace(raw.ContentDir)
-	c.LLM = raw.LLM
-	c.Agent = raw.Agent
-	c.Truncation = raw.Truncation
-	c.Otel = raw.Otel
-	c.Output = raw.Output
-	c.Compaction = raw.Compaction
+	c.ContentDir = strings.TrimSpace(c.ContentDir)
 	return nil
 }
 
@@ -541,8 +525,8 @@ func Parse(data []byte) (Config, error) {
 	if !hasCompaction {
 		cfg.Compaction = CompactionConfig{
 			Enabled: true, Threshold: DefaultCompactionThreshold,
-			MaxSummaryTokens: DefaultCompactionMaxTokens, RecentTurns: DefaultCompactionRecentTurns,
-			MinMessages: DefaultCompactionMinMessages, MaxAttempts: DefaultCompactionMaxAttempts,
+			MaxSummaryTokens: DefaultCompactionMaxTokens,
+			MinMessages:      DefaultCompactionMinMessages, MaxAttempts: DefaultCompactionMaxAttempts,
 		}
 	} else {
 		if _, ok := probe.Compaction["enabled"]; !ok {
@@ -553,11 +537,6 @@ func Parse(data []byte) (Config, error) {
 		}
 		if cfg.Compaction.MaxSummaryTokens == 0 {
 			cfg.Compaction.MaxSummaryTokens = DefaultCompactionMaxTokens
-		}
-		if cfg.Compaction.RecentTurns == 0 {
-			if _, ok := probe.Compaction["recent_turns"]; !ok {
-				cfg.Compaction.RecentTurns = DefaultCompactionRecentTurns
-			}
 		}
 		if cfg.Compaction.MinMessages == 0 {
 			cfg.Compaction.MinMessages = DefaultCompactionMinMessages

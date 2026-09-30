@@ -444,7 +444,7 @@ func TestParseOutputCompaction(t *testing.T) {
 				if !cfg.Compaction.Enabled || cfg.Compaction.Threshold != 0.8 || cfg.Compaction.MaxSummaryTokens != 2048 {
 					t.Errorf("compaction defaults: %+v", cfg.Compaction)
 				}
-				if cfg.Compaction.RecentTurns != 3 || cfg.Compaction.MinMessages != 6 || cfg.Compaction.MaxAttempts != 3 {
+				if cfg.Compaction.MinMessages != 6 || cfg.Compaction.MaxAttempts != 3 {
 					t.Errorf("compaction defaults: %+v", cfg.Compaction)
 				}
 			},
@@ -467,15 +467,6 @@ func TestParseOutputCompaction(t *testing.T) {
 				}
 				if !cfg.Compaction.Enabled || cfg.Compaction.Threshold != 0.7 {
 					t.Errorf("compaction: %+v", cfg.Compaction)
-				}
-			},
-		},
-		{
-			name: "explicit recent_turns zero is kept",
-			yaml: base + "compaction:\n  recent_turns: 0\n",
-			check: func(t *testing.T, cfg Config) {
-				if cfg.Compaction.RecentTurns != 0 {
-					t.Errorf("explicit recent_turns: 0 must be kept, got %d", cfg.Compaction.RecentTurns)
 				}
 			},
 		},
@@ -518,9 +509,6 @@ func TestOutputValidation(t *testing.T) {
 	}
 }
 
-// The size caps treat an explicit 0 as "disabled" and only default a key the
-// user left out. search_max_matches must behave the same way, otherwise a
-// deliberate 0 is silently rewritten to 200 and the cap cannot be lifted.
 func TestSearchMaxMatchesZeroMeansUnlimited(t *testing.T) {
 	base := "vm:\n  name: vm\n  cpu: 1\n  ram: 1G\n  disk: 5G\nmodel: m\nprompt: p\noutput:\n  enabled: true\n"
 	tests := []struct {
@@ -542,5 +530,117 @@ func TestSearchMaxMatchesZeroMeansUnlimited(t *testing.T) {
 				t.Fatalf("search_max_matches %d want %d", cfg.Output.SearchMaxMatches, tt.want)
 			}
 		})
+	}
+}
+
+func TestOutputRunDir(t *testing.T) {
+	tests := []struct {
+		name    string
+		runID   string
+		wantDir string
+	}{
+		{"simple id", "run-123", "/tmp/mph-output/run-123"},
+		{"uuid id", "01a0ec35-3962-7a15-be5e-a9372f3401b7", "/tmp/mph-output/01a0ec35-3962-7a15-be5e-a9372f3401b7"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if dir := OutputRunDir(tt.runID); dir != tt.wantDir {
+				t.Fatalf("got %q want %q", dir, tt.wantDir)
+			}
+		})
+	}
+}
+
+func TestUnmarshalYAMLDecodesEveryKey(t *testing.T) {
+	cfg, err := Parse([]byte(`
+vm:
+  name: my-vm
+  disk: 20G
+  ram: 4G
+  cpu: 2
+  image: noble
+model: org/model
+prompt: do things
+allowed_commands:
+  - apt
+  - git
+llm:
+  temperature: 0.2
+  top_p: 0.9
+  top_k: 40
+  tool_choice: required
+  context_window: 8192
+  max_output_tokens: 512
+agent:
+  max_iterations: 7
+  chat_timeout: 90s
+  total_timeout: 20m
+  max_output_bytes: 4096
+  send_reasoning: false
+truncation:
+  command_output: 1
+  log_content: 2
+  tool_result: 3
+  nudge: 4
+otel:
+  enabled: true
+  endpoint: host:4317
+  service_name: svc
+output:
+  enabled: true
+  mode: always
+  search_max_matches: 7
+compaction:
+  enabled: true
+  threshold: 0.7
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	checks := []struct {
+		name string
+		got  any
+		want any
+	}{
+		{"vm.name", cfg.VM.Name, "my-vm"},
+		{"vm.disk", cfg.VM.Disk, "20G"},
+		{"vm.ram", cfg.VM.RAM, "4G"},
+		{"vm.cpu", cfg.VM.CPU, 2},
+		{"vm.image", cfg.VM.Image, "noble"},
+		{"model", cfg.Model, "org/model"},
+		{"prompt", cfg.Prompt, "do things"},
+		{"content_dir", cfg.ContentDir, ""},
+		{"llm.temperature", cfg.LLM.Temperature, 0.2},
+		{"llm.top_p", cfg.LLM.TopP, 0.9},
+		{"llm.top_k", cfg.LLM.TopK, 40},
+		{"llm.tool_choice", cfg.LLM.ToolChoice, "required"},
+		{"llm.context_window", cfg.LLM.ContextWindow, 8192},
+		{"llm.max_output_tokens", cfg.LLM.MaxOutputTokens, 512},
+		{"agent.max_iterations", cfg.Agent.MaxIterations, 7},
+		{"agent.max_output_bytes", cfg.Agent.MaxOutputBytes, 4096},
+		{"truncation.command_output", cfg.Truncation.CommandOutput, 1},
+		{"truncation.log_content", cfg.Truncation.LogContent, 2},
+		{"truncation.tool_result", cfg.Truncation.ToolResult, 3},
+		{"truncation.nudge", cfg.Truncation.Nudge, 4},
+		{"otel.enabled", cfg.Otel.Enabled, true},
+		{"otel.endpoint", cfg.Otel.Endpoint, "host:4317"},
+		{"otel.service_name", cfg.Otel.ServiceName, "svc"},
+		{"output.enabled", cfg.Output.Enabled, true},
+		{"output.mode", cfg.Output.Mode, "always"},
+		{"output.search_max_matches", cfg.Output.SearchMaxMatches, 7},
+		{"compaction.enabled", cfg.Compaction.Enabled, true},
+		{"compaction.threshold", cfg.Compaction.Threshold, 0.7},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s = %v want %v", c.name, c.got, c.want)
+		}
+	}
+	if got := cfg.Agent.Reasoning(); got {
+		t.Error("send_reasoning: false must be honoured")
+	}
+	if got := len(cfg.AllowedCommandsList()); got != 2 {
+		t.Errorf("allowed_commands has %d entries want 2", got)
 	}
 }
