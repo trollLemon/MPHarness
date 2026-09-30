@@ -37,7 +37,7 @@ func outputRunDirCommands(runID string) []string {
 }
 
 func promptExistingVM(r *bufio.Reader, w io.Writer, name string) error {
-	fmt.Fprintf(w, "VM with name %s already exists, continue with the current VM? [y/n] ", name)
+	_, _ = fmt.Fprintf(w, "VM with name %s already exists, continue with the current VM? [y/n] ", name)
 
 	input, err := r.ReadString('\n')
 	if err != nil {
