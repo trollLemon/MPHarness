@@ -283,16 +283,41 @@ func callOutputRead(ctx context.Context, _ config.Config, store *output.Store, a
 		return "", fmt.Errorf("output_read is disabled (output.enabled is false)")
 	}
 	outputID, _ := args["output_id"].(string)
-	offset, _ := args["offset"].(float64)
-	limit, _ := args["limit"].(float64)
+	offset, limit := argInt(args, "offset"), argInt(args, "limit")
 	if offset < 1 {
 		offset = 1
 	}
-	res, err := store.Read(ctx, outputID, int(offset), int(limit))
+	res, err := store.Read(ctx, outputID, offset, limit)
 	if err != nil {
 		return "", err
 	}
 	return buildReadSuccessContent(res), nil
+}
+
+// argInt reads an integer tool argument. kronk decodes tool arguments through
+// json.Decoder.UseNumber, so a JSON integer arrives as json.Number; float64
+// covers callers that build arguments in Go.
+func argInt(args map[string]any, key string) int {
+	switch v := args[key].(type) {
+	case json.Number:
+		n, err := v.Int64()
+		if err != nil {
+			return 0
+		}
+		return int(n)
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case json.RawMessage:
+		var n int
+		if err := json.Unmarshal(v, &n); err != nil {
+			return 0
+		}
+		return n
+	default:
+		return 0
+	}
 }
 
 func buildReadSuccessContent(res output.ReadResult) string {

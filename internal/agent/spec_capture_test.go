@@ -314,7 +314,7 @@ func TestCallOutputReadRoundTrip(t *testing.T) {
 		t.Fatalf("no output_id in %q", capGot)
 	}
 	got, err := Call(context.Background(), nil, cfg, store, "output_read", map[string]any{
-		"output_id": id, "offset": float64(5), "limit": float64(2),
+		"output_id": id, "offset": json.Number("5"), "limit": json.Number("2"),
 	})
 	if err != nil {
 		t.Fatalf("read: %v", err)
