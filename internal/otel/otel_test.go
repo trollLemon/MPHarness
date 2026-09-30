@@ -64,7 +64,7 @@ func TestSetup(t *testing.T) {
 				t.Setenv(k, v)
 			}
 
-			shutdown, err := Setup(tt.cfg)
+			shutdown, err := Setup(context.Background(), tt.cfg)
 			if err != nil {
 				t.Fatalf("Setup: %v", err)
 			}
@@ -110,7 +110,7 @@ func TestHookRun(t *testing.T) {
 	// the returned shutdown is never called and no socket is opened. See
 	// TestSetup for why shutdown is off limits in a unit test.
 	cfg := Config{Enabled: true, ServiceName: "mph-hook-test"}
-	shutdown, err := Setup(cfg)
+	shutdown, err := Setup(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("Setup: %v", err)
 	}

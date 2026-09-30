@@ -15,6 +15,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
@@ -57,14 +58,13 @@ type Config struct {
 	RunID              string
 }
 
-func Setup(cfg Config) (func(context.Context) error, error) {
+func Setup(ctx context.Context, cfg Config) (func(context.Context) error, error) {
 	if !cfg.Enabled {
 		return func(context.Context) error { return nil }, nil
 	}
 	if os.Getenv("OTEL_SDK_DISABLED") == "true" {
 		return func(context.Context) error { return nil }, nil
 	}
-	ctx := context.Background()
 
 	if cfg.Endpoint == "" {
 		cfg.Endpoint = DefaultEndpoint
@@ -210,6 +210,14 @@ func traceAttrs(ctx context.Context) []attribute.KeyValue {
 	}
 }
 
+// FailSpan records err on span and marks the span failed. Every error path in
+// the harness, the VM client, and the agent needs both, and forgetting the
+// second half silently reports a failed run as successful.
+func FailSpan(span trace.Span, err error) {
+	span.RecordError(err)
+	span.SetStatus(codes.Error, err.Error())
+}
+
 func LogEvent(ctx context.Context, logger zerolog.Logger, level zerolog.Level, msg string, fields map[string]any) {
 	skipCtx := context.WithValue(ctx, skipHookKey, true)
 	// A filtered level makes WithLevel return a nil *Event, whose zerolog
@@ -252,8 +260,13 @@ func LogEvent(ctx context.Context, logger zerolog.Logger, level zerolog.Level, m
 	for _, kv := range traceAttrs(ctx) {
 		rec.AddAttributes(kv)
 	}
-	global.Logger("mph").Emit(ctx, rec)
+	runLogger.Emit(ctx, rec)
 }
+
+// runLogger is resolved once. go.opentelemetry.io/otel/log/global hands back a
+// delegating logger, so this is safe to take before Setup installs the real
+// provider, and it avoids rebuilding a logger for every log line.
+var runLogger = global.Logger("mph")
 
 // payloadKeyOrder lists the blob fields that must close a log line, in the
 // order they should appear. Every entry is a key the codebase actually emits;
@@ -275,7 +288,7 @@ func orderedFieldKeys(fields map[string]any) []string {
 	}
 	var middle []string
 	for k := range fields {
-		if seen[k] || isPayloadKey(k) {
+		if seen[k] || slices.Contains(payloadKeyOrder, k) {
 			continue
 		}
 		middle = append(middle, k)
@@ -294,10 +307,6 @@ func orderedFieldKeys(fields map[string]any) []string {
 		}
 	}
 	return keys
-}
-
-func isPayloadKey(k string) bool {
-	return slices.Contains(payloadKeyOrder, k)
 }
 
 func appendField(evt *zerolog.Event, k string, v any) *zerolog.Event {
