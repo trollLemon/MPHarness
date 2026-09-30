@@ -258,6 +258,17 @@ func TestLogEventFieldOrder(t *testing.T) {
 	}
 }
 
+func TestLogEventWithLevelDisabledStillEmits(t *testing.T) {
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf).Level(zerolog.ErrorLevel)
+
+	LogEvent(context.Background(), logger, zerolog.InfoLevel, "quiet", map[string]any{"k": "v"})
+
+	if buf.Len() != 0 {
+		t.Fatalf("filtered level must not reach zerolog, got %q", buf.String())
+	}
+}
+
 func TestLogEventPayloadLast(t *testing.T) {
 	var buf bytes.Buffer
 	logger := zerolog.New(&buf)

@@ -212,11 +212,9 @@ func traceAttrs(ctx context.Context) []attribute.KeyValue {
 
 func LogEvent(ctx context.Context, logger zerolog.Logger, level zerolog.Level, msg string, fields map[string]any) {
 	skipCtx := context.WithValue(ctx, skipHookKey, true)
-	evt := logger.WithLevel(level).Ctx(skipCtx)
-	if evt == nil {
-		// level disabled – still emit OTEL directly
-		evt = nil
-	} else {
+	// A filtered level makes WithLevel return a nil *Event, whose zerolog
+	// methods are nil-safe, so the OTel emit below still has to happen.
+	if evt := logger.WithLevel(level).Ctx(skipCtx); evt != nil {
 		evt.CallerSkipFrame(1)
 		for _, k := range orderedFieldKeys(fields) {
 			evt = appendField(evt, k, fields[k])
