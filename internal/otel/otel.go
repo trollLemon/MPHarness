@@ -6,12 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
@@ -51,16 +55,16 @@ type Config struct {
 	Endpoint           string
 	ServiceName        string
 	ResourceAttributes map[string]string
+	RunID              string
 }
 
-func Setup(cfg Config) (func(context.Context) error, error) {
+func Setup(ctx context.Context, cfg Config) (func(context.Context) error, error) {
 	if !cfg.Enabled {
 		return func(context.Context) error { return nil }, nil
 	}
 	if os.Getenv("OTEL_SDK_DISABLED") == "true" {
 		return func(context.Context) error { return nil }, nil
 	}
-	ctx := context.Background()
 
 	if cfg.Endpoint == "" {
 		cfg.Endpoint = DefaultEndpoint
@@ -74,6 +78,9 @@ func Setup(cfg Config) (func(context.Context) error, error) {
 	}
 	for k, v := range cfg.ResourceAttributes {
 		attrs = append(attrs, attribute.String(k, v))
+	}
+	if strings.TrimSpace(cfg.RunID) != "" {
+		attrs = append(attrs, attribute.String("service.instance.id", cfg.RunID))
 	}
 
 	res, err := resource.New(ctx,
@@ -182,7 +189,7 @@ func (h Hook) Run(e *zerolog.Event, level zerolog.Level, msg string) {
 	rec.SetObservedTimestamp(time.Now())
 	rec.SetSeverity(convertLevel(level))
 	rec.SetSeverityText(level.String())
-	rec.SetBody(otellog.StringValue(msg))
+	rec.SetBody(attribute.StringValue(msg))
 	for _, kv := range traceAttrs(ctx) {
 		rec.AddAttributes(kv)
 	}
@@ -192,46 +199,33 @@ func (h Hook) Run(e *zerolog.Event, level zerolog.Level, msg string) {
 // traceAttrs exposes the active span as record attributes. The log SDK's
 // Record has no dedicated trace/span fields, so correlation is carried as
 // attributes instead; without them log lines cannot be linked to a trace.
-func traceAttrs(ctx context.Context) []otellog.KeyValue {
+func traceAttrs(ctx context.Context) []attribute.KeyValue {
 	sc := trace.SpanContextFromContext(ctx)
 	if !sc.IsValid() {
 		return nil
 	}
-	return []otellog.KeyValue{
-		otellog.String("trace_id", sc.TraceID().String()),
-		otellog.String("span_id", sc.SpanID().String()),
+	return []attribute.KeyValue{
+		attribute.String("trace_id", sc.TraceID().String()),
+		attribute.String("span_id", sc.SpanID().String()),
 	}
+}
+
+// FailSpan records err on span and marks the span failed. Every error path in
+// the harness, the VM client, and the agent needs both, and forgetting the
+// second half silently reports a failed run as successful.
+func FailSpan(span trace.Span, err error) {
+	span.RecordError(err)
+	span.SetStatus(codes.Error, err.Error())
 }
 
 func LogEvent(ctx context.Context, logger zerolog.Logger, level zerolog.Level, msg string, fields map[string]any) {
 	skipCtx := context.WithValue(ctx, skipHookKey, true)
-	evt := logger.WithLevel(level).Ctx(skipCtx)
-	if evt == nil {
-		// level disabled – still emit OTEL directly
-		evt = nil
-	} else {
+	// A filtered level makes WithLevel return a nil *Event, whose zerolog
+	// methods are nil-safe, so the OTel emit below still has to happen.
+	if evt := logger.WithLevel(level).Ctx(skipCtx); evt != nil {
 		evt.CallerSkipFrame(1)
-		for k, v := range fields {
-			switch val := v.(type) {
-			case string:
-				evt = evt.Str(k, val)
-			case int:
-				evt = evt.Int(k, val)
-			case int64:
-				evt = evt.Int64(k, val)
-			case bool:
-				evt = evt.Bool(k, val)
-			case float64:
-				evt = evt.Float64(k, val)
-			case json.RawMessage:
-				evt = evt.RawJSON(k, val)
-			case []byte:
-				evt = evt.Bytes(k, val)
-			case error:
-				evt = evt.AnErr(k, val)
-			default:
-				evt = evt.Interface(k, v)
-			}
+		for _, k := range orderedFieldKeys(fields) {
+			evt = appendField(evt, k, fields[k])
 		}
 		evt.Msg(msg)
 	}
@@ -240,33 +234,102 @@ func LogEvent(ctx context.Context, logger zerolog.Logger, level zerolog.Level, m
 	rec.SetObservedTimestamp(time.Now())
 	rec.SetSeverity(convertLevel(level))
 	rec.SetSeverityText(level.String())
-	rec.SetBody(otellog.StringValue(msg))
+	rec.SetBody(attribute.StringValue(msg))
 	for k, v := range fields {
 		switch val := v.(type) {
 		case string:
-			rec.AddAttributes(otellog.String(k, val))
+			rec.AddAttributes(attribute.String(k, val))
 		case int:
-			rec.AddAttributes(otellog.Int(k, val))
+			rec.AddAttributes(attribute.Int(k, val))
 		case int64:
-			rec.AddAttributes(otellog.Int64(k, val))
+			rec.AddAttributes(attribute.Int64(k, val))
 		case bool:
-			rec.AddAttributes(otellog.Bool(k, val))
+			rec.AddAttributes(attribute.Bool(k, val))
 		case float64:
-			rec.AddAttributes(otellog.Float64(k, val))
+			rec.AddAttributes(attribute.Float64(k, val))
 		case json.RawMessage:
-			rec.AddAttributes(otellog.String(k, string(val)))
+			rec.AddAttributes(attribute.String(k, string(val)))
 		case []byte:
-			rec.AddAttributes(otellog.String(k, string(val)))
+			rec.AddAttributes(attribute.String(k, string(val)))
 		case error:
-			rec.AddAttributes(otellog.String(k, val.Error()))
+			rec.AddAttributes(attribute.String(k, val.Error()))
 		default:
-			rec.AddAttributes(otellog.String(k, fmt.Sprint(v)))
+			rec.AddAttributes(attribute.String(k, fmt.Sprint(v)))
 		}
 	}
 	for _, kv := range traceAttrs(ctx) {
 		rec.AddAttributes(kv)
 	}
-	global.Logger("mph").Emit(ctx, rec)
+	runLogger.Emit(ctx, rec)
+}
+
+// runLogger is resolved once. go.opentelemetry.io/otel/log/global hands back a
+// delegating logger, so this is safe to take before Setup installs the real
+// provider, and it avoids rebuilding a logger for every log line.
+var runLogger = global.Logger("mph")
+
+// payloadKeyOrder lists the blob fields that must close a log line, in the
+// order they should appear. Every entry is a key the codebase actually emits;
+// adding a speculative one makes the list look authoritative when it is not.
+var payloadKeyOrder = []string{"args", "text", "out", "command_output"}
+
+// orderedFieldKeys puts identity fields first so a log line reads who and what
+// before the payload blobs. Blob fields always sort last in payloadKeyOrder so
+// the large payload closes the line. Middle fields sort alphabetically so the
+// field order is stable across runs.
+func orderedFieldKeys(fields map[string]any) []string {
+	keys := make([]string, 0, len(fields))
+	seen := map[string]bool{}
+	for _, k := range []string{"iter", "iteration", "tool", "id", "part", "finish", "finish_reason", "outcome"} {
+		if _, ok := fields[k]; ok {
+			keys = append(keys, k)
+			seen[k] = true
+		}
+	}
+	var middle []string
+	for k := range fields {
+		if seen[k] || slices.Contains(payloadKeyOrder, k) {
+			continue
+		}
+		middle = append(middle, k)
+	}
+	sort.Strings(middle)
+	keys = append(keys, middle...)
+	for _, k := range payloadKeyOrder {
+		if _, ok := fields[k]; ok && !seen[k] {
+			keys = append(keys, k)
+			seen[k] = true
+		}
+	}
+	for k := range fields {
+		if !seen[k] {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+func appendField(evt *zerolog.Event, k string, v any) *zerolog.Event {
+	switch val := v.(type) {
+	case string:
+		return evt.Str(k, val)
+	case int:
+		return evt.Int(k, val)
+	case int64:
+		return evt.Int64(k, val)
+	case bool:
+		return evt.Bool(k, val)
+	case float64:
+		return evt.Float64(k, val)
+	case json.RawMessage:
+		return evt.RawJSON(k, val)
+	case []byte:
+		return evt.Bytes(k, val)
+	case error:
+		return evt.AnErr(k, val)
+	default:
+		return evt.Interface(k, v)
+	}
 }
 
 func convertLevel(level zerolog.Level) otellog.Severity {

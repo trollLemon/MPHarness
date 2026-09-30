@@ -12,17 +12,21 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	mphotel "github.com/trollLemon/MPHarness/internal/otel"
+	"github.com/trollLemon/MPHarness/internal/textutil"
 )
 
 var (
-	tokensHist          metric.Int64Histogram
-	tpsHist             metric.Float64Histogram
-	iterationsCounter   metric.Int64Counter
-	toolDurationHist    metric.Float64Histogram
-	toolCallsCounter    metric.Int64Counter
-	toolFailuresCounter metric.Int64Counter
-	contextWindowGauge  metric.Int64UpDownCounter
-	contextTokensGauge  metric.Int64UpDownCounter
+	tokensHist             metric.Int64Histogram
+	tpsHist                metric.Float64Histogram
+	iterationsCounter      metric.Int64Counter
+	toolDurationHist       metric.Float64Histogram
+	toolCallsCounter       metric.Int64Counter
+	toolFailuresCounter    metric.Int64Counter
+	contextWindowGauge     metric.Int64Gauge
+	contextTokensGauge     metric.Int64Gauge
+	compactionsCounter     metric.Int64Counter
+	compactionDurationHist metric.Float64Histogram
+	tokensReclaimedHist    metric.Int64Histogram
 )
 
 // runIDKey scopes the run UUID to the context so every helper reached during a
@@ -39,18 +43,8 @@ func runIDFromContext(ctx context.Context) string {
 	return runID
 }
 
-// runAttrs tags every measurement with the run UUID, or with nothing when the
-// context has no run, so out-of-run recordings cannot create an empty series.
-func runAttrs(ctx context.Context) metric.MeasurementOption {
-	runID := runIDFromContext(ctx)
-	if runID == "" {
-		return metric.WithAttributes()
-	}
-	return metric.WithAttributes(attribute.String("mph.run.id", runID))
-}
-
-// runSpanAttrs is runAttrs for spans, which take attributes rather than
-// measurement options.
+// runSpanAttrs tags spans with the run UUID, which is the correct use of a
+// high-cardinality correlation id. Metric measurements must not carry it.
 func runSpanAttrs(ctx context.Context, extra ...attribute.KeyValue) []attribute.KeyValue {
 	attrs := extra
 	if runID := runIDFromContext(ctx); runID != "" {
@@ -63,12 +57,8 @@ func getAgentTracer() trace.Tracer {
 	return otel.Tracer("mph")
 }
 
-func getAgentMeter() metric.Meter {
-	return otel.Meter("mph")
-}
-
 func initAgentMetrics() {
-	meter := getAgentMeter()
+	meter := otel.Meter("mph")
 	var err error
 	tokensHist, err = meter.Int64Histogram("mph.tokens")
 	if err != nil {
@@ -94,13 +84,25 @@ func initAgentMetrics() {
 	if err != nil {
 		toolFailuresCounter = nil
 	}
-	contextWindowGauge, err = meter.Int64UpDownCounter("mph.context.window")
+	contextWindowGauge, err = meter.Int64Gauge("mph.context.window")
 	if err != nil {
 		contextWindowGauge = nil
 	}
-	contextTokensGauge, err = meter.Int64UpDownCounter("mph.context.tokens")
+	contextTokensGauge, err = meter.Int64Gauge("mph.context.tokens")
 	if err != nil {
 		contextTokensGauge = nil
+	}
+	compactionsCounter, err = meter.Int64Counter("mph.context.compactions")
+	if err != nil {
+		compactionsCounter = nil
+	}
+	compactionDurationHist, err = meter.Float64Histogram("mph.context.compaction.duration")
+	if err != nil {
+		compactionDurationHist = nil
+	}
+	tokensReclaimedHist, err = meter.Int64Histogram("mph.context.tokens.reclaimed")
+	if err != nil {
+		tokensReclaimedHist = nil
 	}
 }
 
@@ -115,12 +117,12 @@ func recordContextWindow(ctx context.Context, krn Kronk) {
 	if window <= 0 {
 		return
 	}
-	contextWindowGauge.Add(ctx, int64(window), runAttrs(ctx))
+	contextWindowGauge.Record(ctx, int64(window))
 }
 
-func recordTokenUsage(ctx context.Context, span trace.Span, log zerolog.Logger, prevContextTokens int64, usage *model.Usage) int64 {
+func recordTokenUsage(ctx context.Context, span trace.Span, log zerolog.Logger, usage *model.Usage) {
 	if usage == nil {
-		return prevContextTokens
+		return
 	}
 	mphotel.LogEvent(ctx, log, zerolog.InfoLevel, "token usage", map[string]any{
 		"prompt_tokens":     usage.PromptTokens,
@@ -135,21 +137,17 @@ func recordTokenUsage(ctx context.Context, span trace.Span, log zerolog.Logger, 
 		attribute.Float64("mph.tokens_per_second", usage.TokensPerSecond),
 	)
 	if tokensHist != nil {
-		tokensHist.Record(ctx, int64(usage.PromptTokens), runAttrs(ctx), metric.WithAttributes(attribute.String("tokens.type", "prompt")))
-		tokensHist.Record(ctx, int64(usage.CompletionTokens), runAttrs(ctx), metric.WithAttributes(attribute.String("tokens.type", "completion")))
-		tokensHist.Record(ctx, int64(usage.TotalTokens), runAttrs(ctx), metric.WithAttributes(attribute.String("tokens.type", "total")))
+		tokensHist.Record(ctx, int64(usage.PromptTokens), metric.WithAttributes(attribute.String("tokens.type", "prompt")))
+		tokensHist.Record(ctx, int64(usage.CompletionTokens), metric.WithAttributes(attribute.String("tokens.type", "completion")))
+		tokensHist.Record(ctx, int64(usage.TotalTokens), metric.WithAttributes(attribute.String("tokens.type", "total")))
 	}
 	if tpsHist != nil {
-		tpsHist.Record(ctx, usage.TokensPerSecond, runAttrs(ctx))
+		tpsHist.Record(ctx, usage.TokensPerSecond)
 	}
-	// Context in play for this request. The conversation grows every iteration, so
-	// the final value is how close the run got to the context window limit. Only
-	// the delta is added, which keeps the gauge at "current", not "cumulative".
 	current := int64(usage.TotalTokens)
 	if contextTokensGauge != nil {
-		contextTokensGauge.Add(ctx, current-prevContextTokens, runAttrs(ctx))
+		contextTokensGauge.Record(ctx, current)
 	}
-	return current
 }
 
 func addToolCallEvents(span trace.Span, toolCalls []model.ResponseToolCall, maxArgs int) {
@@ -158,7 +156,7 @@ func addToolCallEvents(span trace.Span, toolCalls []model.ResponseToolCall, maxA
 		span.AddEvent("mph.agent.tool_call", trace.WithAttributes(
 			attribute.String("mph.tool.name", tc.Function.Name),
 			attribute.String("mph.tool.id", tc.ID),
-			attribute.String("mph.tool.arguments", truncate(string(argsJSON), maxArgs)),
+			attribute.String("mph.tool.arguments", textutil.Truncate(string(argsJSON), maxArgs)),
 		))
 	}
 }

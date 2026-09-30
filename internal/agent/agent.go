@@ -6,40 +6,27 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode/utf8"
-	"uuid"
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/trollLemon/MPHarness/internal/config"
 	"github.com/trollLemon/MPHarness/internal/multipass"
 	mphotel "github.com/trollLemon/MPHarness/internal/otel"
+	"github.com/trollLemon/MPHarness/internal/output"
+	"github.com/trollLemon/MPHarness/internal/textutil"
 )
 
 type Kronk interface {
 	Chat(ctx context.Context, req model.D) (model.ChatResponse, error)
+	Tokenize(ctx context.Context, d model.D) (model.TokenizeResponse, error)
 	ModelConfig() model.Config
 }
 
-type LLMConfig struct {
-	Temperature     float64 `json:"temperature" yaml:"temperature"`
-	TopP            float64 `json:"top_p" yaml:"top_p"`
-	TopK            int     `json:"top_k" yaml:"top_k"`
-	ToolChoice      string  `json:"tool_choice" yaml:"tool_choice"`
-	MaxOutputTokens int     `json:"max_output_tokens" yaml:"max_output_tokens"`
-}
-
 const (
-	// DefaultMaxOutputTokens caps one model turn. Without it a runaway completion
-	// can decode until it exhausts the context window, which trips the length
-	// nudge and costs a whole extra iteration.
-	DefaultMaxOutputTokens = 2048
-
 	// toolResultWindowDivisor sets each tool result to roughly 1/divisor of the
 	// live context window, leaving room for the remaining iterations, the
 	// assistant turns, and the tool call documents.
@@ -52,10 +39,6 @@ const (
 	minToolResultBytes = 2 * 1024
 	maxToolResultBytes = 64 * 1024
 
-	// toolResultHeadPercent splits the surviving budget between the head and the
-	// tail, favouring the head where the command and its context appear.
-	toolResultHeadPercent = 70
-
 	// assumedContextWindow is used when the model reports no window, so the
 	// budget is still bounded rather than falling back to an unbounded payload.
 	assumedContextWindow = 8192
@@ -66,21 +49,13 @@ const (
 	finalOutputBytes = 64 * 1024
 )
 
-// finalCommandOutput joins the run's command results for the end-of-run report,
-// capped so a long run cannot emit an unbounded blob.
 func finalCommandOutput(commandOutputs []string) string {
 	if len(commandOutputs) == 0 {
 		return ""
 	}
-	return truncateToolResult(strings.Join(commandOutputs, "\n---\n"), finalOutputBytes)
+	return textutil.Truncate(strings.Join(commandOutputs, "\n---\n"), finalOutputBytes)
 }
 
-// toolResultBudgetBytes returns the cap for one tool result handed to the model.
-// An explicit agent.max_output_bytes wins; otherwise the cap tracks the context
-// window the model actually loaded, which the harness auto-tunes to the host
-// VRAM and the user never picks. A fixed byte cap is therefore wrong in both
-// directions: harmless on a large window, and on a small one a single result can
-// exceed the whole window and overflow the run on its first iteration.
 func toolResultBudgetBytes(cfg config.Config, contextWindow int) int {
 	if cfg.Agent.MaxOutputBytes > 0 {
 		return cfg.Agent.MaxOutputBytes
@@ -92,135 +67,163 @@ func toolResultBudgetBytes(cfg config.Config, contextWindow int) int {
 	return max(min(budget, maxToolResultBytes), minToolResultBytes)
 }
 
+// Agent owns the state of a single run. Iteration state lives here rather than
+// being threaded through every signature, so the per-iteration helpers read as
+// what they do instead of what they carry.
 type Agent struct {
-	log           zerolog.Logger
-	krn           Kronk
-	maxIterations int
-	chatTimeout   time.Duration
-	totalTimeout  time.Duration
-	llmConfig     LLMConfig
+	log           zerolog.Logger   // Run-scoped logger, already tagged component=agent.
+	krn           Kronk            // Model backend: chat, tokenize, and model metadata.
+	maxIterations int              // Hard cap on inference rounds before the run stops.
+	chatTimeout   time.Duration    // Budget for one chat call; guards a stalled model.
+	totalTimeout  time.Duration    // Budget for the whole run; bounds every iteration.
+	llmConfig     config.LLMConfig // Sampling and output limits sent with each request.
+	runID         string           // Identifies this run in logs, spans, and output paths.
+
+	conversation       []model.D     // Full message history, including tool results.
+	toolDocs           []model.D     // Tool schemas sent alongside every request.
+	commandOutputs     []string      // Captured command results, in the order they ran.
+	store              *output.Store // Captured output handles, or nil when disabled.
+	contextTokens      int64         // Live context size, driving compaction and metrics.
+	fixedOverhead      int64         // Per-request cost outside the messages: tool schemas and template framing.
+	iteration          int           // Zero-based index of the round now running.
+	compactionAttempts int           // Failed compactions; budget for the current one.
+	compactionsApplied int           // Compactions that succeeded this run.
+	toolResultBudget   int           // Byte cutoff between inline output and a handle.
+	done               bool          // Set when the agent should stop looping.
 }
 
-func NewAgent(log zerolog.Logger, krn Kronk, maxIterations int, chatTimeout time.Duration, totalTimeout time.Duration, llmConfig LLMConfig) *Agent {
-	if llmConfig.ToolChoice == "" {
-		llmConfig.ToolChoice = "auto"
+// Options carries the per-run bounds NewAgent needs.
+type Options struct {
+	MaxIterations int
+	ChatTimeout   time.Duration
+	TotalTimeout  time.Duration
+	LLM           config.LLMConfig
+	RunID         string
+}
+
+// NewAgent builds an Agent for a single run.
+func NewAgent(log zerolog.Logger, krn Kronk, opts Options) *Agent {
+	if opts.LLM.ToolChoice == "" {
+		opts.LLM.ToolChoice = "auto"
 	}
 	log = log.With().Str("component", "agent").Logger()
 	return &Agent{
 		log:           log,
 		krn:           krn,
-		maxIterations: maxIterations,
-		chatTimeout:   chatTimeout,
-		totalTimeout:  totalTimeout,
-		llmConfig:     llmConfig,
+		maxIterations: opts.MaxIterations,
+		chatTimeout:   opts.ChatTimeout,
+		totalTimeout:  opts.TotalTimeout,
+		llmConfig:     opts.LLM,
+		runID:         opts.RunID,
 	}
 }
 
+// Execute runs the agent to completion, bounded by totalTimeout and
+// maxIterations, and returns the first error that aborts the run. It owns the
+// iteration loop, compacting the context before each round, and prints the
+// final command output or assistant answer when the loop ends.
 func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *multipass.Client) error {
 	ctx, cancel := context.WithTimeout(ctx, a.totalTimeout)
 	defer cancel()
 
-	toolDocs := buildToolDocuments()
-	a.log.Info().Int("tools", len(toolDocs)).Msg("tool documents built")
+	ctx = withRunID(ctx, a.runID)
 
-	conversation := buildInitialConversation(conf)
+	a.toolDocs = buildToolDocuments(conf)
+	a.conversation = buildInitialConversation(conf)
+	a.toolResultBudget = toolResultBudgetBytes(conf, a.krn.ModelConfig().ContextWindow())
 
-	runUuid := uuid.NewV7()
-	runID := runUuid.String()
-	ctx = withRunID(ctx, runID)
+	if conf.Output.Enabled {
+		a.store = output.NewStore(cli, conf.VM.Name, config.OutputRunDir(a.runID), conf.Output, int64(a.toolResultBudget), conf.AllowedCommands)
+	}
 
-	var commandOutputs []string
-	var lastAssistantContent string
+	a.log.Info().Int("tools", len(a.toolDocs)).Msg("tool documents built")
+	a.log.Info().Str("run", a.runID).Msg("Starting inference")
 
-	a.log.Info().Str("uuid", runID).Msg("Starting inference")
 	initAgentMetrics()
 	recordContextWindow(ctx, a.krn)
 
-	var lastContextTokens int64
-
-	toolResultBudget := toolResultBudgetBytes(conf, a.krn.ModelConfig().ContextWindow())
-
-	for iter := 0; iter < a.maxIterations; iter++ {
-		res, err := a.runIteration(ctx, iter, conversation, toolDocs, commandOutputs, cli, conf, lastContextTokens, toolResultBudget)
-		if err != nil {
+	for ; a.iteration < a.maxIterations && !a.done; a.iteration++ {
+		a.maybeCompact(ctx, conf)
+		if err := a.runIteration(ctx, cli, conf); err != nil {
 			return err
-		}
-		conversation, commandOutputs, lastContextTokens = res.conversation, res.commandOutputs, res.contextTokens
-		if res.content != "" {
-			lastAssistantContent = res.content
-		}
-		if res.done {
-			break
 		}
 	}
 
-	if len(commandOutputs) > 0 {
-		final := finalCommandOutput(commandOutputs)
-		a.log.Info().Str("command_output", truncate(final, conf.Truncation.CommandOutput)).Msg("final command output")
+	if len(a.commandOutputs) > 0 {
+		final := finalCommandOutput(a.commandOutputs)
+		a.log.Info().Str("out", textutil.Truncate(final, conf.Truncation.CommandOutput)).Msg("final command output")
 		fmt.Println(final)
-	} else if lastAssistantContent != "" {
-		a.log.Info().Str("final_output", truncate(lastAssistantContent, conf.Truncation.LogContent)).Msg("agent final answer (no command output)")
 	} else {
 		a.log.Info().Msg("agent completed with no command output or final answer")
 	}
 
+	contextUsedPercent := 0.0
+	if window := a.krn.ModelConfig().ContextWindow(); window > 0 {
+		contextUsedPercent = float64(a.contextTokens) / float64(window) * 100
+	}
+
+	a.log.Info().
+		Float64("ctx_pct", contextUsedPercent).
+		Int("compacted", a.compactionsApplied).
+		Int("compact_tries", a.compactionAttempts).
+		Msg("run complete")
+
 	return nil
 }
 
-// iterationResult is what one inference round hands back to the run loop.
-type iterationResult struct {
-	conversation   []model.D
-	commandOutputs []string
-	contextTokens  int64
-	content        string
-	done           bool
-}
-
-// runIteration runs one inference round.
-func (a *Agent) runIteration(
-	ctx context.Context, iter int, conversation, toolDocs []model.D,
-	commandOutputs []string, cli *multipass.Client, conf config.Config,
-	lastContextTokens int64, toolResultBudget int,
-) (res *iterationResult, err error) {
-	res = &iterationResult{
-		conversation:   conversation,
-		commandOutputs: commandOutputs,
-		contextTokens:  lastContextTokens,
-	}
+func (a *Agent) runIteration(ctx context.Context, cli *multipass.Client, conf config.Config) error {
+	iter := a.iteration
 
 	iterCtx, iterSpan := getAgentTracer().Start(ctx, "mph.agent.iteration",
 		trace.WithAttributes(runSpanAttrs(ctx, attribute.Int("mph.iteration", iter+1))...))
 	if iterationsCounter != nil {
-		iterationsCounter.Add(iterCtx, 1, runAttrs(iterCtx), metric.WithAttributes(attribute.Int("mph.iteration", iter+1)))
+		iterationsCounter.Add(iterCtx, 1, metric.WithAttributes(attribute.Int("mph.iteration", iter+1)))
 	}
 
 	iterLog := a.log.With().Ctx(iterCtx).Logger()
 
-	iterLog.Debug().Int("iteration", iter+1).Msg("running inference")
+	iterLog.Debug().Int("iter", iter+1).Msg("running inference")
 
-	resp, err := a.callChat(iterCtx, buildChatRequest(conversation, toolDocs, a.llmConfig), iter)
+	resp, err := a.callChat(iterCtx, buildChatRequest(a.conversation, a.toolDocs, a.llmConfig), iter)
 	if err != nil {
-		iterSpan.RecordError(err)
-		iterSpan.SetStatus(codes.Error, err.Error())
+		mphotel.FailSpan(iterSpan, err)
 		iterSpan.End()
-		return res, err
+		return err
 	}
 
-	lastContextTokens = recordTokenUsage(iterCtx, iterSpan, iterLog, lastContextTokens, resp.Usage)
-	res.contextTokens = lastContextTokens
+	// The reported usage is the measurement; anything this turn appends on top
+	// of it is tallied by addToolTokens below.
+	recordTokenUsage(iterCtx, iterSpan, iterLog, resp.Usage)
+	a.contextTokens = 0
+	if resp.Usage != nil {
+		a.contextTokens = int64(resp.Usage.TotalTokens)
+	}
+	// Measured before the assistant message lands, so a.conversation is still
+	// exactly what the request carried.
+	a.fixedOverhead = a.measureFixedOverhead(iterCtx, resp.Usage)
 
 	msg, finishReason, shouldBreak := a.extractAssistantMessage(resp)
 	iterSpan.SetAttributes(attribute.String("mph.finish_reason", finishReason))
 	if shouldBreak {
 		iterSpan.End()
-		res.done = true
-		return res, nil
+		a.done = true
+		return nil
 	}
 
-	res.content = logModelOutput(iterCtx, iterLog, iter, msg, conf.Truncation.LogContent)
-	if res.content == "" && finishReason != model.FinishReasonTool && len(msg.ToolCalls) == 0 {
+	content := logModelOutput(iterCtx, iterLog, iter, msg, conf.Truncation.LogContent)
+	// Bare tool calls carry no text, so without this a turn leaves no model
+	// output trace at all. The shape event proves the model was heard and
+	// shows what it returned, instead of looking like dropped logging.
+	mphotel.LogEvent(iterCtx, iterLog, zerolog.DebugLevel, "assistant message", map[string]any{
+		"iter":   iter + 1,
+		"finish": finishReason,
+		"clen":   len(msg.Content),
+		"rlen":   len(msg.Reasoning),
+		"calls":  len(msg.ToolCalls),
+	})
+	if content == "" && finishReason != model.FinishReasonTool && len(msg.ToolCalls) == 0 {
 		mphotel.LogEvent(iterCtx, iterLog, zerolog.DebugLevel, "empty content", map[string]any{
-			"finish_reason": finishReason,
+			"finish": finishReason,
 		})
 	}
 
@@ -229,37 +232,56 @@ func (a *Agent) runIteration(
 
 	if len(toolCalls) == 0 && finishReason == model.FinishReasonLength {
 		mphotel.LogEvent(iterCtx, iterLog, zerolog.WarnLevel, "hit length limit without tool calls, injecting nudge and continuing", map[string]any{
-			"iteration":     iter + 1,
-			"finish_reason": finishReason,
+			"iter":   iter + 1,
+			"finish": finishReason,
 		})
 		iterSpan.AddEvent("mph.agent.length_nudge", trace.WithAttributes(attribute.Int("mph.iteration", iter+1)))
-		res.conversation = appendToConversation(conversation, buildLengthNudgeMessages(msg, conf.Truncation.Nudge)...)
+		a.conversation = appendToConversation(a.conversation, buildLengthNudgeMessages(msg, conf.Truncation.Nudge)...)
 		iterSpan.End()
-		return res, nil
+		return nil
 	}
 
 	if a.shouldTerminateWithoutToolCalls(toolCalls, finishReason, iter) {
 		iterSpan.End()
-		res.done = true
-		return res, nil
+		a.done = true
+		return nil
 	}
 
 	toolCallDocs := a.buildToolCallDocsWithContext(iterCtx, toolCalls, iter)
-	res.conversation = appendToConversation(conversation, buildAssistantMessage(msg, toolCallDocs, conf.Agent.Reasoning()))
+	a.conversation = appendToConversation(a.conversation, buildAssistantMessage(msg, toolCallDocs, conf.Agent.Reasoning()))
 
-	toolResponses, newOutputs := a.executeToolCalls(iterCtx, cli, conf, toolCalls, toolResultBudget)
-	res.commandOutputs = append(res.commandOutputs, newOutputs...)
-	res.conversation = appendToConversation(res.conversation, toolResponses...)
+	toolResponses, newOutputs := a.executeToolCalls(iterCtx, cli, conf, toolCalls)
+	a.commandOutputs = append(a.commandOutputs, newOutputs...)
+	a.conversation = appendToConversation(a.conversation, toolResponses...)
+	a.addToolTokens(iterCtx, toolResponses)
 
-	if len(res.commandOutputs) > 0 {
-		iterLog.Debug().Int("command_outputs", len(res.commandOutputs)).Msg("collected outputs so far")
+	if len(a.commandOutputs) > 0 {
+		iterLog.Debug().Int("outs", len(a.commandOutputs)).Msg("collected outputs so far")
 	}
 	iterSpan.End()
-	return res, nil
+	return nil
 }
 
-// logModelOutput logs the reasoning and content of a model reply and returns
-// the content, which the run reports as its final answer when nothing ran.
+func (a *Agent) addToolTokens(ctx context.Context, msgs []model.D) {
+	var batch strings.Builder
+	for _, m := range msgs {
+		c, _ := m["content"].(string)
+		if c == "" {
+			continue
+		}
+		batch.WriteString(c)
+		batch.WriteByte('\n')
+	}
+	added := int64(a.estimateTokens(ctx, batch.String()))
+	if added == 0 {
+		return
+	}
+	a.contextTokens += added
+	if contextTokensGauge != nil {
+		contextTokensGauge.Record(ctx, a.contextTokens)
+	}
+}
+
 func logModelOutput(ctx context.Context, log zerolog.Logger, iter int, msg *model.ResponseMessage, maxContent int) string {
 	if msg.Reasoning != "" {
 		logModelPart(ctx, log, iter, "reasoning", msg.Reasoning, maxContent)
@@ -271,13 +293,11 @@ func logModelOutput(ctx context.Context, log zerolog.Logger, iter int, msg *mode
 	return msg.Content
 }
 
-// logModelPart emits one piece of a model reply under a shared text key, so
-// reasoning and content are one queryable stream split only by part.
 func logModelPart(ctx context.Context, log zerolog.Logger, iter int, part, text string, maxContent int) {
 	mphotel.LogEvent(ctx, log, zerolog.InfoLevel, "model output", map[string]any{
-		"iteration": iter + 1,
-		"part":      part,
-		"text":      truncate(text, maxContent),
+		"iter": iter + 1,
+		"part": part,
+		"text": textutil.Truncate(text, maxContent),
 	})
 }
 
@@ -313,7 +333,7 @@ func (a *Agent) extractAssistantMessage(resp model.ChatResponse) (*model.Respons
 		msg = choice.Delta
 	}
 	if msg == nil {
-		a.log.Warn().Str("finish_reason", fr).Msg("empty message, ending loop")
+		a.log.Warn().Str("finish", fr).Msg("empty message, ending loop")
 		return nil, fr, true
 	}
 
@@ -324,16 +344,8 @@ func (a *Agent) shouldTerminateWithoutToolCalls(toolCalls []model.ResponseToolCa
 	if len(toolCalls) != 0 {
 		return false
 	}
-	if finishReason == model.FinishReasonStop || finishReason == model.FinishReasonLength || finishReason == "" {
-		a.log.Info().Int("iteration", iter+1).Str("finish_reason", finishReason).Msg("agent finished without tool calls")
-		return true
-	}
-	a.log.Info().Str("finish_reason", finishReason).Msg("no tool calls, ending loop")
+	a.log.Info().Int("iter", iter+1).Str("finish", finishReason).Msg("agent finished without tool calls")
 	return true
-}
-
-func (a *Agent) buildToolCallDocs(toolCalls []model.ResponseToolCall, iter int) []model.D {
-	return a.buildToolCallDocsWithContext(context.Background(), toolCalls, iter)
 }
 
 func (a *Agent) buildToolCallDocsWithContext(ctx context.Context, toolCalls []model.ResponseToolCall, iter int) []model.D {
@@ -341,10 +353,10 @@ func (a *Agent) buildToolCallDocsWithContext(ctx context.Context, toolCalls []mo
 	for _, tc := range toolCalls {
 		argsJSON, _ := json.Marshal(tc.Function.Arguments)
 		mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "agent tool call", map[string]any{
-			"iteration": iter + 1,
-			"tool":      tc.Function.Name,
-			"id":        tc.ID,
-			"arguments": json.RawMessage(argsJSON),
+			"iter": iter + 1,
+			"tool": tc.Function.Name,
+			"id":   tc.ID,
+			"args": json.RawMessage(argsJSON),
 		})
 
 		docs = append(docs, model.D{
@@ -359,21 +371,32 @@ func (a *Agent) buildToolCallDocsWithContext(ctx context.Context, toolCalls []mo
 	return docs
 }
 
-func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg config.Config, toolCalls []model.ResponseToolCall, resultBudget int) ([]model.D, []string) {
+func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg config.Config, toolCalls []model.ResponseToolCall) ([]model.D, []string) {
 	var toolResponses []model.D
 	var commandOutputs []string
 
 	span := trace.SpanFromContext(ctx)
 	for _, tc := range toolCalls {
 		start := time.Now()
-		result, err := Call(ctx, cli, cfg, tc.Function.Name, map[string]any(tc.Function.Arguments))
+		result, err := Call(ctx, cli, cfg, a.store, tc.Function.Name, map[string]any(tc.Function.Arguments))
 		duration := time.Since(start)
-		durationSec := duration.Seconds()
-		durationMs := duration.Milliseconds()
+
+		status := "SUCCESS"
+		detail := result
 		var content string
-		var status string
-		if err != nil {
+
+		if err == nil {
+			mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "tool succeeded", map[string]any{
+				"tool": tc.Function.Name,
+				"id":   tc.ID,
+				"out":  textutil.Truncate(result, cfg.Truncation.ToolResult),
+			})
+		}
+
+		switch {
+		case err != nil:
 			status = "FAILED"
+			detail = err.Error()
 			mphotel.LogEvent(ctx, a.log, zerolog.ErrorLevel, "tool execution failed", map[string]any{
 				"tool":  tc.Function.Name,
 				"id":    tc.ID,
@@ -381,43 +404,43 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg
 			})
 			content = buildToolErrorContent(err)
 			if toolFailuresCounter != nil {
-				toolFailuresCounter.Add(ctx, 1, runAttrs(ctx), metric.WithAttributes(attribute.String("mph.tool.name", tc.Function.Name)))
+				toolFailuresCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("mph.tool.name", tc.Function.Name)))
 			}
-			span.AddEvent("mph.agent.tool_result", trace.WithAttributes(
-				attribute.String("mph.tool.name", tc.Function.Name),
-				attribute.String("mph.tool.id", tc.ID),
-				attribute.String("mph.tool.status", status),
-				attribute.String("mph.tool.result", truncate(err.Error(), cfg.Truncation.ToolResult)),
-				attribute.Int64("mph.tool.duration_ms", durationMs),
-			))
-		} else {
-			result = truncateToolResult(result, resultBudget)
-			status = "SUCCESS"
-			mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "tool succeeded", map[string]any{
-				"tool":   tc.Function.Name,
-				"id":     tc.ID,
-				"result": truncate(result, cfg.Truncation.ToolResult),
-			})
+		case isToolEnvelope(result):
+			if isCaptureEnvelope(result) {
+				if id := capturedOutputID(result); id != "" {
+					commandOutputs = append(commandOutputs, fmt.Sprintf("<captured output_id=%s>", id))
+					mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "command output too large for inline context, captured to file", map[string]any{
+						"tool":   tc.Function.Name,
+						"id":     tc.ID,
+						"out_id": id,
+					})
+				}
+			}
+			content = result
+		default:
 			if tc.Function.Name == "multipass_exec" {
 				commandOutputs = append(commandOutputs, result)
 				mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "command output", map[string]any{
-					"command_output": truncate(result, cfg.Truncation.CommandOutput),
+					"command_output": textutil.Truncate(result, cfg.Truncation.CommandOutput),
 				})
 			}
 			content = buildToolSuccessContent(tc.Function.Name, result)
-			span.AddEvent("mph.agent.tool_result", trace.WithAttributes(
-				attribute.String("mph.tool.name", tc.Function.Name),
-				attribute.String("mph.tool.id", tc.ID),
-				attribute.String("mph.tool.status", status),
-				attribute.String("mph.tool.result", truncate(result, cfg.Truncation.ToolResult)),
-				attribute.Int64("mph.tool.duration_ms", durationMs),
-			))
 		}
+
+		span.AddEvent("mph.agent.tool_result", trace.WithAttributes(
+			attribute.String("mph.tool.name", tc.Function.Name),
+			attribute.String("mph.tool.id", tc.ID),
+			attribute.String("mph.tool.status", status),
+			attribute.String("mph.tool.result", textutil.Truncate(detail, cfg.Truncation.ToolResult)),
+			attribute.Int64("mph.tool.duration_ms", duration.Milliseconds()),
+		))
+
 		if toolCallsCounter != nil {
-			toolCallsCounter.Add(ctx, 1, runAttrs(ctx), metric.WithAttributes(attribute.String("mph.tool.name", tc.Function.Name)))
+			toolCallsCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("mph.tool.name", tc.Function.Name)))
 		}
 		if toolDurationHist != nil {
-			toolDurationHist.Record(ctx, durationSec, runAttrs(ctx), metric.WithAttributes(
+			toolDurationHist.Record(ctx, duration.Seconds(), metric.WithAttributes(
 				attribute.String("mph.tool.name", tc.Function.Name),
 				attribute.String("mph.tool.status", status),
 			))
@@ -427,61 +450,4 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg
 	}
 
 	return toolResponses, commandOutputs
-}
-
-// truncate caps s at n bytes for logs and span attributes. A non-positive n
-// means no limit, which is how a caller opts out of capping entirely. Only the
-// head is kept, so this is for payloads where the beginning is the signal.
-func truncate(s string, n int) string {
-	if n <= 0 || len(s) <= n {
-		return s
-	}
-	return fmt.Sprintf("%s…(truncated, %d of %d bytes)", trimPartialRuneTail(s[:n]), n, len(s))
-}
-
-// truncateToolResult caps a tool result at n bytes for the model, keeping both
-// ends. Command output usually carries its signal at the end (errors, summary
-// lines, footers), so a head-only cut drops the part the model needs. The
-// marker stays so the model knows output is missing. Only the n <= 0 and
-// too-short cases pass through; the cap itself is fixed per result when the
-// result is created, never revised afterwards, because rewriting an earlier
-// message invalidates the inference server's prefix cache and forces a full
-// re-prefill of the conversation.
-func truncateToolResult(s string, n int) string {
-	if n <= 0 || len(s) <= n {
-		return s
-	}
-	marker := fmt.Sprintf("\n…(truncated, %d of %d bytes; head and tail shown)…\n", n, len(s))
-	budget := n - len(marker)
-	if budget <= 0 {
-		return truncate(s, n)
-	}
-	head := budget * toolResultHeadPercent / 100
-	tail := budget - head
-	return trimPartialRuneTail(s[:head]) + marker + trimPartialRuneHead(s[len(s)-tail:])
-}
-
-// trimPartialRuneTail drops a trailing partial UTF-8 sequence so a byte-indexed
-// cut never splits a rune.
-func trimPartialRuneTail(s string) string {
-	for len(s) > 0 {
-		if r, size := utf8.DecodeLastRuneInString(s); r == utf8.RuneError && size <= 1 {
-			s = s[:len(s)-1]
-			continue
-		}
-		break
-	}
-	return s
-}
-
-// trimPartialRuneHead drops a leading partial UTF-8 sequence.
-func trimPartialRuneHead(s string) string {
-	for len(s) > 0 {
-		if r, size := utf8.DecodeRuneInString(s); r == utf8.RuneError && size <= 1 {
-			s = s[1:]
-			continue
-		}
-		break
-	}
-	return s
 }

@@ -5,13 +5,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"io"
 	"os"
 	"strings"
 	"time"
-
-	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
+	"uuid"
 
 	"github.com/trollLemon/MPHarness/internal/agent"
 	"github.com/trollLemon/MPHarness/internal/config"
@@ -59,7 +59,7 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "    max_iterations: %d\n", config.DefaultMaxIterations)
 	_, _ = fmt.Fprintf(w, "    chat_timeout: %s\n", config.DefaultChatTimeout)
 	_, _ = fmt.Fprintf(w, "    total_timeout: %s\n", config.DefaultTotalTimeout)
-	_, _ = fmt.Fprintf(w, "    max_output_bytes: 0   # per tool result cap; 0 = derive from context_window\n")
+	_, _ = fmt.Fprintf(w, "    max_output_bytes: 0   # auto-capture inline cutoff; 0 = derive from context_window\n")
 	_, _ = fmt.Fprintf(w, "    send_reasoning: true # replay reasoning_content into later turns\n")
 	_, _ = fmt.Fprintf(w, "  truncation:           # optional, telemetry payload caps in bytes\n")
 	_, _ = fmt.Fprintf(w, "    command_output: %d\n", config.DefaultCommandOutputBytes)
@@ -71,7 +71,20 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "    endpoint: %s\n", mphotel.DefaultEndpoint)
 	_, _ = fmt.Fprintf(w, "    service_name: %s\n", mphotel.DefaultServiceName)
 	_, _ = fmt.Fprintf(w, "    resource_attributes:\n")
-	_, _ = fmt.Fprintf(w, "      environment: dev\n\n")
+	_, _ = fmt.Fprintf(w, "      environment: dev\n")
+	_, _ = fmt.Fprintf(w, "  output:               # optional, captured command output\n")
+	_, _ = fmt.Fprintf(w, "    enabled: true\n")
+	_, _ = fmt.Fprintf(w, "    mode: auto          # auto|always\n")
+	_, _ = fmt.Fprintf(w, "    inline_max_size: 0   # 0 = derive from tool-result budget\n")
+	_, _ = fmt.Fprintf(w, "    max_command_size: 64MiB\n")
+	_, _ = fmt.Fprintf(w, "    max_total_size: 512MiB\n")
+	_, _ = fmt.Fprintf(w, "    search_max_matches: %d\n", config.DefaultOutputSearchMatches)
+	_, _ = fmt.Fprintf(w, "  compaction:           # optional, conversation compaction\n")
+	_, _ = fmt.Fprintf(w, "    enabled: true\n")
+	_, _ = fmt.Fprintf(w, "    threshold: 0.8      # fraction of context window, (0.5, 0.95]\n")
+	_, _ = fmt.Fprintf(w, "    max_summary_tokens: %d\n", config.DefaultCompactionMaxTokens)
+	_, _ = fmt.Fprintf(w, "    min_messages: %d\n", config.DefaultCompactionMinMessages)
+	_, _ = fmt.Fprintf(w, "    max_attempts: %d\n\n", config.DefaultCompactionMaxAttempts)
 	_, _ = fmt.Fprintf(w, "Example:\n")
 	_, _ = fmt.Fprintf(w, "  mph -v ./mph.yaml\n")
 
@@ -130,44 +143,50 @@ func run() error {
 		return err
 	}
 
-	otelCfg := resolveOtelConfig(cfg.Otel, otelEnabled)
+	ctx := context.Background()
+
+	runID := uuid.NewV7().String()
+	otelCfg := resolveOtelConfig(cfg.Otel, otelEnabled, runID)
 
 	if otelCfg.Enabled {
-		shutdown, err := mphotel.Setup(otelCfg)
+		shutdown, err := mphotel.Setup(ctx, otelCfg)
 		if err != nil {
 			return fmt.Errorf("otel setup: %w", err)
 		}
 		defer func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
-			if err := shutdown(ctx); err != nil {
+			if err := shutdown(shutdownCtx); err != nil {
 				log.Warn().Err(err).Msg("otel flush/shutdown failed (some telemetry may be lost)")
 			} else {
 				log.Debug().Msg("otel flush/shutdown complete")
 			}
 		}()
 		log.Logger = log.Logger.Hook(mphotel.NewHook("mph"))
-		log.Info().Str("otel.endpoint", otelCfg.Endpoint).Str("otel.service_name", otelCfg.ServiceName).Msg("otel enabled")
+		log.Info().Str("endpoint", otelCfg.Endpoint).Str("svc", otelCfg.ServiceName).Msg("otel enabled")
 	}
 
 	log.Info().
-		Str("config", configPath).
+		Str("cfg", configPath).
 		Str("vm", cfg.VM.Name).
 		Str("model", cfg.Model).
-		Str("content_dir", cfg.ContentDir).
-		Strs("allowed_commands", cfg.AllowedCommandsList()).
-		Float64("llm.temperature", cfg.LLM.Temperature).
-		Float64("llm.top_p", cfg.LLM.TopP).
-		Int("llm.top_k", cfg.LLM.TopK).
-		Str("llm.tool_choice", cfg.LLM.ToolChoice).
-		Int("llm.context_window", cfg.LLM.ContextWindow).
-		Int("agent.max_iterations", cfg.Agent.MaxIterations).
-		Str("agent.chat_timeout", time.Duration(cfg.Agent.ChatTimeout).String()).
-		Str("agent.total_timeout", time.Duration(cfg.Agent.TotalTimeout).String()).
-		Bool("otel.enabled", otelCfg.Enabled).
+		Str("dir", cfg.ContentDir).
+		Int("cmds", len(cfg.AllowedCommandsList())).
+		Float64("temp", cfg.LLM.Temperature).
+		Float64("top_p", cfg.LLM.TopP).
+		Int("top_k", cfg.LLM.TopK).
+		Str("tools", cfg.LLM.ToolChoice).
+		Int("ctx_win", cfg.LLM.ContextWindow).
+		Int("iters", cfg.Agent.MaxIterations).
+		Str("chat_to", time.Duration(cfg.Agent.ChatTimeout).String()).
+		Str("total_to", time.Duration(cfg.Agent.TotalTimeout).String()).
+		Bool("otel", otelCfg.Enabled).
+		Bool("out_on", cfg.Output.Enabled).
+		Str("out_mode", cfg.Output.Mode).
+		Bool("compact", cfg.Compaction.Enabled).
+		Float64("compact_thr", cfg.Compaction.Threshold).
 		Msg("loaded config")
-
-	ctx := context.Background()
+	log.Debug().Strs("cmds", cfg.AllowedCommandsList()).Msg("allowed commands")
 
 	mp, err := agent.InitializeModelFiles(ctx, log.Logger, cfg.Model)
 	if err != nil {
@@ -184,30 +203,31 @@ func run() error {
 		}
 	}()
 
-	llmCfg := agent.LLMConfig{
-		Temperature:     cfg.LLM.Temperature,
-		TopP:            cfg.LLM.TopP,
-		TopK:            cfg.LLM.TopK,
-		ToolChoice:      cfg.LLM.ToolChoice,
-		MaxOutputTokens: cfg.LLM.MaxOutputTokens,
-	}
-
-	agt := agent.NewAgent(
-		log.Logger,
-		krn,
-		cfg.Agent.MaxIterations,
-		time.Duration(cfg.Agent.ChatTimeout),
-		time.Duration(cfg.Agent.TotalTimeout),
-		llmCfg,
-	)
+	agt := agent.NewAgent(log.Logger, krn, agent.Options{
+		MaxIterations: cfg.Agent.MaxIterations,
+		ChatTimeout:   time.Duration(cfg.Agent.ChatTimeout),
+		TotalTimeout:  time.Duration(cfg.Agent.TotalTimeout),
+		LLM:           cfg.LLM,
+		RunID:         runID,
+	})
 
 	client := multipass.New(log.Logger)
 
-	return harness.Start(ctx, agt, client, cfg, ignoreExisting, keep)
+	return harness.Start(ctx, agt, client, cfg, harness.Options{
+		IgnoreExisting: ignoreExisting,
+		Keep:           keep,
+		RunID:          runID,
+	})
 }
 
 func setupLogger(verbose, pretty bool) {
 	zerolog.TimeFieldFormat = time.RFC3339
+	zerolog.CallerMarshalFunc = func(_ uintptr, file string, line int) string {
+		if i := strings.LastIndexByte(file, '/'); i >= 0 {
+			file = file[i+1:]
+		}
+		return file + ":" + strings.TrimSpace(fmt.Sprint(line))
+	}
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	if verbose {
 		zerolog.SetGlobalLevel(zerolog.DebugLevel)
@@ -224,7 +244,7 @@ func setupLogger(verbose, pretty bool) {
 	log.Logger = zerolog.New(os.Stdout).With().Timestamp().Caller().Logger()
 }
 
-func resolveOtelConfig(yamlCfg config.OtelConfig, flagEnabled bool) mphotel.Config {
+func resolveOtelConfig(yamlCfg config.OtelConfig, flagEnabled bool, runID string) mphotel.Config {
 	enabled := yamlCfg.Enabled
 	if flagEnabled || isEnvTrue(os.Getenv("MPH_OTEL")) {
 		enabled = true
@@ -251,6 +271,7 @@ func resolveOtelConfig(yamlCfg config.OtelConfig, flagEnabled bool) mphotel.Conf
 		Endpoint:           endpoint,
 		ServiceName:        serviceName,
 		ResourceAttributes: yamlCfg.ResourceAttributes,
+		RunID:              runID,
 	}
 }
 

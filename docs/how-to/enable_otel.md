@@ -155,7 +155,7 @@ Then:
 - Grafana on <http://localhost:3000> — the **MPH OTel** dashboard, or Explore → Tempo/Loki/Prometheus
 - The trace shape to expect is `mph.run` → `mph.vm.create` / `multipass.launch` → `mph.agent.iteration` × N (with `mph.agent.tool_call` / `tool_result` events and a `multipass.exec` child per command) → `mph.vm.delete`
 
-`mph.run.id` is a UUID on every span, event, and metric, so one run can be picked out of a shared dashboard. Logs carry `trace_id` and `span_id`, so a log line links back to the trace it belongs to.
+`mph.run.id` is a UUID on every span and event, so one run can be picked out of a shared dashboard; metrics carry the run as the `service.instance.id` resource instead. Logs carry `trace_id` and `span_id`, so a log line links back to the trace it belongs to.
 
 Model replies land in Loki under the body `model output`, split by `part` (`content` or `reasoning`) with the payload in `text`. Nothing is logged for an iteration that produced neither, which is normal for a turn that is only a tool call.
 

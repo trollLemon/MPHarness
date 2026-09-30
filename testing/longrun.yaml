@@ -4,7 +4,7 @@ vm:
   ram: 2G
   cpu: 1
   image: bionic
-model: unsloth/Ministral-3-14B-Instruct-2512-UD-Q4_K_XL
+model: unsloth/Ministral-3-3B-Reasoning-2512-UD-Q4_K_XL
 allowed_commands:
   - ls
   - cat
@@ -23,20 +23,16 @@ allowed_commands:
   - date
   - whoami
 llm:
-  temperature: 0.0
+  temperature: 1.0
   top_p: 0.95
-  top_k: 40
+  top_k: 64
   tool_choice: auto
 agent:
   max_iterations: 60
-  chat_timeout: 300s
+  chat_timeout: 60m
   total_timeout: 90m
 prompt: |
-  Inside the Multipass VM, work through this checklist one item at a time,
-  running exactly one tool call per item and reporting each result before
-  moving on to the next item. Do not batch items together and do not skip
-  ahead.
-
+  Inside the Multipass VM, please do the following.
   1. Run `uname -a`.
   2. Run `cat /etc/os-release`.
   3. Run `ls /etc`.

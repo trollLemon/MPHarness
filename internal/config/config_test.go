@@ -384,3 +384,263 @@ func TestParseAgentOutputBudget(t *testing.T) {
 		})
 	}
 }
+
+func TestSizeParsing(t *testing.T) {
+	base := "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\n"
+	tests := []struct {
+		name    string
+		yaml    string
+		want    int64
+		wantErr bool
+	}{
+		{"mebibytes", base + "output:\n  max_command_size: 64MiB\n", 64 * 1024 * 1024, false},
+		{"larger mebibytes", base + "output:\n  max_command_size: 512MiB\n", 512 * 1024 * 1024, false},
+		{"gibibytes", base + "output:\n  max_command_size: 1GiB\n", 1024 * 1024 * 1024, false},
+		{"bare bytes", base + "output:\n  max_command_size: 1024\n", 1024, false},
+		{"invalid suffix", base + "output:\n  max_command_size: 10XB\n", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(tt.yaml))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for invalid size")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if int64(cfg.Output.MaxCommandSize) != tt.want {
+				t.Errorf("got %d want %d", int64(cfg.Output.MaxCommandSize), tt.want)
+			}
+		})
+	}
+}
+
+func TestParseOutputCompaction(t *testing.T) {
+	base := "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\n"
+	tests := []struct {
+		name  string
+		yaml  string
+		check func(t *testing.T, cfg Config)
+	}{
+		{
+			name: "absent blocks take defaults",
+			yaml: base,
+			check: func(t *testing.T, cfg Config) {
+				if !cfg.Output.Enabled || cfg.Output.Mode != "auto" {
+					t.Errorf("output defaults: %+v", cfg.Output)
+				}
+				if int64(cfg.Output.MaxCommandSize) != DefaultOutputMaxCommandBytes {
+					t.Errorf("max_command_size %d", int64(cfg.Output.MaxCommandSize))
+				}
+				if int64(cfg.Output.MaxTotalSize) != DefaultOutputMaxTotalBytes {
+					t.Errorf("max_total_size %d", int64(cfg.Output.MaxTotalSize))
+				}
+				if cfg.Output.SearchMaxMatches != 200 {
+					t.Errorf("search_max_matches %d", cfg.Output.SearchMaxMatches)
+				}
+				if !cfg.Compaction.Enabled || cfg.Compaction.Threshold != 0.8 || cfg.Compaction.MaxSummaryTokens != 2048 {
+					t.Errorf("compaction defaults: %+v", cfg.Compaction)
+				}
+				if cfg.Compaction.MinMessages != 6 || cfg.Compaction.MaxAttempts != 3 {
+					t.Errorf("compaction defaults: %+v", cfg.Compaction)
+				}
+			},
+		},
+		{
+			name: "output can be disabled",
+			yaml: base + "output:\n  enabled: false\n",
+			check: func(t *testing.T, cfg Config) {
+				if cfg.Output.Enabled {
+					t.Errorf("expected output disabled")
+				}
+			},
+		},
+		{
+			name: "block without enabled opts in",
+			yaml: base + "output:\n  mode: always\ncompaction:\n  threshold: 0.7\n",
+			check: func(t *testing.T, cfg Config) {
+				if !cfg.Output.Enabled || cfg.Output.Mode != "always" {
+					t.Errorf("output: %+v", cfg.Output)
+				}
+				if !cfg.Compaction.Enabled || cfg.Compaction.Threshold != 0.7 {
+					t.Errorf("compaction: %+v", cfg.Compaction)
+				}
+			},
+		},
+		{
+			name: "explicit zero size disables cap",
+			yaml: base + "output:\n  max_command_size: 0\n  max_total_size: 0\n",
+			check: func(t *testing.T, cfg Config) {
+				if int64(cfg.Output.MaxCommandSize) != 0 || int64(cfg.Output.MaxTotalSize) != 0 {
+					t.Errorf("explicit 0 must stay disabled, got %+v", cfg.Output)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(tt.yaml))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			tt.check(t, cfg)
+		})
+	}
+}
+
+func TestOutputValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+	}{
+		{"bogus output mode", "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\noutput:\n  enabled: true\n  mode: bogus\n"},
+		{"compaction threshold too low", "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\ncompaction:\n  enabled: true\n  threshold: 0.4\n"},
+		{"compaction threshold too high", "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\ncompaction:\n  enabled: true\n  threshold: 0.99\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := Parse([]byte(tt.yaml)); err == nil {
+				t.Errorf("expected validation error for %q", tt.yaml)
+			}
+		})
+	}
+}
+
+func TestSearchMaxMatchesZeroMeansUnlimited(t *testing.T) {
+	base := "vm:\n  name: vm\n  cpu: 1\n  ram: 1G\n  disk: 5G\nmodel: m\nprompt: p\noutput:\n  enabled: true\n"
+	tests := []struct {
+		name string
+		yaml string
+		want int
+	}{
+		{"omitted falls back to the default", base, DefaultOutputSearchMatches},
+		{"explicit zero is honoured", base + "  search_max_matches: 0\n", 0},
+		{"explicit value is honoured", base + "  search_max_matches: 7\n", 7},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(tt.yaml))
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if cfg.Output.SearchMaxMatches != tt.want {
+				t.Fatalf("search_max_matches %d want %d", cfg.Output.SearchMaxMatches, tt.want)
+			}
+		})
+	}
+}
+
+func TestOutputRunDir(t *testing.T) {
+	tests := []struct {
+		name    string
+		runID   string
+		wantDir string
+	}{
+		{"simple id", "run-123", "/tmp/mph-output/run-123"},
+		{"uuid id", "01a0ec35-3962-7a15-be5e-a9372f3401b7", "/tmp/mph-output/01a0ec35-3962-7a15-be5e-a9372f3401b7"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if dir := OutputRunDir(tt.runID); dir != tt.wantDir {
+				t.Fatalf("got %q want %q", dir, tt.wantDir)
+			}
+		})
+	}
+}
+
+func TestUnmarshalYAMLDecodesEveryKey(t *testing.T) {
+	cfg, err := Parse([]byte(`
+vm:
+  name: my-vm
+  disk: 20G
+  ram: 4G
+  cpu: 2
+  image: noble
+model: org/model
+prompt: do things
+allowed_commands:
+  - apt
+  - git
+llm:
+  temperature: 0.2
+  top_p: 0.9
+  top_k: 40
+  tool_choice: required
+  context_window: 8192
+  max_output_tokens: 512
+agent:
+  max_iterations: 7
+  chat_timeout: 90s
+  total_timeout: 20m
+  max_output_bytes: 4096
+  send_reasoning: false
+truncation:
+  command_output: 1
+  log_content: 2
+  tool_result: 3
+  nudge: 4
+otel:
+  enabled: true
+  endpoint: host:4317
+  service_name: svc
+output:
+  enabled: true
+  mode: always
+  search_max_matches: 7
+compaction:
+  enabled: true
+  threshold: 0.7
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	checks := []struct {
+		name string
+		got  any
+		want any
+	}{
+		{"vm.name", cfg.VM.Name, "my-vm"},
+		{"vm.disk", cfg.VM.Disk, "20G"},
+		{"vm.ram", cfg.VM.RAM, "4G"},
+		{"vm.cpu", cfg.VM.CPU, 2},
+		{"vm.image", cfg.VM.Image, "noble"},
+		{"model", cfg.Model, "org/model"},
+		{"prompt", cfg.Prompt, "do things"},
+		{"content_dir", cfg.ContentDir, ""},
+		{"llm.temperature", cfg.LLM.Temperature, 0.2},
+		{"llm.top_p", cfg.LLM.TopP, 0.9},
+		{"llm.top_k", cfg.LLM.TopK, 40},
+		{"llm.tool_choice", cfg.LLM.ToolChoice, "required"},
+		{"llm.context_window", cfg.LLM.ContextWindow, 8192},
+		{"llm.max_output_tokens", cfg.LLM.MaxOutputTokens, 512},
+		{"agent.max_iterations", cfg.Agent.MaxIterations, 7},
+		{"agent.max_output_bytes", cfg.Agent.MaxOutputBytes, 4096},
+		{"truncation.command_output", cfg.Truncation.CommandOutput, 1},
+		{"truncation.log_content", cfg.Truncation.LogContent, 2},
+		{"truncation.tool_result", cfg.Truncation.ToolResult, 3},
+		{"truncation.nudge", cfg.Truncation.Nudge, 4},
+		{"otel.enabled", cfg.Otel.Enabled, true},
+		{"otel.endpoint", cfg.Otel.Endpoint, "host:4317"},
+		{"otel.service_name", cfg.Otel.ServiceName, "svc"},
+		{"output.enabled", cfg.Output.Enabled, true},
+		{"output.mode", cfg.Output.Mode, "always"},
+		{"output.search_max_matches", cfg.Output.SearchMaxMatches, 7},
+		{"compaction.enabled", cfg.Compaction.Enabled, true},
+		{"compaction.threshold", cfg.Compaction.Threshold, 0.7},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s = %v want %v", c.name, c.got, c.want)
+		}
+	}
+	if got := cfg.Agent.Reasoning(); got {
+		t.Error("send_reasoning: false must be honoured")
+	}
+	if got := len(cfg.AllowedCommandsList()); got != 2 {
+		t.Errorf("allowed_commands has %d entries want 2", got)
+	}
+}

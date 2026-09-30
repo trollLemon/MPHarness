@@ -24,6 +24,16 @@ var (
 // The harness creates this path and transfers the local directory there before the agent starts.
 const VMContentDir = "/home/ubuntu/content"
 
+// OutputBaseDir is the host-side root for captured command output. One run owns
+// one subdirectory of it. The harness creates that subdirectory inside the VM
+// before the agent starts writing captures.
+const OutputBaseDir = "/tmp/mph-output"
+
+// OutputRunDir is the capture directory for one run.
+func OutputRunDir(runID string) string {
+	return OutputBaseDir + "/" + runID
+}
+
 // Agent defaults. Named so the help text in cmd/mph cannot drift from the values
 // applyDefaults actually installs.
 const (
@@ -44,6 +54,19 @@ const (
 	DefaultLogContentBytes    = 8000
 	DefaultToolResultBytes    = 4000
 	DefaultNudgeBytes         = 2000
+)
+
+// Output and compaction defaults. Copying this example unchanged gets current
+// behaviour plus the new features at their default settings.
+const (
+	DefaultOutputMaxCommandBytes = 64 * 1024 * 1024
+	DefaultOutputMaxTotalBytes   = 512 * 1024 * 1024
+	DefaultOutputSearchMatches   = 200
+
+	DefaultCompactionThreshold   = 0.8
+	DefaultCompactionMaxTokens   = 2048
+	DefaultCompactionMinMessages = 6
+	DefaultCompactionMaxAttempts = 3
 )
 
 // coreUtils is an array of the core utils commands, for when the user config specifies the meta command `coreUtils`.
@@ -131,8 +154,6 @@ type TruncationConfig struct {
 // Duration wraps time.Duration to support YAML string parsing like "60s", "10m".
 type Duration time.Duration
 
-func (d Duration) Duration() time.Duration { return time.Duration(d) }
-
 func (d Duration) MarshalYAML() (any, error) { return time.Duration(d).String(), nil }
 
 func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
@@ -165,6 +186,145 @@ type OtelConfig struct {
 	ResourceAttributes map[string]string `yaml:"resource_attributes"`
 }
 
+// Size is a byte count that reads as "64MiB" in YAML, following the Duration
+// precedent. It accepts "64MiB", "512MiB", "1GiB", a bare integer as bytes,
+// and the empty string as zero. 0 means "derive" for inline_max_size and
+// "disabled" for the caps.
+type Size int64
+
+func (s Size) MarshalYAML() (any, error) { return int64(s), nil }
+
+func (s *Size) UnmarshalYAML(node *yaml.Node) error {
+	var i int64
+	if err := node.Decode(&i); err == nil {
+		if i < 0 {
+			return fmt.Errorf("invalid size %d: must be >= 0", i)
+		}
+		*s = Size(i)
+		return nil
+	}
+	var str string
+	if err := node.Decode(&str); err != nil {
+		return fmt.Errorf("invalid size %q", node.Value)
+	}
+	str = strings.TrimSpace(str)
+	if str == "" {
+		*s = 0
+		return nil
+	}
+	if v, err := parseSize(str); err == nil {
+		*s = Size(v)
+		return nil
+	} else {
+		return err
+	}
+}
+
+func parseSize(s string) (int64, error) {
+	t := strings.TrimSpace(s)
+	if t == "" {
+		return 0, nil
+	}
+	i := 0
+	for i < len(t) && ((t[i] >= '0' && t[i] <= '9') || t[i] == '.') {
+		i++
+	}
+	if i == 0 {
+		return 0, fmt.Errorf("invalid size %q", s)
+	}
+	numStr := t[:i]
+	sufStr := strings.ToUpper(strings.TrimSpace(t[i:]))
+	var mult int64
+	switch sufStr {
+	case "", "B":
+		mult = 1
+	case "K", "KIB":
+		mult = 1024
+	case "KB":
+		mult = 1000
+	case "M", "MIB":
+		mult = 1024 * 1024
+	case "MB":
+		mult = 1000 * 1000
+	case "G", "GIB":
+		mult = 1024 * 1024 * 1024
+	case "GB":
+		mult = 1000 * 1000 * 1000
+	default:
+		return 0, fmt.Errorf("invalid size %q", s)
+	}
+	if strings.Contains(numStr, ".") {
+		var f float64
+		if _, err := fmt.Sscanf(numStr, "%f", &f); err != nil {
+			return 0, fmt.Errorf("invalid size %q", s)
+		}
+		if f < 0 {
+			return 0, fmt.Errorf("invalid size %q: must be >= 0", s)
+		}
+		return int64(f * float64(mult)), nil
+	}
+	var n int64
+	if _, err := fmt.Sscanf(numStr, "%d", &n); err != nil {
+		return 0, fmt.Errorf("invalid size %q", s)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("invalid size %q: must be >= 0", s)
+	}
+	return n * mult, nil
+}
+
+type OutputConfig struct {
+	Enabled          bool   `yaml:"enabled"`
+	Mode             string `yaml:"mode"`
+	InlineMaxSize    Size   `yaml:"inline_max_size"`
+	MaxCommandSize   Size   `yaml:"max_command_size"`
+	MaxTotalSize     Size   `yaml:"max_total_size"`
+	SearchMaxMatches int    `yaml:"search_max_matches"`
+}
+
+func (o OutputConfig) Validate() error {
+	if !o.Enabled {
+		return nil
+	}
+	if o.Mode != "auto" && o.Mode != "always" {
+		return fmt.Errorf("output.mode must be auto or always, got %q", o.Mode)
+	}
+	if o.SearchMaxMatches < 0 {
+		return fmt.Errorf("output.search_max_matches must be >= 0, got %d", o.SearchMaxMatches)
+	}
+	if int64(o.InlineMaxSize) < 0 || int64(o.MaxCommandSize) < 0 || int64(o.MaxTotalSize) < 0 {
+		return fmt.Errorf("output sizes must be >= 0")
+	}
+	return nil
+}
+
+type CompactionConfig struct {
+	Enabled          bool    `yaml:"enabled"`
+	Threshold        float64 `yaml:"threshold"`
+	MaxSummaryTokens int     `yaml:"max_summary_tokens"`
+	MinMessages      int     `yaml:"min_messages"`
+	MaxAttempts      int     `yaml:"max_attempts"`
+}
+
+func (c CompactionConfig) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if c.Threshold <= 0.5 || c.Threshold > 0.95 {
+		return fmt.Errorf("compaction.threshold must be in (0.5, 0.95], got %v", c.Threshold)
+	}
+	if c.MaxSummaryTokens <= 0 {
+		return fmt.Errorf("compaction.max_summary_tokens must be > 0, got %d", c.MaxSummaryTokens)
+	}
+	if c.MinMessages <= 0 {
+		return fmt.Errorf("compaction.min_messages must be > 0, got %d", c.MinMessages)
+	}
+	if c.MaxAttempts <= 0 {
+		return fmt.Errorf("compaction.max_attempts must be > 0, got %d", c.MaxAttempts)
+	}
+	return nil
+}
+
 type Config struct {
 	VM              VMConfig         `yaml:"vm"`
 	Model           string           `yaml:"model"`
@@ -175,6 +335,8 @@ type Config struct {
 	Agent           AgentConfig      `yaml:"agent"`
 	Truncation      TruncationConfig `yaml:"truncation"`
 	Otel            OtelConfig       `yaml:"otel"`
+	Output          OutputConfig     `yaml:"output"`
+	Compaction      CompactionConfig `yaml:"compaction"`
 }
 
 func (c Config) Validate() error {
@@ -186,6 +348,12 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.Prompt) == "" {
 		return ErrPromptRequired
+	}
+	if err := c.Output.Validate(); err != nil {
+		return err
+	}
+	if err := c.Compaction.Validate(); err != nil {
+		return err
 	}
 	if strings.TrimSpace(c.ContentDir) != "" {
 		cleaned := filepath.Clean(strings.TrimSpace(c.ContentDir))
@@ -200,21 +368,14 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// configRaw is defined at package level to avoid infinite recursion in
-// Config.UnmarshalYAML. Decoding directly into Config would re-enter this
-// method; decoding into an alias without the custom method breaks the cycle.
-// It also lets us decode allowed_commands as []string then convert to
-// map[string]bool.
+// plainConfig strips Config's methods so decoding into it does not re-enter
+// Config.UnmarshalYAML. Config.AllowedCommands is tagged `yaml:"-"`, so
+// inlining this does not collide with configRaw's own allowed_commands field.
+type plainConfig Config
+
 type configRaw struct {
-	VM              VMConfig         `yaml:"vm"`
-	Model           string           `yaml:"model"`
-	Prompt          string           `yaml:"prompt"`
-	AllowedCommands []string         `yaml:"allowed_commands"`
-	ContentDir      string           `yaml:"content_dir"`
-	LLM             LLMConfig        `yaml:"llm"`
-	Agent           AgentConfig      `yaml:"agent"`
-	Truncation      TruncationConfig `yaml:"truncation"`
-	Otel            OtelConfig       `yaml:"otel"`
+	plainConfig     `yaml:",inline"`
+	AllowedCommands []string `yaml:"allowed_commands"`
 }
 
 func (c *Config) UnmarshalYAML(node *yaml.Node) error {
@@ -222,15 +383,9 @@ func (c *Config) UnmarshalYAML(node *yaml.Node) error {
 	if err := node.Decode(&raw); err != nil {
 		return err
 	}
-	c.VM = raw.VM
-	c.Model = raw.Model
-	c.Prompt = raw.Prompt
+	*c = Config(raw.plainConfig)
 	c.AllowedCommands = normalizeAllowedCommands(raw.AllowedCommands)
-	c.ContentDir = strings.TrimSpace(raw.ContentDir)
-	c.LLM = raw.LLM
-	c.Agent = raw.Agent
-	c.Truncation = raw.Truncation
-	c.Otel = raw.Otel
+	c.ContentDir = strings.TrimSpace(c.ContentDir)
 	return nil
 }
 
@@ -285,6 +440,13 @@ func Parse(data []byte) (Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse yaml: %w", err)
 	}
+	var probe struct {
+		Output     map[string]yaml.Node `yaml:"output"`
+		Compaction map[string]yaml.Node `yaml:"compaction"`
+	}
+	_ = yaml.Unmarshal(data, &probe)
+	hasOutput := probe.Output != nil
+	hasCompaction := probe.Compaction != nil
 
 	if cfg.VM.Name == "" {
 		cfg.VM.Name = "mph-vm"
@@ -325,6 +487,63 @@ func Parse(data []byte) (Config, error) {
 	}
 	if cfg.Truncation.Nudge <= 0 {
 		cfg.Truncation.Nudge = DefaultNudgeBytes
+	}
+
+	if !hasOutput {
+		cfg.Output = OutputConfig{
+			Enabled: true, Mode: "auto",
+			MaxCommandSize: DefaultOutputMaxCommandBytes, MaxTotalSize: DefaultOutputMaxTotalBytes,
+			SearchMaxMatches: DefaultOutputSearchMatches,
+		}
+	} else {
+		// A present block without `enabled:` opts in; only an explicit
+		// `enabled: false` opts out.
+		if _, ok := probe.Output["enabled"]; !ok {
+			cfg.Output.Enabled = true
+		}
+		if cfg.Output.Mode == "" {
+			cfg.Output.Mode = "auto"
+		}
+		if int64(cfg.Output.MaxCommandSize) == 0 {
+			if _, ok := probe.Output["max_command_size"]; !ok {
+				cfg.Output.MaxCommandSize = DefaultOutputMaxCommandBytes
+			}
+		}
+		if int64(cfg.Output.MaxTotalSize) == 0 {
+			if _, ok := probe.Output["max_total_size"]; !ok {
+				cfg.Output.MaxTotalSize = DefaultOutputMaxTotalBytes
+			}
+		}
+		// An explicit 0 disables the cap, so only default an absent key.
+		if cfg.Output.SearchMaxMatches == 0 {
+			if _, ok := probe.Output["search_max_matches"]; !ok {
+				cfg.Output.SearchMaxMatches = DefaultOutputSearchMatches
+			}
+		}
+	}
+
+	if !hasCompaction {
+		cfg.Compaction = CompactionConfig{
+			Enabled: true, Threshold: DefaultCompactionThreshold,
+			MaxSummaryTokens: DefaultCompactionMaxTokens,
+			MinMessages:      DefaultCompactionMinMessages, MaxAttempts: DefaultCompactionMaxAttempts,
+		}
+	} else {
+		if _, ok := probe.Compaction["enabled"]; !ok {
+			cfg.Compaction.Enabled = true
+		}
+		if cfg.Compaction.Threshold == 0 {
+			cfg.Compaction.Threshold = DefaultCompactionThreshold
+		}
+		if cfg.Compaction.MaxSummaryTokens == 0 {
+			cfg.Compaction.MaxSummaryTokens = DefaultCompactionMaxTokens
+		}
+		if cfg.Compaction.MinMessages == 0 {
+			cfg.Compaction.MinMessages = DefaultCompactionMinMessages
+		}
+		if cfg.Compaction.MaxAttempts == 0 {
+			cfg.Compaction.MaxAttempts = DefaultCompactionMaxAttempts
+		}
 	}
 
 	if strings.TrimSpace(cfg.ContentDir) != "" {

@@ -4,11 +4,11 @@ vm:
   ram: 2G
   cpu: 1
   image: bionic
-model: unsloth/Ministral-3-14B-Instruct-2512-UD-Q4_K_XL
+model: unsloth/granite-4.0-350m-IQ4_XS
 allowed_commands:
-  - ls
-  - cat
-  - uname
+  - coreUtils
+  - sudo 
+  - apt 
 llm:
   temperature: 0.0
   top_p: 0.95
@@ -19,14 +19,8 @@ agent:
   chat_timeout: 300s
   total_timeout: 30m
 prompt: |
-  Inside the Multipass VM, do the following:
-  1. Run ls /etc
-  2. Run cat /etc/os-release
-  3. Run uname -a
-  Summarise the results.
-otel:
-  enabled: true
-  endpoint: localhost:4317
-  service_name: mph-smoke
-  resource_attributes:
-    environment: dev
+  Inside the Multipass VM, ensure apt is working by doing the following:
+  1. run apt --help and ensure it contains a help string
+  2. run sudo apt upgrade 
+  3. run sudo apt update
+  Output a summary of the test the results.

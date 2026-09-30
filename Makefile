@@ -6,7 +6,13 @@ GOFLAGS ?=
 
 OTEL_COMPOSE := testing/docker-compose.yaml
 
-.PHONY: all build vet test test-race test-cover test-verbose fmt tidy run clean help otel-up otel-down
+.PHONY: all build vet test test-cover test-verbose fmt tidy run clean help otel-up otel-down test-integration
+
+test-integration: build
+	sh scripts/integration-output.sh
+
+test-integration-compaction: build
+	sh scripts/integration-compaction.sh
 
 all: build
 
@@ -19,9 +25,6 @@ vet:
 
 test:
 	go test -count=1 -v ./...
-
-test-race:
-	go test -race -count=1  -v ./...
 
 test-cover:
 	go test -count=1 -coverprofile=coverage.out ./...
@@ -57,3 +60,5 @@ help:
 	@echo "  clean        - remove bin/ and coverage.out"
 	@echo "  otel-up      - start OTel LGTM stack (Grafana+Loki+Tempo+Prometheus)"
 	@echo "  otel-down    - stop OTel stack"
+	@echo "  test-integration - run chunking/compaction fixture (needs VM + model)"
+	@echo "  test-integration-compaction - run compaction fixture on tiny model (needs VM + model)"

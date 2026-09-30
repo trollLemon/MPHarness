@@ -9,9 +9,10 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/trollLemon/MPHarness/internal/config"
+	mphotel "github.com/trollLemon/MPHarness/internal/otel"
+	"github.com/trollLemon/MPHarness/internal/textutil"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -33,13 +34,6 @@ type Client struct {
 
 func getTracer() trace.Tracer {
 	return otel.Tracer("mph")
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…(truncated)"
 }
 
 func New(log zerolog.Logger) *Client {
@@ -68,9 +62,8 @@ func (c *Client) Info(ctx context.Context, name string) (string, error) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
-		c.log.Debug().Err(err).Str("vm", name).Str("output", msg).Msg("multipass info failed")
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+		c.log.Debug().Err(err).Str("vm", name).Str("out", msg).Msg("multipass info failed")
+		mphotel.FailSpan(span, err)
 		if isInstanceNotFound(msg) {
 			return "", fmt.Errorf("%w: %s", ErrInstanceNotFound, name)
 		}
@@ -116,9 +109,8 @@ func (c *Client) Launch(ctx context.Context, vm config.VMConfig) error {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
-		c.log.Debug().Err(err).Str("vm", vm.Name).Str("output", msg).Msg("failed to launch VM")
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+		c.log.Debug().Err(err).Str("vm", vm.Name).Str("out", msg).Msg("failed to launch VM")
+		mphotel.FailSpan(span, err)
 		return fmt.Errorf("%w: %s", ErrFailedToLaunch, msg)
 	}
 
@@ -140,22 +132,21 @@ func (c *Client) Exec(ctx context.Context, name string, command string, maxAttrB
 	ctx, span := getTracer().Start(ctx, "multipass.exec", trace.WithAttributes(
 		attribute.String("multipass.command", "exec"),
 		attribute.String("mph.vm.name", name),
-		attribute.String("mph.command", truncate(command, maxAttrBytes)),
+		attribute.String("mph.command", textutil.Truncate(command, maxAttrBytes)),
 	))
 	defer span.End()
 
 	execArgs := []string{"exec", name, "--", "bash", "-c", command}
 	span.SetAttributes(attribute.StringSlice("multipass.args", execArgs))
 
-	c.log.Info().Msgf("Running %s", command)
+	c.log.Debug().Str("vm", name).Str("cmd", command).Msgf("Running %s", command)
 
 	cmd := exec.CommandContext(ctx, c.bin, execArgs...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
-		c.log.Debug().Err(err).Str("vm", name).Str("command", command).Str("args", strings.Join(execArgs, ",")).Msg("multipass exec failed")
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+		c.log.Debug().Err(err).Str("vm", name).Str("cmd", command).Str("args", strings.Join(execArgs, ",")).Msg("multipass exec failed")
+		mphotel.FailSpan(span, err)
 		return "", fmt.Errorf("multipass exec %q %q failed: %w: %s", name, command, err, msg)
 	}
 
@@ -182,7 +173,7 @@ func (c *Client) Transfer(ctx context.Context, vmName, hostPath, vmDest string) 
 	))
 	defer span.End()
 
-	c.log.Info().Str("vm", vmName).Str("source", hostPath).Str("dest", vmDest).Msg("transferring content to VM")
+	c.log.Info().Str("vm", vmName).Str("src", hostPath).Str("dst", vmDest).Msg("transferring content to VM")
 
 	args := []string{"transfer", "--recursive", "--parents", hostPath, fmt.Sprintf("%s:%s", vmName, vmDest)}
 	span.SetAttributes(attribute.StringSlice("multipass.args", args))
@@ -191,13 +182,12 @@ func (c *Client) Transfer(ctx context.Context, vmName, hostPath, vmDest string) 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
-		c.log.Debug().Err(err).Str("vm", vmName).Str("source", hostPath).Str("dest", vmDest).Str("output", msg).Msg("multipass transfer failed")
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+		c.log.Debug().Err(err).Str("vm", vmName).Str("src", hostPath).Str("dst", vmDest).Str("out", msg).Msg("multipass transfer failed")
+		mphotel.FailSpan(span, err)
 		return fmt.Errorf("%w: %s", ErrTransferFailed, msg)
 	}
 
-	c.log.Info().Str("vm", vmName).Str("source", hostPath).Str("dest", vmDest).Msg("transfer complete")
+	c.log.Info().Str("vm", vmName).Str("src", hostPath).Str("dst", vmDest).Msg("transfer complete")
 	return nil
 }
 
@@ -227,9 +217,8 @@ func (c *Client) Delete(ctx context.Context, name string, purge bool) error {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
-		c.log.Debug().Err(err).Str("vm", name).Bool("purge", purge).Str("output", msg).Msg("multipass delete failed")
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+		c.log.Debug().Err(err).Str("vm", name).Bool("purge", purge).Str("out", msg).Msg("multipass delete failed")
+		mphotel.FailSpan(span, err)
 		return fmt.Errorf("multipass delete %q failed: %w: %s", name, err, msg)
 	}
 
