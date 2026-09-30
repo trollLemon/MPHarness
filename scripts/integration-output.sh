@@ -4,7 +4,7 @@
 set -eu
 
 BIN="${BIN:-bin/mph}"
-FIXTURE="${FIXTURE:-testing/chunking.yaml}"
+FIXTURE="${FIXTURE:-testing/output.yaml}"
 
 if [ ! -x "$BIN" ]; then
   echo "building $BIN..."
