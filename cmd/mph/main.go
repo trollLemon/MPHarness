@@ -83,7 +83,6 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "    enabled: true\n")
 	_, _ = fmt.Fprintf(w, "    threshold: 0.8      # fraction of context window, (0.5, 0.95]\n")
 	_, _ = fmt.Fprintf(w, "    max_summary_tokens: %d\n", config.DefaultCompactionMaxTokens)
-	_, _ = fmt.Fprintf(w, "    recent_turns: %d\n", config.DefaultCompactionRecentTurns)
 	_, _ = fmt.Fprintf(w, "    min_messages: %d\n", config.DefaultCompactionMinMessages)
 	_, _ = fmt.Fprintf(w, "    max_attempts: %d\n\n", config.DefaultCompactionMaxAttempts)
 	_, _ = fmt.Fprintf(w, "Example:\n")
@@ -144,18 +143,20 @@ func run() error {
 		return err
 	}
 
+	ctx := context.Background()
+
 	runID := uuid.NewV7().String()
 	otelCfg := resolveOtelConfig(cfg.Otel, otelEnabled, runID)
 
 	if otelCfg.Enabled {
-		shutdown, err := mphotel.Setup(otelCfg)
+		shutdown, err := mphotel.Setup(ctx, otelCfg)
 		if err != nil {
 			return fmt.Errorf("otel setup: %w", err)
 		}
 		defer func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
-			if err := shutdown(ctx); err != nil {
+			if err := shutdown(shutdownCtx); err != nil {
 				log.Warn().Err(err).Msg("otel flush/shutdown failed (some telemetry may be lost)")
 			} else {
 				log.Debug().Msg("otel flush/shutdown complete")
@@ -187,8 +188,6 @@ func run() error {
 		Msg("loaded config")
 	log.Debug().Strs("cmds", cfg.AllowedCommandsList()).Msg("allowed commands")
 
-	ctx := context.Background()
-
 	mp, err := agent.InitializeModelFiles(ctx, log.Logger, cfg.Model)
 	if err != nil {
 		return err
@@ -204,27 +203,21 @@ func run() error {
 		}
 	}()
 
-	llmCfg := agent.LLMConfig{
-		Temperature:     cfg.LLM.Temperature,
-		TopP:            cfg.LLM.TopP,
-		TopK:            cfg.LLM.TopK,
-		ToolChoice:      cfg.LLM.ToolChoice,
-		MaxOutputTokens: cfg.LLM.MaxOutputTokens,
-	}
-
-	agt := agent.NewAgent(
-		log.Logger,
-		krn,
-		cfg.Agent.MaxIterations,
-		time.Duration(cfg.Agent.ChatTimeout),
-		time.Duration(cfg.Agent.TotalTimeout),
-		llmCfg,
-		runID,
-	)
+	agt := agent.NewAgent(log.Logger, krn, agent.Options{
+		MaxIterations: cfg.Agent.MaxIterations,
+		ChatTimeout:   time.Duration(cfg.Agent.ChatTimeout),
+		TotalTimeout:  time.Duration(cfg.Agent.TotalTimeout),
+		LLM:           cfg.LLM,
+		RunID:         runID,
+	})
 
 	client := multipass.New(log.Logger)
 
-	return harness.Start(ctx, agt, client, cfg, ignoreExisting, keep, runID)
+	return harness.Start(ctx, agt, client, cfg, harness.Options{
+		IgnoreExisting: ignoreExisting,
+		Keep:           keep,
+		RunID:          runID,
+	})
 }
 
 func setupLogger(verbose, pretty bool) {
