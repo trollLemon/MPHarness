@@ -5,54 +5,55 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
 	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/trollLemon/MPHarness/internal/agent"
 	"github.com/trollLemon/MPHarness/internal/config"
 	"github.com/trollLemon/MPHarness/internal/multipass"
+	mphotel "github.com/trollLemon/MPHarness/internal/otel"
+	"github.com/trollLemon/MPHarness/internal/textutil"
 	"github.com/trollLemon/MPHarness/internal/validation"
 )
 
 var (
 	errInvalidInput      = errors.New("invalid input")
 	errVMShouldNotBeUsed = errors.New("VM already exists and shouldn't be used")
+	errPromptRead        = errors.New("could not read answer")
 )
-
-const outputBaseDir = "/tmp/mph-output"
-
-func OutputRunDir(runID string) string {
-	return outputBaseDir + "/" + runID
-}
 
 func outputRunDirCommands(runID string) []string {
 	// mkdir only: wiping the base dir here would delete live captures of
 	// concurrent runs sharing one VM.
 	return []string{
-		fmt.Sprintf("mkdir -p %q", OutputRunDir(runID)),
+		fmt.Sprintf("mkdir -p %q", config.OutputRunDir(runID)),
 	}
 }
 
-func determineIfExistingVMIsOK(name string) error {
-	reader := bufio.NewReader(os.Stdin)
+// promptExistingVM asks whether an existing VM may be reused. The reader is a
+// parameter so the retry loop keeps one buffered reader: a fresh bufio.Reader
+// per prompt discards everything the previous one read past the first newline,
+// so a piped retry answer would be lost.
+func promptExistingVM(r *bufio.Reader, w io.Writer, name string) error {
+	fmt.Fprintf(w, "VM with name %s already exists, continue with the current VM? [y/n] ", name)
 
-	fmt.Printf("VM with name %s already exists, continue with the current VM? [y/n] ", name)
-
-	input, err := reader.ReadString('\n')
+	input, err := r.ReadString('\n')
 	if err != nil {
-		fmt.Println("Error reading input:", err)
-		return nil
+		if !errors.Is(err, io.EOF) {
+			return fmt.Errorf("%w: %w", errPromptRead, err)
+		}
+		if strings.TrimSpace(input) == "" {
+			return fmt.Errorf("%w: no answer", errPromptRead)
+		}
 	}
 
-	input = strings.TrimSpace(strings.ToLower(input))
-
-	switch input {
+	switch strings.TrimSpace(strings.ToLower(input)) {
 	case "y", "yes":
 		return nil
 	case "n", "no":
@@ -62,14 +63,21 @@ func determineIfExistingVMIsOK(name string) error {
 	}
 }
 
-func Start(ctx context.Context, agt *agent.Agent, client *multipass.Client, cfg config.Config, ignoreExisting, keep bool, runID string) error {
+// Options carries the run flags that change VM lifecycle behaviour.
+type Options struct {
+	IgnoreExisting bool
+	Keep           bool
+	RunID          string
+}
+
+func Start(ctx context.Context, agt *agent.Agent, client *multipass.Client, cfg config.Config, opts Options) error {
 	tracer := otel.Tracer("mph")
 	ctx, span := tracer.Start(ctx, "mph.run", trace.WithAttributes(
 		attribute.String("mph.vm.name", cfg.VM.Name),
 		attribute.String("mph.model", cfg.Model),
-		attribute.String("mph.prompt", truncate(cfg.Prompt, cfg.Truncation.LogContent)),
-		attribute.Bool("mph.keep", keep),
-		attribute.Bool("mph.ignore_existing", ignoreExisting),
+		attribute.String("mph.prompt", textutil.Truncate(cfg.Prompt, cfg.Truncation.LogContent)),
+		attribute.Bool("mph.keep", opts.Keep),
+		attribute.Bool("mph.ignore_existing", opts.IgnoreExisting),
 		attribute.StringSlice("mph.allowed_commands", cfg.AllowedCommandsList()),
 		attribute.String("mph.content_dir", cfg.ContentDir),
 		attribute.String("mph.content.destination", config.VMContentDir),
@@ -88,23 +96,21 @@ func Start(ctx context.Context, agt *agent.Agent, client *multipass.Client, cfg 
 		))
 		err := client.Launch(cCtx, cfg.VM)
 		if err != nil {
-			cSpan.RecordError(err)
-			cSpan.SetStatus(codes.Error, err.Error())
+			mphotel.FailSpan(cSpan, err)
 		}
 		cSpan.End()
 		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			mphotel.FailSpan(span, err)
 			return err
 		}
 	case infoErr != nil:
 		err := fmt.Errorf("failed to check if VM exists: %w", infoErr)
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+		mphotel.FailSpan(span, err)
 		return err
-	case !ignoreExisting:
+	case !opts.IgnoreExisting:
+		reader := bufio.NewReader(os.Stdin)
 		for {
-			err := determineIfExistingVMIsOK(cfg.VM.Name)
+			err := promptExistingVM(reader, os.Stdout, cfg.VM.Name)
 			if err == nil {
 				break
 			}
@@ -113,29 +119,26 @@ func Start(ctx context.Context, agt *agent.Agent, client *multipass.Client, cfg 
 				continue
 			}
 
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			mphotel.FailSpan(span, err)
 			return err
 		}
 	}
 
-	if rid := strings.TrimSpace(runID); rid != "" {
+	if rid := strings.TrimSpace(opts.RunID); rid != "" {
 		for _, cmd := range outputRunDirCommands(rid) {
 			if _, err := client.Exec(ctx, cfg.VM.Name, cmd, cfg.Truncation.ToolResult); err != nil {
 				err = fmt.Errorf("output run dir setup failed: %w", err)
-				span.RecordError(err)
-				span.SetStatus(codes.Error, err.Error())
+				mphotel.FailSpan(span, err)
 				return err
 			}
 		}
-		span.SetAttributes(attribute.String("mph.output.dir", OutputRunDir(rid)))
+		span.SetAttributes(attribute.String("mph.output.dir", config.OutputRunDir(rid)))
 	}
 
 	if strings.TrimSpace(cfg.ContentDir) != "" {
 		if findings, scanErr := validation.ScanContentDir(cfg.ContentDir); scanErr != nil {
 			err := fmt.Errorf("content_dir scan failed: %w", scanErr)
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			mphotel.FailSpan(span, err)
 			return err
 		} else if len(findings) > 0 {
 			for _, f := range findings {
@@ -155,54 +158,40 @@ func Start(ctx context.Context, agt *agent.Agent, client *multipass.Client, cfg 
 			attribute.String("mph.content.destination", config.VMContentDir),
 		))
 		if _, err := client.Exec(cCtx, cfg.VM.Name, fmt.Sprintf("mkdir -p %q", config.VMContentDir), cfg.Truncation.ToolResult); err != nil {
-			cSpan.RecordError(err)
-			cSpan.SetStatus(codes.Error, err.Error())
+			mphotel.FailSpan(cSpan, err)
 			cSpan.End()
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			mphotel.FailSpan(span, err)
 			return err
 		}
 		if err := client.Transfer(cCtx, cfg.VM.Name, cfg.ContentDir, config.VMContentDir); err != nil {
-			cSpan.RecordError(err)
-			cSpan.SetStatus(codes.Error, err.Error())
+			mphotel.FailSpan(cSpan, err)
 			cSpan.End()
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			mphotel.FailSpan(span, err)
 			return err
 		}
 		cSpan.End()
 	}
 
 	if err := agt.Execute(ctx, cfg, client); err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+		mphotel.FailSpan(span, err)
 		return err
 	}
 
-	if !keep {
+	if !opts.Keep {
 		cCtx, cSpan := tracer.Start(ctx, "mph.vm.delete", trace.WithAttributes(
 			attribute.String("mph.vm.name", cfg.VM.Name),
 			attribute.Bool("mph.purge", true),
 		))
 		err := client.Delete(cCtx, cfg.VM.Name, true)
 		if err != nil {
-			cSpan.RecordError(err)
-			cSpan.SetStatus(codes.Error, err.Error())
+			mphotel.FailSpan(cSpan, err)
 		}
 		cSpan.End()
 		if err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
+			mphotel.FailSpan(span, err)
 			return err
 		}
 	}
 
 	return nil
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…(truncated)"
 }
