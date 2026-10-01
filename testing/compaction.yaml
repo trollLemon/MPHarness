@@ -19,7 +19,7 @@ agent:
   total_timeout: 30m
 compaction:
   enabled: true
-  threshold: 0.71
+  threshold: 0.51
   max_summary_tokens: 512
   min_messages: 6
   max_attempts: 3
