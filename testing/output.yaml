@@ -1,11 +1,13 @@
 # this test configuration has a large model use the context-friendly search feature to find test in a large search space. 
+run:
+    name: test-output-thingy 
 vm:
   name: mph-chunk
   disk: 10G
   ram: 2G
   cpu: 1
   image: bionic
-model: unsloth/Ministral-3-14B-Instruct-2512-UD-Q4_K_XL
+model: unsloth/Qwen3.8-27B-UD-Q8_K_XL
 allowed_commands:
   - coreUtils
   - grep

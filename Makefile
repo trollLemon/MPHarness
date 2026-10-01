@@ -4,15 +4,16 @@ VERSION ?= dev
 LDFLAGS := -X main.version=$(VERSION) -s -w
 GOFLAGS ?=
 
-OTEL_COMPOSE := testing/docker-compose.yaml
+OTEL_COMPOSE := docker-compose/docker-compose.yaml
+OTEL_PROJECT := mph-otel
 
-.PHONY: all build vet test test-cover test-verbose fmt tidy run clean help otel-up otel-down test-integration
+.PHONY: all build vet test test-cover test-verbose fmt tidy run clean help otel-up otel-down otel-reload-dashboards test-integration
 
 test-integration: build
-	sh scripts/integration-output.sh
+	sh testing/integration-output.sh
 
 test-integration-compaction: build
-	sh scripts/integration-compaction.sh
+	sh testing/integration-compaction.sh
 
 all: build
 
@@ -48,6 +49,15 @@ otel-up:
 otel-down:
 	docker compose -f $(OTEL_COMPOSE) down
 
+# Grafana persists provisioned dashboards in its data volume, so edits to
+# example_grafana/dashboards/ are not picked up until that volume is dropped.
+# Recreate only Grafana with a fresh volume; Prometheus/Loki/Tempo data is kept.
+otel-reload-dashboards:
+	docker compose -f $(OTEL_COMPOSE) rm -sf grafana
+	-docker volume rm $(OTEL_PROJECT)_grafana-data
+	docker compose -f $(OTEL_COMPOSE) up -d grafana
+	@echo "Grafana reloaded with fresh dashboards: http://localhost:3000 (admin/admin)"
+
 help:
 	@echo "Targets:"
 	@echo "  build        - build bin/$(BINARY) with version $(VERSION)"
@@ -60,5 +70,6 @@ help:
 	@echo "  clean        - remove bin/ and coverage.out"
 	@echo "  otel-up      - start OTel LGTM stack (Grafana+Loki+Tempo+Prometheus)"
 	@echo "  otel-down    - stop OTel stack"
+	@echo "  otel-reload-dashboards - recreate Grafana with a fresh volume to re-provision dashboards (keeps metrics)"
 	@echo "  test-integration - run chunking/compaction fixture (needs VM + model)"
 	@echo "  test-integration-compaction - run compaction fixture on tiny model (needs VM + model)"

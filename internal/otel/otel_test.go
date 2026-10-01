@@ -314,3 +314,17 @@ func TestPayloadKeysMatchEmittedKeys(t *testing.T) {
 		}
 	}
 }
+
+func TestSetupAddsRunNameResourceAttribute(t *testing.T) {
+	shutdown, err := Setup(t.Context(), Config{
+		Enabled:     true,
+		Endpoint:    DefaultEndpoint,
+		ServiceName: "mph-test",
+		RunID:       "baseline:01J9F2K3M4N5P6Q7R8S9T0V1W2",
+		RunName:     "baseline",
+	})
+	if err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	t.Cleanup(func() { _ = shutdown(t.Context()) })
+}

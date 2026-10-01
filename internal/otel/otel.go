@@ -56,6 +56,7 @@ type Config struct {
 	ServiceName        string
 	ResourceAttributes map[string]string
 	RunID              string
+	RunName            string
 }
 
 func Setup(ctx context.Context, cfg Config) (func(context.Context) error, error) {
@@ -81,6 +82,9 @@ func Setup(ctx context.Context, cfg Config) (func(context.Context) error, error)
 	}
 	if strings.TrimSpace(cfg.RunID) != "" {
 		attrs = append(attrs, attribute.String("service.instance.id", cfg.RunID))
+	}
+	if strings.TrimSpace(cfg.RunName) != "" {
+		attrs = append(attrs, attribute.String("mph.run.name", cfg.RunName))
 	}
 
 	res, err := resource.New(ctx,

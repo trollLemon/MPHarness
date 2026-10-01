@@ -17,6 +17,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/trollLemon/MPHarness/internal/config"
 	"github.com/trollLemon/MPHarness/internal/multipass"
@@ -937,10 +938,7 @@ func TestExecuteTagsMetricsWithRunID(t *testing.T) {
 	otel.SetMeterProvider(provider)
 	t.Cleanup(func() {
 		otel.SetMeterProvider(prev)
-		tokensHist, tpsHist, iterationsCounter = nil, nil, nil
-		toolDurationHist, toolCallsCounter, toolFailuresCounter = nil, nil, nil
-		contextWindowGauge, contextTokensGauge = nil, nil
-		compactionsCounter, compactionDurationHist, tokensReclaimedHist = nil, nil, nil
+		resetAgentMetrics()
 	})
 	mock := &mockKronk{
 		contextWidth: 32768,
@@ -953,6 +951,8 @@ func TestExecuteTagsMetricsWithRunID(t *testing.T) {
 		TotalTimeout:  5 * time.Second,
 		LLM:           defaultLLMConfig(),
 		RunID:         "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5",
+		RunLabel:      "baseline:0198f0c1-2a3b-7c4d-8e5f-60718293a4b5",
+		RunName:       "baseline",
 	})
 	conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
 	if err := agent.Execute(context.Background(), conf, multipass.New(zerolog.Nop())); err != nil {
@@ -964,13 +964,30 @@ func TestExecuteTagsMetricsWithRunID(t *testing.T) {
 		t.Fatalf("collect: %v", err)
 	}
 
+	// Level metrics are the run-wide lines: they must carry the run identity but
+	// no iteration, or a single level reads as one frozen line per iteration.
+	levelNames := map[string]bool{
+		"mph.context.window": true,
+		"mph.context.tokens": true,
+		"mph.run.duration":   true,
+		"mph.run.tokens":     true,
+		"mph.run.iterations": true,
+	}
+
 	seen := map[string]bool{}
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
 			seen[m.Name] = true
 			for _, set := range dataPointAttrs(m.Data) {
-				if v, ok := set.Value("mph.run.id"); ok {
-					t.Fatalf("metric %q must not carry mph.run.id, got %q", m.Name, v.AsString())
+				if _, ok := set.Value("mph.run.id"); !ok {
+					t.Errorf("metric %q must carry mph.run.id", m.Name)
+				}
+				if _, ok := set.Value("mph.run.name"); !ok {
+					t.Errorf("metric %q must carry mph.run.name", m.Name)
+				}
+				_, hasIteration := set.Value("mph.iteration")
+				if levelNames[m.Name] && hasIteration {
+					t.Errorf("level metric %q must not carry mph.iteration", m.Name)
 				}
 			}
 			if m.Name == "mph.context.window" || m.Name == "mph.context.tokens" {
@@ -978,11 +995,16 @@ func TestExecuteTagsMetricsWithRunID(t *testing.T) {
 					t.Errorf("metric %q must be Int64Gauge, got %T", m.Name, m.Data)
 				}
 			}
+			if m.Name == "mph.run.duration" {
+				if _, ok := m.Data.(metricdata.Gauge[float64]); !ok {
+					t.Errorf("metric %q must be Float64Gauge, got %T", m.Name, m.Data)
+				}
+			}
 		}
 	}
 
 	for _, name := range []string{
-		"mph.tokens", "mph.tokens_per_second", "mph.iterations",
+		"mph.agent.tokens", "mph.agent.tokens_per_second",
 		"mph.context.window", "mph.context.tokens",
 	} {
 		if !seen[name] {
@@ -990,7 +1012,7 @@ func TestExecuteTagsMetricsWithRunID(t *testing.T) {
 		}
 	}
 
-	if got := runSpanAttrs(withRunID(context.Background(), "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5")); len(got) == 0 {
+	if got := runSpanAttrs(withRunIdentity(context.Background(), "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5", "baseline")); len(got) == 0 {
 		t.Fatalf("runSpanAttrs must still carry mph.run.id on spans")
 	}
 }
@@ -1003,7 +1025,7 @@ func TestRunIDFromContext(t *testing.T) {
 		want string
 	}{
 		{"bare context yields empty", context.Background(), ""},
-		{"run id round-trips", withRunID(context.Background(), id), id},
+		{"run id round-trips", withRunIdentity(context.Background(), id, "baseline"), id},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1024,7 +1046,7 @@ func TestRunSpanAttrs(t *testing.T) {
 		wantRunID string
 	}{
 		{"omits run id when unset", context.Background(), []string{"mph.iteration"}, ""},
-		{"adds run id when set", withRunID(context.Background(), id), []string{"mph.iteration", "mph.run.id"}, id},
+		{"adds run id when set", withRunIdentity(context.Background(), id, "baseline"), []string{"mph.iteration", "mph.run.id"}, id},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1258,5 +1280,210 @@ func TestExecuteToolCallsEmitsOneResultEventPerCall(t *testing.T) {
 	}
 	if results != len(calls) {
 		t.Fatalf("want %d mph.agent.tool_result events, got %d", len(calls), results)
+	}
+}
+
+func TestRunAttrsCarriesIdentity(t *testing.T) {
+	ctx := withRunIdentity(t.Context(), "baseline:01J9", "baseline")
+
+	got := runAttrs(ctx, attribute.Int("mph.iteration", 3))
+
+	want := map[string]string{
+		"mph.run.id":    "baseline:01J9",
+		"mph.run.name":  "baseline",
+		"mph.iteration": "3",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("runAttrs() = %v, want %d attributes", got, len(want))
+	}
+	for _, kv := range got {
+		if want[string(kv.Key)] != kv.Value.String() {
+			t.Errorf("attribute %q = %q, want %q", kv.Key, kv.Value.String(), want[string(kv.Key)])
+		}
+	}
+}
+
+func TestRunAttrsWithoutIdentity(t *testing.T) {
+	if got := runAttrs(t.Context()); len(got) != 0 {
+		t.Errorf("runAttrs() with no identity = %v, want empty", got)
+	}
+}
+
+func TestEventAttrsAddsIteration(t *testing.T) {
+	ctx := withRunIdentity(t.Context(), "baseline:01J9", "baseline")
+	ctx = withIteration(ctx, 6) // zero-based; label must be 7
+
+	got := eventAttrs(ctx, attribute.String("mph.tool.name", "multipass_exec"))
+
+	var iteration string
+	var hasRun bool
+	for _, kv := range got {
+		switch string(kv.Key) {
+		case "mph.iteration":
+			iteration = kv.Value.String()
+		case "mph.run.id":
+			hasRun = true
+		}
+	}
+	if iteration != "7" {
+		t.Errorf("mph.iteration = %q, want %q (iteration labels are 1-based)", iteration, "7")
+	}
+	if !hasRun {
+		t.Error("eventAttrs() dropped the run id")
+	}
+}
+
+func TestEventAttrsWithoutIteration(t *testing.T) {
+	ctx := withRunIdentity(t.Context(), "baseline:01J9", "baseline")
+
+	for _, kv := range eventAttrs(ctx) {
+		if string(kv.Key) == "mph.iteration" {
+			t.Errorf("eventAttrs() without iteration context emitted %q", kv.Key)
+		}
+	}
+}
+
+func TestDurationBucketsCoverLongIterations(t *testing.T) {
+	// testing/longrun.yaml runs ~90s per iteration; OTel's default boundaries
+	// stop at 10s, which would put every observation in overflow.
+	const longrunIteration = 90.0
+	var covered bool
+	for _, b := range durationBuckets {
+		if b >= longrunIteration {
+			covered = true
+			break
+		}
+	}
+	if !covered {
+		t.Errorf("durationBuckets = %v, must include a boundary at or above %v seconds", durationBuckets, longrunIteration)
+	}
+}
+
+func TestTTFTBucketsCoverBothRegimes(t *testing.T) {
+	if ttftBuckets[0] > 0.01 {
+		t.Errorf("ttftBuckets = %v, want a sub-second first boundary for cached prefills", ttftBuckets)
+	}
+	if ttftBuckets[len(ttftBuckets)-1] < 120 {
+		t.Errorf("ttftBuckets = %v, want coverage to 120s", ttftBuckets)
+	}
+}
+
+func collectMetricNames(t *testing.T, rd sdkmetric.Reader) map[string]bool {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := rd.Collect(t.Context(), &rm); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	names := map[string]bool{}
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			names[m.Name] = true
+		}
+	}
+	return names
+}
+
+func TestRecordTokenUsageReadsPrefillAndCache(t *testing.T) {
+	rd := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(rd))
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(mp)
+	t.Cleanup(func() { otel.SetMeterProvider(prev) })
+	resetAgentMetrics()
+	t.Cleanup(resetAgentMetrics)
+	initAgentMetrics()
+
+	ctx := withRunIdentity(t.Context(), "baseline:01J9", "baseline")
+	ctx = withIteration(ctx, 2)
+
+	recordTokenUsage(ctx, &Agent{totals: runTotals{}}, trace.SpanFromContext(ctx), zerolog.Nop(), &model.Usage{
+		PromptTokens:            1200,
+		CompletionTokens:        300,
+		TotalTokens:             1500,
+		TokensPerSecond:         42.5,
+		TimeToFirstTokenMS:      850,
+		PromptTokensDetails:     model.PromptTokensDetails{CachedTokens: 900},
+		CompletionTokensDetails: model.CompletionTokensDetails{ReasoningTokens: 120},
+	})
+
+	found := collectMetricNames(t, rd)
+	for _, want := range []string{
+		"mph.agent.tokens",
+		"mph.model.prefill.ttft",
+		"mph.model.prefill.cached_tokens",
+		"mph.agent.reasoning.tokens",
+		"mph.agent.tokens_per_second",
+	} {
+		if !found[want] {
+			t.Errorf("metric %q was not recorded; got %v", want, found)
+		}
+	}
+}
+
+// A run that stops early has a lower a.iteration than the cap, so it must not
+// be labelled budget_exhausted even though the cap was reached in the sense of
+// "the loop would have run again".
+func TestRunOutcomeDistinguishesCleanFinishFromExhaustion(t *testing.T) {
+	tests := []struct {
+		name         string
+		maxIter      int
+		finishReason string
+		toolCalls    []model.ResponseToolCall
+		want         runOutcome
+	}{
+		{"clean finish below the cap", 5, model.FinishReasonStop, nil, outcomeOK},
+		{"clean finish on the last permitted iteration", 1, model.FinishReasonStop, nil, outcomeOK},
+		{"cap reached while still calling tools", 1, model.FinishReasonTool, []model.ResponseToolCall{
+			{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{Name: "multipass_info", Arguments: model.ToolCallArguments{}}},
+		}, outcomeBudgetExhausted},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockKronk{contextWidth: 32768, responses: []model.ChatResponse{
+				chatResp("", "", tt.finishReason, tt.toolCalls, &model.Usage{TotalTokens: 100}),
+			}}
+			a := NewAgent(zerolog.Nop(), mock, Options{
+				MaxIterations: tt.maxIter,
+				ChatTimeout:   time.Second,
+				TotalTimeout:  30 * time.Second,
+				LLM:           defaultLLMConfig(),
+				RunID:         "01J9",
+				RunLabel:      "baseline:01J9",
+				RunName:       "baseline",
+			})
+			rd := sdkmetric.NewManualReader()
+			mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(rd))
+			prev := otel.GetMeterProvider()
+			otel.SetMeterProvider(mp)
+			t.Cleanup(func() { otel.SetMeterProvider(prev) })
+			resetAgentMetrics()
+			t.Cleanup(resetAgentMetrics)
+
+			conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
+			if err := a.Execute(t.Context(), conf, multipass.New(zerolog.Nop())); err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+
+			var rm metricdata.ResourceMetrics
+			if err := rd.Collect(t.Context(), &rm); err != nil {
+				t.Fatalf("collect: %v", err)
+			}
+			var got runOutcome
+			for _, sm := range rm.ScopeMetrics {
+				for _, m := range sm.Metrics {
+					if m.Name != "mph.run.finished" {
+						continue
+					}
+					for _, dp := range m.Data.(metricdata.Gauge[int64]).DataPoints {
+						v, _ := dp.Attributes.Value("outcome")
+						got = runOutcome(v.AsString())
+					}
+				}
+			}
+			if got != tt.want {
+				t.Errorf("outcome = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
