@@ -77,7 +77,9 @@ type Agent struct {
 	chatTimeout   time.Duration    // Budget for one chat call; guards a stalled model.
 	totalTimeout  time.Duration    // Budget for the whole run; bounds every iteration.
 	llmConfig     config.LLMConfig // Sampling and output limits sent with each request.
-	runID         string           // Identifies this run in logs, spans, and output paths.
+	runID         string           // Bare uuid: the output directory name.
+	runLabel      string           // Composite <name>:<uuid>: spans and metrics.
+	runName       string           // Human-readable grouping label.
 
 	conversation       []model.D     // Full message history, including tool results.
 	toolDocs           []model.D     // Tool schemas sent alongside every request.
@@ -90,6 +92,7 @@ type Agent struct {
 	compactionsApplied int           // Compactions that succeeded this run.
 	toolResultBudget   int           // Byte cutoff between inline output and a handle.
 	done               bool          // Set when the agent should stop looping.
+	totals             runTotals     // Per-run aggregate for the run-end summary gauges.
 }
 
 // Options carries the per-run bounds NewAgent needs.
@@ -99,6 +102,8 @@ type Options struct {
 	TotalTimeout  time.Duration
 	LLM           config.LLMConfig
 	RunID         string
+	RunLabel      string
+	RunName       string
 }
 
 // NewAgent builds an Agent for a single run.
@@ -115,6 +120,9 @@ func NewAgent(log zerolog.Logger, krn Kronk, opts Options) *Agent {
 		totalTimeout:  opts.TotalTimeout,
 		llmConfig:     opts.LLM,
 		runID:         opts.RunID,
+		runLabel:      opts.RunLabel,
+		runName:       opts.RunName,
+		totals:        runTotals{ToolCalls: map[string]int{}, ToolFailures: map[string]int{}},
 	}
 }
 
@@ -122,11 +130,21 @@ func NewAgent(log zerolog.Logger, krn Kronk, opts Options) *Agent {
 // maxIterations, and returns the first error that aborts the run. It owns the
 // iteration loop, compacting the context before each round, and prints the
 // final command output or assistant answer when the loop ends.
-func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *multipass.Client) error {
+func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *multipass.Client) (err error) {
+	start := time.Now()
+	defer func() {
+		// The loop below ends either because the agent finished or because it ran
+		// out of iterations. Reaching the cap is not exhausted on its own: a
+		// clean finish that happens to land on the last permitted iteration also
+		// leaves iteration == maxIterations.
+		exhausted := a.iteration >= a.maxIterations && !a.done
+		a.recordRunSummary(ctx, a.totals, classifyOutcome(ctx, err, exhausted), time.Since(start))
+	}()
+
 	ctx, cancel := context.WithTimeout(ctx, a.totalTimeout)
 	defer cancel()
 
-	ctx = withRunID(ctx, a.runID)
+	ctx = withRunIdentity(ctx, a.runLabel, a.runName)
 
 	a.toolDocs = buildToolDocuments(conf)
 	a.conversation = buildInitialConversation(conf)
@@ -147,6 +165,7 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *multipass.
 		if err := a.runIteration(ctx, cli, conf); err != nil {
 			return err
 		}
+		a.totals.Iterations++
 	}
 
 	if len(a.commandOutputs) > 0 {
@@ -176,9 +195,9 @@ func (a *Agent) runIteration(ctx context.Context, cli *multipass.Client, conf co
 
 	iterCtx, iterSpan := getAgentTracer().Start(ctx, "mph.agent.iteration",
 		trace.WithAttributes(runSpanAttrs(ctx, attribute.Int("mph.iteration", iter+1))...))
-	if iterationsCounter != nil {
-		iterationsCounter.Add(iterCtx, 1, metric.WithAttributes(attribute.Int("mph.iteration", iter+1)))
-	}
+	iterCtx = withIteration(iterCtx, iter)
+	iterStart := time.Now()
+	defer func() { recordIterationDuration(iterCtx, time.Since(iterStart)) }()
 
 	iterLog := a.log.With().Ctx(iterCtx).Logger()
 
@@ -193,7 +212,7 @@ func (a *Agent) runIteration(ctx context.Context, cli *multipass.Client, conf co
 
 	// The reported usage is the measurement; anything this turn appends on top
 	// of it is tallied by addToolTokens below.
-	recordTokenUsage(iterCtx, iterSpan, iterLog, resp.Usage)
+	recordTokenUsage(iterCtx, a, iterSpan, iterLog, resp.Usage)
 	a.contextTokens = 0
 	if resp.Usage != nil {
 		a.contextTokens = int64(resp.Usage.TotalTokens)
@@ -278,7 +297,7 @@ func (a *Agent) addToolTokens(ctx context.Context, msgs []model.D) {
 	}
 	a.contextTokens += added
 	if contextTokensGauge != nil {
-		contextTokensGauge.Record(ctx, a.contextTokens)
+		contextTokensGauge.Record(ctx, a.contextTokens, metric.WithAttributes(runAttrs(ctx)...))
 	}
 }
 
@@ -312,7 +331,14 @@ func (a *Agent) callChat(ctx context.Context, req model.D, iter int) (model.Chat
 	callCtx, callCancel := context.WithTimeout(ctx, a.chatTimeout)
 	defer callCancel()
 
+	callCtx = mphotel.InjectTracing(callCtx, getAgentTracer(),
+		eventAttrs(ctx, attribute.Int("mph.iteration", iter+1))...)
+
+	start := time.Now()
 	resp, err := a.krn.Chat(callCtx, req)
+	if chatDurationHist != nil {
+		chatDurationHist.Record(callCtx, time.Since(start).Seconds(), metric.WithAttributes(eventAttrs(callCtx)...))
+	}
 	if err != nil {
 		return model.ChatResponse{}, fmt.Errorf("kronk chat iteration %d: %w", iter+1, err)
 	}
@@ -404,8 +430,10 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg
 			})
 			content = buildToolErrorContent(err)
 			if toolFailuresCounter != nil {
-				toolFailuresCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("mph.tool.name", tc.Function.Name)))
+				toolFailuresCounter.Add(ctx, 1, metric.WithAttributes(eventAttrs(ctx,
+					attribute.String("mph.tool.name", tc.Function.Name))...))
 			}
+			a.totals.ToolFailures[tc.Function.Name]++
 		case isToolEnvelope(result):
 			if isCaptureEnvelope(result) {
 				if id := capturedOutputID(result); id != "" {
@@ -437,13 +465,14 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg
 		))
 
 		if toolCallsCounter != nil {
-			toolCallsCounter.Add(ctx, 1, metric.WithAttributes(attribute.String("mph.tool.name", tc.Function.Name)))
+			toolCallsCounter.Add(ctx, 1, metric.WithAttributes(eventAttrs(ctx,
+				attribute.String("mph.tool.name", tc.Function.Name))...))
 		}
+		a.totals.ToolCalls[tc.Function.Name]++
 		if toolDurationHist != nil {
-			toolDurationHist.Record(ctx, duration.Seconds(), metric.WithAttributes(
+			toolDurationHist.Record(ctx, duration.Seconds(), metric.WithAttributes(eventAttrs(ctx,
 				attribute.String("mph.tool.name", tc.Function.Name),
-				attribute.String("mph.tool.status", status),
-			))
+				attribute.String("mph.tool.status", status))...))
 		}
 
 		toolResponses = append(toolResponses, buildToolResponseMessage(tc, content))

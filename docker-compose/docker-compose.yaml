@@ -1,3 +1,6 @@
+# Local development observability stack for mph. Not a deployment: it has no
+# authentication beyond Grafana's admin/admin, no TLS, and deletes nothing on
+# its own. See example_grafana/README.md.
 name: mph-otel
 
 services:
@@ -82,9 +85,9 @@ services:
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       GF_FEATURE_TOGGLES_ENABLE: traceToLogs
     volumes:
-      - ./grafana/provisioning/datasources/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
-      - ./grafana/provisioning/dashboards/dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml:ro
-      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+      - ../example_grafana/provisioning/datasources/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
+      - ../example_grafana/provisioning/dashboards/dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml:ro
+      - ../example_grafana/dashboards:/etc/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
     ports:
       - "3000:3000"

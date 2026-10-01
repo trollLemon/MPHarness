@@ -127,6 +127,11 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) string {
 		trace.WithAttributes(runSpanAttrs(ctx, attribute.Int("mph.iteration", a.iteration+1))...))
 	defer compSpan.End()
 
+	// eventAttrs reads the iteration from ctx, and compCtx is about to become
+	// the summarizer's chat context, so the labelled tracer has to be built
+	// from the caller's context rather than the derived one.
+	compCtx = mphotel.InjectTracing(compCtx, getAgentTracer(), eventAttrs(ctx)...)
+
 	start := time.Now()
 	summarizer := &agentSummarizer{krn: a.krn, chatTimeout: a.chatTimeout}
 	estimate := func(s string) int { return a.estimateTokens(compCtx, s) }
@@ -164,10 +169,12 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) string {
 		"try":       a.compactionAttempts + 1, "dur_ms": duration.Milliseconds(),
 	})
 	if compactionsCounter != nil {
-		compactionsCounter.Add(compCtx, 1, metric.WithAttributes(attribute.String("mph.context.compaction.outcome", outcome)))
+		compactionsCounter.Add(compCtx, 1, metric.WithAttributes(eventAttrs(compCtx,
+			attribute.String("mph.context.compaction.outcome", outcome))...))
 	}
 	if compactionDurationHist != nil {
-		compactionDurationHist.Record(compCtx, float64(duration.Milliseconds()), metric.WithAttributes(attribute.String("mph.context.compaction.outcome", outcome)))
+		compactionDurationHist.Record(compCtx, duration.Seconds(), metric.WithAttributes(eventAttrs(compCtx,
+			attribute.String("mph.context.compaction.outcome", outcome))...))
 	}
 
 	switch outcome {
@@ -175,10 +182,10 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) string {
 		// Rewriting history invalidates the inference prefix cache. Accepted:
 		// one re-prefill of a small prompt buys back thousands of tokens.
 		if tokensReclaimedHist != nil {
-			tokensReclaimedHist.Record(compCtx, before-after)
+			tokensReclaimedHist.Record(compCtx, before-after, metric.WithAttributes(eventAttrs(compCtx)...))
 		}
 		if contextTokensGauge != nil {
-			contextTokensGauge.Record(compCtx, after)
+			contextTokensGauge.Record(compCtx, after, metric.WithAttributes(runAttrs(compCtx)...))
 		}
 		a.compactionsApplied++
 		// A compaction that worked proves the summarizer and handover are

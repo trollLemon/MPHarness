@@ -41,3 +41,9 @@ mph.yaml
 
 # graphify
 graphify-out/
+
+# Local scratch notes
+notes/
+
+# Superpowers design specs (drafts, reviewed before committing)
+docs/superpowers/

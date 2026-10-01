@@ -35,6 +35,8 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "Flags:\n")
 	flag.PrintDefaults()
 	_, _ = fmt.Fprintf(w, "\nConfig YAML keys:\n")
+	_, _ = fmt.Fprintf(w, "  run:\n")
+	_, _ = fmt.Fprintf(w, "    name: my-run        # optional, label for this run in metrics/traces; default MPH_RUN_NAME, vm.name, or mph\n")
 	_, _ = fmt.Fprintf(w, "  vm:\n")
 	_, _ = fmt.Fprintf(w, "    name: mph-vm        # optional, default mph-vm\n")
 	_, _ = fmt.Fprintf(w, "    disk: 20G\n")
@@ -145,8 +147,8 @@ func run() error {
 
 	ctx := context.Background()
 
-	runID := uuid.NewV7().String()
-	otelCfg := resolveOtelConfig(cfg.Otel, otelEnabled, runID)
+	ident := newRunIdentity(cfg.Run, cfg.VM.Name)
+	otelCfg := resolveOtelConfig(cfg.Otel, otelEnabled, ident.Label, ident.Name)
 
 	if otelCfg.Enabled {
 		shutdown, err := mphotel.Setup(ctx, otelCfg)
@@ -208,7 +210,9 @@ func run() error {
 		ChatTimeout:   time.Duration(cfg.Agent.ChatTimeout),
 		TotalTimeout:  time.Duration(cfg.Agent.TotalTimeout),
 		LLM:           cfg.LLM,
-		RunID:         runID,
+		RunID:         ident.ID,
+		RunLabel:      ident.Label,
+		RunName:       ident.Name,
 	})
 
 	client := multipass.New(log.Logger)
@@ -216,7 +220,7 @@ func run() error {
 	return harness.Start(ctx, agt, client, cfg, harness.Options{
 		IgnoreExisting: ignoreExisting,
 		Keep:           keep,
-		RunID:          runID,
+		RunID:          ident.ID,
 	})
 }
 
@@ -244,7 +248,32 @@ func setupLogger(verbose, pretty bool) {
 	log.Logger = zerolog.New(os.Stdout).With().Timestamp().Caller().Logger()
 }
 
-func resolveOtelConfig(yamlCfg config.OtelConfig, flagEnabled bool, runID string) mphotel.Config {
+// runIdentity splits one run's identity into the three forms the codebase
+// needs: a bare uuid for output paths (a composite containing ":" would be an
+// invalid path), a self-describing composite for telemetry, and the bare
+// human-readable name.
+type runIdentity struct {
+	ID    string
+	Label string
+	Name  string
+}
+
+func resolveRunName(yamlName, envName, vmName string) string {
+	for _, candidate := range []string{yamlName, envName, vmName} {
+		if name := strings.TrimSpace(candidate); name != "" {
+			return name
+		}
+	}
+	return "mph"
+}
+
+func newRunIdentity(yamlCfg config.RunConfig, vmName string) runIdentity {
+	name := resolveRunName(yamlCfg.Name, os.Getenv("MPH_RUN_NAME"), vmName)
+	id := uuid.NewV7().String()
+	return runIdentity{ID: id, Label: name + ":" + id, Name: name}
+}
+
+func resolveOtelConfig(yamlCfg config.OtelConfig, flagEnabled bool, runID, runName string) mphotel.Config {
 	enabled := yamlCfg.Enabled
 	if flagEnabled || isEnvTrue(os.Getenv("MPH_OTEL")) {
 		enabled = true
@@ -272,6 +301,7 @@ func resolveOtelConfig(yamlCfg config.OtelConfig, flagEnabled bool, runID string
 		ServiceName:        serviceName,
 		ResourceAttributes: yamlCfg.ResourceAttributes,
 		RunID:              runID,
+		RunName:            runName,
 	}
 }
 

@@ -21,6 +21,16 @@ import (
 	"github.com/trollLemon/MPHarness/internal/output"
 )
 
+func resetAgentMetrics() {
+	contextTokensGauge, contextWindowGauge = nil, nil
+	iterationDurationHist, chatDurationHist, prefillTTFTHist = nil, nil, nil
+	prefillCachedHist, agentTokensHist, reasoningTokensHist, tpsHist = nil, nil, nil, nil
+	toolDurationHist, toolCallsCounter, toolFailuresCounter = nil, nil, nil
+	compactionsCounter, compactionDurationHist, tokensReclaimedHist = nil, nil, nil
+	runDurationGauge, runTokensGauge, runIterationsGauge = nil, nil, nil
+	runToolCallsGauge, runToolFailuresGauge, runCompactionsGauge, runFinishedGauge = nil, nil, nil, nil
+}
+
 func newManualReader(t *testing.T) *sdkmetric.ManualReader {
 	t.Helper()
 	reader := sdkmetric.NewManualReader()
@@ -29,10 +39,7 @@ func newManualReader(t *testing.T) *sdkmetric.ManualReader {
 	otel.SetMeterProvider(provider)
 	t.Cleanup(func() {
 		otel.SetMeterProvider(prev)
-		tokensHist, tpsHist, iterationsCounter = nil, nil, nil
-		toolDurationHist, toolCallsCounter, toolFailuresCounter = nil, nil, nil
-		contextWindowGauge, contextTokensGauge = nil, nil
-		compactionsCounter, compactionDurationHist, tokensReclaimedHist = nil, nil, nil
+		resetAgentMetrics()
 	})
 	return reader
 }
@@ -541,5 +548,68 @@ func TestCompactionAppliesBeforeWindowIsExceeded(t *testing.T) {
 				t.Fatalf("no compaction applied; handovers=%d", countHandovers(mock.mockKronk))
 			}
 		})
+	}
+}
+
+// slowSummarizerKronk makes the summarizer's chat call take measurable time, so
+// a compaction that lands in the histogram is large enough to tell seconds from
+// milliseconds.
+type slowSummarizerKronk struct {
+	*mockKronk
+}
+
+func (s *slowSummarizerKronk) Chat(ctx context.Context, req model.D) (model.ChatResponse, error) {
+	if isCompactionRequest(req) {
+		time.Sleep(50 * time.Millisecond)
+		return chatResp("work summary", "", model.FinishReasonStop, nil, nil), nil
+	}
+	return s.mockKronk.Chat(ctx, req)
+}
+
+// The compaction histogram is named without a unit, so a surviving query that
+// still expects milliseconds would read 1000x wrong instead of failing.
+func TestCompactionDurationIsRecordedInSeconds(t *testing.T) {
+	reader := newManualReader(t)
+	initAgentMetrics()
+
+	big := strings.Repeat("s", 4000)
+	mock := &slowSummarizerKronk{mockKronk: &mockKronk{contextWidth: 8192, responses: []model.ChatResponse{
+		bigToolStep(big, 7500), chatResp("final", "", model.FinishReasonStop, nil, &model.Usage{TotalTokens: 800}),
+	}}}
+	agent := NewAgent(zerolog.Nop(), mock, Options{
+		MaxIterations: 3, ChatTimeout: time.Second, TotalTimeout: 30 * time.Second,
+		LLM: defaultLLMConfig(), RunID: "run-compact-seconds", RunLabel: "baseline:run-compact-seconds", RunName: "baseline",
+	})
+	conf := config.Config{
+		VM:         config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
+		Prompt:     "task",
+		Compaction: enabledCompaction(),
+	}
+	if err := agent.Execute(context.Background(), conf, multipass.New(zerolog.Nop())); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	var found bool
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "mph.context.compaction.duration" {
+				continue
+			}
+			found = true
+			for _, dp := range m.Data.(metricdata.Histogram[float64]).DataPoints {
+				// The summarizer sleeps 50ms, so seconds land near 0.05 and
+				// milliseconds land near 50.
+				if dp.Sum > 5 {
+					t.Errorf("mph.context.compaction.duration sum = %v, too large to be seconds; the unit looks like milliseconds", dp.Sum)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("mph.context.compaction.duration was never recorded")
 	}
 }

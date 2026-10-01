@@ -64,7 +64,7 @@ The third column is `mphotel.DefaultEndpoint` / `DefaultServiceName`, applied in
 
 ## 2. The observability stack
 
-`testing/` holds a Compose stack that receives everything `mph` emits, so you get a UI without wiring a collector yourself.
+`docker-compose/` holds a Compose stack that receives everything `mph` emits, so you get a UI without wiring a collector yourself. Grafana examples and provisioning live in `example_grafana/`; test inputs and integration scripts live in `testing/`.
 
 ```bash
 make otel-up    # start the stack
@@ -82,7 +82,7 @@ mph ──OTLP/gRPC :4317──▶ otel-collector
                            └── metrics ─▶ Prometheus ┘
 ```
 
-`testing/collector-config.yaml` routes each signal that way and also prints everything to the collector's own stdout via the `debug` exporter, which is the fastest way to confirm data is arriving before worrying about a UI.
+`docker-compose/collector-config.yaml` routes each signal that way and also prints everything to the collector's own stdout via the `debug` exporter, which is the fastest way to confirm data is arriving before worrying about a UI.
 
 Tempo replaced Jaeger here. Grafana's Jaeger datasource sends the search window in milliseconds while Jaeger's API expects microseconds, so every search resolved to 1970 and returned nothing at all, with no error to explain it.
 
@@ -98,23 +98,23 @@ Tempo replaced Jaeger here. Grafana's Jaeger datasource sends the search window 
 
 ### Dashboard
 
-`testing/grafana/dashboards/mph-otel.json` is provisioned automatically on start, so the **MPH OTel** dashboard is in Grafana as soon as the stack is up.
+`example_grafana/dashboards/mph-otel.json` is provisioned automatically on start, so the **MPHarness - OTel (Metrics / Logs / Traces)** dashboard is in Grafana as soon as the stack is up.
 
-It is laid out in rows so a row is useful before the one below it has data:
+The **Run** selector scopes the summary, per-iteration timing and tokens,
+context, tools, and narrative panels to one run. The comparison row retains
+all runs in the selected time range. Run IDs combine the run name and UUID,
+so repeated runs with the same name stay distinct.
 
-1. **Run summary** — tool calls, tool failures, tool duration p95, average tokens/sec for the selected range
-2. **Agent metrics** — token usage, iterations, and per-tool counts and durations
-3. **Per run totals** — a table with one row per run id: tokens, iterations, tool calls, context used
-4. **Per run over time** — one line per run id for each of those metrics
-5. **OTel collector** — points accepted per interval, and export failures (which should stay at zero)
-6. **Logs** — all lines, per-interval counts by level, warnings and errors, and lines with trace correlation
-7. **Traces** — TraceQL search against Tempo
+**Context over time** is an XY line plot with a time axis fitted to the run's
+recorded samples. Samples at and after the first observed completion marker
+are excluded, at scrape resolution, so the chart does not extend toward
+“now” after completion. Select a time range containing the run to see its
+history. Token counts remain available, but there are no pricing controls or
+monetary cost calculations in the dashboard or application.
 
-There are deliberately **no dashboard variables**: every panel shows all runs in the selected time range, so nothing is hidden behind a filter that silently matches nothing. The rules the panels follow:
-
-- A per-run line **ends with its run** rather than running on flat. Raw counters are drawn as-is with `spanNulls: false`, so a finished run simply stops.
-- A counter that can only climb is drawn as a **burst** instead: tokens are shown as `increase(...)` per interval, so a run reads as a hump that returns to zero once it stops working.
-- **Cumulative totals live in the table**, not on a line, because a cumulative line freezes every finished run at its final value and a wall of those is unreadable.
+**Run traces** displays Tempo search results as a table. Click a trace ID to
+open the waterfall in Explore. A search result is not a single trace and
+cannot be rendered directly by Grafana's `traces` visualization.
 
 ### Searching traces by hand
 
@@ -126,18 +126,21 @@ curl -sG http://localhost:3200/api/search \
   --data-urlencode "start=$(( $(date +%s) - 3600 ))" --data-urlencode "end=$(date +%s)"
 ```
 
-TraceQL has to match against **flushed blocks**, not just live data, so `testing/tempo.yaml` sets `storage.trace.block.version: vParquet4`; without it a query that works while a run is in flight returns nothing afterwards.
+TraceQL has to match against **flushed blocks**, not just live data, so `docker-compose/tempo.yaml` sets `storage.trace.block.version: vParquet4`; without it a query that works while a run is in flight returns nothing afterwards.
 
-`testing/docker-compose.lgtm.yaml` is an alternative single-image `otel-lgtm` stack for when the five-service version is more than you need.
+`docker-compose/docker-compose.lgtm.yaml` is an alternative single-image `otel-lgtm` stack for when the five-service version is more than you need.
 
 ### Data retention
 
-The three stateful services use named volumes — `loki-data`, `prometheus-data`, and `grafana-data` — so `make otel-down` and `make otel-up` keeps your logs and dashboards. Metrics live only as long as Prometheus's retention window; traces are ephemeral by design, since they are meant to be read while a run is in flight.
+The four stateful services use named volumes — `loki-data`, `prometheus-data`,
+`grafana-data`, and `tempo-data` — so `make otel-down` and `make otel-up`
+preserve their data, subject to each backend's retention settings.
 
-To wipe everything and start clean:
+To wipe only this stack's stored data and start clean:
 
 ```bash
-docker compose -f testing/docker-compose.yaml --profile none down -v
+docker compose -f docker-compose/docker-compose.yaml down --volumes
+make otel-up
 ```
 
 ## 3. Smoke test
@@ -155,7 +158,9 @@ Then:
 - Grafana on <http://localhost:3000> — the **MPH OTel** dashboard, or Explore → Tempo/Loki/Prometheus
 - The trace shape to expect is `mph.run` → `mph.vm.create` / `multipass.launch` → `mph.agent.iteration` × N (with `mph.agent.tool_call` / `tool_result` events and a `multipass.exec` child per command) → `mph.vm.delete`
 
-`mph.run.id` is a UUID on every span and event, so one run can be picked out of a shared dashboard; metrics carry the run as the `service.instance.id` resource instead. Logs carry `trace_id` and `span_id`, so a log line links back to the trace it belongs to.
+`mph.run.id` identifies the run on spans and metrics (exposed as `mph_run_id`
+in Prometheus). Logs carry `trace_id` and `span_id`, so a log line links back
+to the trace it belongs to.
 
 Model replies land in Loki under the body `model output`, split by `part` (`content` or `reasoning`) with the payload in `text`. Nothing is logged for an iteration that produced neither, which is normal for a turn that is only a tool call.
 
@@ -184,7 +189,9 @@ Check 1 is the one that matters most: it is what proves the default-off promise,
 ./bin/mph ./testing/longrun.yaml
 ```
 
-It uses a separate VM name (`mph-longrun`) and `service_name` (`mph-longrun`), so it never collides with the smoke test. Both land on the same unfiltered dashboard, so pick a run out of the **Per run totals** table rather than filtering panels.
+It uses a separate VM name (`mph-longrun`) and `service_name` (`mph-longrun`).
+Both land on the same dashboard; use the **Run** selector for details and
+the **All runs** table for comparison.
 
 ### If the trace panel looks empty
 
@@ -210,7 +217,7 @@ Any value of `0` or less is replaced by the default in `config.DefaultCommandOut
 
 - `mph -k ./testing/test.yaml` keeps the VM after the run for inspection.
 - `--pretty` gives readable console logs alongside the OTLP export, which is usually enough to diagnose without opening Grafana.
-- Nothing arriving at all? `docker compose -f testing/docker-compose.yaml logs otel-collector` shows the `debug` exporter output.
+- Nothing arriving at all? `docker compose -f docker-compose/docker-compose.yaml logs otel-collector` shows the `debug` exporter output.
 - Traces look empty? The exporter batches for ~5s, so give it a moment after the run finishes.
 - Check the receiver is up before suspecting `mph`: `ss -ltnp | grep 4317`.
 - OTel SDK debug: `OTEL_LOG_LEVEL=debug` shows exporter retries; `OTEL_SDK_DISABLED=true` forces the whole thing off.
