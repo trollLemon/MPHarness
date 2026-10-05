@@ -124,7 +124,7 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) string {
 	}
 
 	compCtx, compSpan := getAgentTracer().Start(ctx, "mph.context.compaction",
-		trace.WithAttributes(runSpanAttrs(ctx, attribute.Int("mph.iteration", a.iteration+1))...))
+		trace.WithAttributes(mphotel.RunSpanAttrs(ctx, attribute.Int("mph.iteration", a.iteration+1))...))
 	defer compSpan.End()
 
 	// eventAttrs reads the iteration from ctx, and compCtx is about to become
@@ -181,11 +181,12 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) string {
 	case "applied":
 		// Rewriting history invalidates the inference prefix cache. Accepted:
 		// one re-prefill of a small prompt buys back thousands of tokens.
+		a.totals.ReclaimedTokens += before - after
 		if tokensReclaimedHist != nil {
 			tokensReclaimedHist.Record(compCtx, before-after, metric.WithAttributes(eventAttrs(compCtx)...))
 		}
 		if contextTokensGauge != nil {
-			contextTokensGauge.Record(compCtx, after, metric.WithAttributes(runAttrs(compCtx)...))
+			contextTokensGauge.Record(compCtx, after, metric.WithAttributes(mphotel.RunAttrs(compCtx)...))
 		}
 		a.compactionsApplied++
 		// A compaction that worked proves the summarizer and handover are

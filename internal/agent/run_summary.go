@@ -7,6 +7,8 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+
+	mphotel "github.com/trollLemon/MPHarness/internal/otel"
 )
 
 // runOutcome is the single terminal state of a run. It is recorded once, on
@@ -37,6 +39,9 @@ func classifyOutcome(ctx context.Context, err error, exhausted bool) runOutcome 
 // runTotals is the per-run aggregate. It is assembled from values the agent
 // already tallies rather than from the metric stream, because the gauges are
 // recorded once at the end and cannot be derived from cumulative histograms.
+//
+// NewAgent must build it: ToolCalls and ToolFailures are written by
+// increment, so a zero runTotals panics on first use.
 type runTotals struct {
 	Iterations       int
 	PromptTokens     int64
@@ -46,14 +51,9 @@ type runTotals struct {
 	ToolFailures     map[string]int
 }
 
-// recordRunSummary emits the run-end gauges and the terminal context zero.
-//
-// The zero matters: the collector's Prometheus exporter holds the last value of
-// any series it has registered, so without it a finished run's context line
-// freezes at its final percentage and reads as still running forever.
-func (a *Agent) recordRunSummary(ctx context.Context, totals runTotals, outcome runOutcome, elapsed time.Duration) {
+func (a *Agent) recordRunSummary(ctx context.Context, outcome runOutcome, elapsed time.Duration) {
 	attrs := func(extra ...attribute.KeyValue) metric.MeasurementOption {
-		return metric.WithAttributes(runAttrs(ctx, extra...)...)
+		return metric.WithAttributes(mphotel.RunAttrs(ctx, extra...)...)
 	}
 
 	// Float seconds, consistent with every other duration here, so a
@@ -62,7 +62,7 @@ func (a *Agent) recordRunSummary(ctx context.Context, totals runTotals, outcome 
 		runDurationGauge.Record(ctx, elapsed.Seconds(), attrs())
 	}
 	if runIterationsGauge != nil {
-		runIterationsGauge.Record(ctx, int64(totals.Iterations), attrs())
+		runIterationsGauge.Record(ctx, int64(a.totals.Iterations), attrs())
 	}
 	if runCompactionsGauge != nil {
 		runCompactionsGauge.Record(ctx, int64(a.compactionsApplied), attrs())
@@ -71,21 +71,24 @@ func (a *Agent) recordRunSummary(ctx context.Context, totals runTotals, outcome 
 		runFinishedGauge.Record(ctx, 1, attrs(attribute.String("outcome", string(outcome))))
 	}
 	if runTokensGauge != nil {
-		runTokensGauge.Record(ctx, totals.PromptTokens, attrs(attribute.String("tokens.type", "prompt")))
-		runTokensGauge.Record(ctx, totals.CompletionTokens, attrs(attribute.String("tokens.type", "completion")))
-		runTokensGauge.Record(ctx, totals.ReclaimedTokens, attrs(attribute.String("tokens.type", "reclaimed")))
+		runTokensGauge.Record(ctx, a.totals.PromptTokens, attrs(attribute.String("tokens.type", "prompt")))
+		runTokensGauge.Record(ctx, a.totals.CompletionTokens, attrs(attribute.String("tokens.type", "completion")))
+		runTokensGauge.Record(ctx, a.totals.ReclaimedTokens, attrs(attribute.String("tokens.type", "reclaimed")))
 	}
-	for name, n := range totals.ToolCalls {
+	for name, n := range a.totals.ToolCalls {
 		if runToolCallsGauge != nil {
 			runToolCallsGauge.Record(ctx, int64(n), attrs(attribute.String("mph.tool.name", name)))
 		}
 	}
-	for name, n := range totals.ToolFailures {
+	for name, n := range a.totals.ToolFailures {
 		if runToolFailuresGauge != nil {
 			runToolFailuresGauge.Record(ctx, int64(n), attrs(attribute.String("mph.tool.name", name)))
 		}
 	}
+	// Recording the terminal zero is what stops a finished run's context line
+	// from freezing at its final percentage in the Prometheus exporter, which
+	// would otherwise read as still running forever.
 	if contextTokensGauge != nil {
-		contextTokensGauge.Record(ctx, 0, metric.WithAttributes(runAttrs(ctx)...))
+		contextTokensGauge.Record(ctx, 0, metric.WithAttributes(mphotel.RunAttrs(ctx)...))
 	}
 }

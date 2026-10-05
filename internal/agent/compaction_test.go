@@ -18,6 +18,7 @@ import (
 
 	"github.com/trollLemon/MPHarness/internal/config"
 	"github.com/trollLemon/MPHarness/internal/multipass"
+	mphotel "github.com/trollLemon/MPHarness/internal/otel"
 	"github.com/trollLemon/MPHarness/internal/output"
 )
 
@@ -578,14 +579,15 @@ func TestCompactionDurationIsRecordedInSeconds(t *testing.T) {
 	}}}
 	agent := NewAgent(zerolog.Nop(), mock, Options{
 		MaxIterations: 3, ChatTimeout: time.Second, TotalTimeout: 30 * time.Second,
-		LLM: defaultLLMConfig(), RunID: "run-compact-seconds", RunLabel: "baseline:run-compact-seconds", RunName: "baseline",
+		LLM: defaultLLMConfig(), RunID: "run-compact-seconds",
 	})
 	conf := config.Config{
 		VM:         config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
 		Prompt:     "task",
 		Compaction: enabledCompaction(),
 	}
-	if err := agent.Execute(context.Background(), conf, multipass.New(zerolog.Nop())); err != nil {
+	ctx := mphotel.WithRunIdentity(context.Background(), "baseline:run-compact-seconds", "baseline")
+	if err := agent.Execute(ctx, conf, multipass.New(zerolog.Nop())); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 

@@ -211,8 +211,6 @@ func run() error {
 		TotalTimeout:  time.Duration(cfg.Agent.TotalTimeout),
 		LLM:           cfg.LLM,
 		RunID:         ident.ID,
-		RunLabel:      ident.Label,
-		RunName:       ident.Name,
 	})
 
 	client := multipass.New(log.Logger)
@@ -221,6 +219,8 @@ func run() error {
 		IgnoreExisting: ignoreExisting,
 		Keep:           keep,
 		RunID:          ident.ID,
+		RunLabel:       ident.Label,
+		RunName:        ident.Name,
 	})
 }
 

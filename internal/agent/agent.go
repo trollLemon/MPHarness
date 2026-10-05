@@ -78,8 +78,6 @@ type Agent struct {
 	totalTimeout  time.Duration    // Budget for the whole run; bounds every iteration.
 	llmConfig     config.LLMConfig // Sampling and output limits sent with each request.
 	runID         string           // Bare uuid: the output directory name.
-	runLabel      string           // Composite <name>:<uuid>: spans and metrics.
-	runName       string           // Human-readable grouping label.
 
 	conversation       []model.D     // Full message history, including tool results.
 	toolDocs           []model.D     // Tool schemas sent alongside every request.
@@ -102,11 +100,10 @@ type Options struct {
 	TotalTimeout  time.Duration
 	LLM           config.LLMConfig
 	RunID         string
-	RunLabel      string
-	RunName       string
 }
 
-// NewAgent builds an Agent for a single run.
+// NewAgent builds an Agent for a single run. The run's telemetry identity
+// arrives on the context Execute is called with, not through Options.
 func NewAgent(log zerolog.Logger, krn Kronk, opts Options) *Agent {
 	if opts.LLM.ToolChoice == "" {
 		opts.LLM.ToolChoice = "auto"
@@ -120,8 +117,6 @@ func NewAgent(log zerolog.Logger, krn Kronk, opts Options) *Agent {
 		totalTimeout:  opts.TotalTimeout,
 		llmConfig:     opts.LLM,
 		runID:         opts.RunID,
-		runLabel:      opts.RunLabel,
-		runName:       opts.RunName,
 		totals:        runTotals{ToolCalls: map[string]int{}, ToolFailures: map[string]int{}},
 	}
 }
@@ -138,13 +133,11 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *multipass.
 		// clean finish that happens to land on the last permitted iteration also
 		// leaves iteration == maxIterations.
 		exhausted := a.iteration >= a.maxIterations && !a.done
-		a.recordRunSummary(ctx, a.totals, classifyOutcome(ctx, err, exhausted), time.Since(start))
+		a.recordRunSummary(ctx, classifyOutcome(ctx, err, exhausted), time.Since(start))
 	}()
 
 	ctx, cancel := context.WithTimeout(ctx, a.totalTimeout)
 	defer cancel()
-
-	ctx = withRunIdentity(ctx, a.runLabel, a.runName)
 
 	a.toolDocs = buildToolDocuments(conf)
 	a.conversation = buildInitialConversation(conf)
@@ -161,11 +154,13 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *multipass.
 	recordContextWindow(ctx, a.krn)
 
 	for ; a.iteration < a.maxIterations && !a.done; a.iteration++ {
+		// Counted before the round runs, so an iteration that aborts the run is
+		// still tallied and cannot disagree with outcome="error".
+		a.totals.Iterations++
 		a.maybeCompact(ctx, conf)
 		if err := a.runIteration(ctx, cli, conf); err != nil {
 			return err
 		}
-		a.totals.Iterations++
 	}
 
 	if len(a.commandOutputs) > 0 {
@@ -194,7 +189,7 @@ func (a *Agent) runIteration(ctx context.Context, cli *multipass.Client, conf co
 	iter := a.iteration
 
 	iterCtx, iterSpan := getAgentTracer().Start(ctx, "mph.agent.iteration",
-		trace.WithAttributes(runSpanAttrs(ctx, attribute.Int("mph.iteration", iter+1))...))
+		trace.WithAttributes(mphotel.RunSpanAttrs(ctx, attribute.Int("mph.iteration", iter+1))...))
 	iterCtx = withIteration(iterCtx, iter)
 	iterStart := time.Now()
 	defer func() { recordIterationDuration(iterCtx, time.Since(iterStart)) }()
@@ -297,7 +292,7 @@ func (a *Agent) addToolTokens(ctx context.Context, msgs []model.D) {
 	}
 	a.contextTokens += added
 	if contextTokensGauge != nil {
-		contextTokensGauge.Record(ctx, a.contextTokens, metric.WithAttributes(runAttrs(ctx)...))
+		contextTokensGauge.Record(ctx, a.contextTokens, metric.WithAttributes(mphotel.RunAttrs(ctx)...))
 	}
 }
 

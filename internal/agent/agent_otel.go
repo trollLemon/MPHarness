@@ -45,52 +45,6 @@ var (
 	runFinishedGauge     metric.Int64Gauge
 )
 
-// runIdentityKey carries the run's telemetry identity in the context so every
-// helper reached during a run can attribute its measurements without the
-// values being threaded through signatures.
-type runIdentityKey struct{}
-
-type runIdentityValue struct {
-	id   string
-	name string
-}
-
-func withRunIdentity(ctx context.Context, runLabel, runName string) context.Context {
-	return context.WithValue(ctx, runIdentityKey{}, runIdentityValue{id: runLabel, name: runName})
-}
-
-func runIDFromContext(ctx context.Context) string {
-	v, _ := ctx.Value(runIdentityKey{}).(runIdentityValue)
-	return v.id
-}
-
-// runAttrs tags a measurement with the run identity. Metric measurements carry
-// the run UUID deliberately: a developer-facing stack needs per-run series to
-// compare runs, and the cardinality is bounded by how many runs a person
-// actually starts.
-func runAttrs(ctx context.Context, extra ...attribute.KeyValue) []attribute.KeyValue {
-	v, _ := ctx.Value(runIdentityKey{}).(runIdentityValue)
-	if v.id == "" && v.name == "" {
-		return extra
-	}
-	attrs := make([]attribute.KeyValue, 0, len(extra)+2)
-	if v.id != "" {
-		attrs = append(attrs, attribute.String("mph.run.id", v.id))
-	}
-	if v.name != "" {
-		attrs = append(attrs, attribute.String("mph.run.name", v.name))
-	}
-	return append(attrs, extra...)
-}
-
-func runSpanAttrs(ctx context.Context, extra ...attribute.KeyValue) []attribute.KeyValue {
-	attrs := extra
-	if runID := runIDFromContext(ctx); runID != "" {
-		attrs = append(attrs, attribute.String("mph.run.id", runID))
-	}
-	return attrs
-}
-
 type iterationKey struct{}
 
 // withIteration stores iter+1 because iteration labels are 1-based while the
@@ -111,11 +65,11 @@ func eventAttrs(ctx context.Context, extra ...attribute.KeyValue) []attribute.Ke
 	if iter, ok := iterationFromContext(ctx); ok {
 		extra = append(extra, attribute.Int("mph.iteration", iter))
 	}
-	return runAttrs(ctx, extra...)
+	return mphotel.RunAttrs(ctx, extra...)
 }
 
-// Boundaries are explicit because OpenTelemetry's defaults top out at 10s and
-// a real iteration on testing/longrun.yaml runs about 90 seconds.
+// Boundaries are explicit because OpenTelemetry's defaults top out at 10s and a
+// real iteration against a small model on one CPU runs about 90 seconds.
 var (
 	durationBuckets     = []float64{1, 2, 5, 10, 20, 30, 45, 60, 90, 120, 180, 300}
 	ttftBuckets         = []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 40, 60, 120}
@@ -217,8 +171,6 @@ func initAgentMetrics() {
 	}
 }
 
-// recordContextWindow exposes the effective context window for the run. Kronk
-// auto-tunes it, so the configured value (0 = auto) is not the real limit.
 func recordIterationDuration(ctx context.Context, d time.Duration) {
 	if iterationDurationHist == nil {
 		return
@@ -226,8 +178,10 @@ func recordIterationDuration(ctx context.Context, d time.Duration) {
 	iterationDurationHist.Record(ctx, d.Seconds(), metric.WithAttributes(eventAttrs(ctx)...))
 }
 
+// recordContextWindow exposes the effective context window for the run. Kronk
+// auto-tunes it, so the configured value (0 = auto) is not the real limit.
+// Requires initAgentMetrics to have run, which Execute guarantees.
 func recordContextWindow(ctx context.Context, krn Kronk) {
-	initAgentMetrics()
 	if contextWindowGauge == nil || krn == nil {
 		return
 	}
@@ -235,7 +189,7 @@ func recordContextWindow(ctx context.Context, krn Kronk) {
 	if window <= 0 {
 		return
 	}
-	contextWindowGauge.Record(ctx, int64(window), metric.WithAttributes(runAttrs(ctx)...))
+	contextWindowGauge.Record(ctx, int64(window), metric.WithAttributes(mphotel.RunAttrs(ctx)...))
 }
 
 func recordTokenUsage(ctx context.Context, a *Agent, span trace.Span, log zerolog.Logger, usage *model.Usage) {
@@ -266,9 +220,9 @@ func recordTokenUsage(ctx context.Context, a *Agent, span trace.Span, log zerolo
 	if prefillTTFTHist != nil && usage.TimeToFirstTokenMS > 0 {
 		prefillTTFTHist.Record(ctx, usage.TimeToFirstTokenMS/1000, metric.WithAttributes(eventAttrs(ctx)...))
 	}
-	// Recorded unconditionally: a measured 0 (no prefix reuse this turn) is a
-	// real signal, and suppressing it leaves the dashboard column blank, which
-	// reads as a broken metric rather than "IMC reused nothing".
+	// Recorded unconditionally: a measured 0 means the inference cache reused
+	// nothing this turn, which is a real signal. Suppressing it leaves the
+	// dashboard column blank, which reads as a broken metric.
 	if prefillCachedHist != nil {
 		prefillCachedHist.Record(ctx, int64(usage.PromptTokensDetails.CachedTokens), metric.WithAttributes(eventAttrs(ctx)...))
 	}
@@ -278,7 +232,7 @@ func recordTokenUsage(ctx context.Context, a *Agent, span trace.Span, log zerolo
 	// A level metric: one context line per iteration would read as a comb of
 	// stale values rather than a single number that climbs toward the window.
 	if contextTokensGauge != nil {
-		contextTokensGauge.Record(ctx, int64(usage.TotalTokens), metric.WithAttributes(runAttrs(ctx)...))
+		contextTokensGauge.Record(ctx, int64(usage.TotalTokens), metric.WithAttributes(mphotel.RunAttrs(ctx)...))
 	}
 }
 

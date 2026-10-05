@@ -21,6 +21,7 @@ import (
 
 	"github.com/trollLemon/MPHarness/internal/config"
 	"github.com/trollLemon/MPHarness/internal/multipass"
+	mphotel "github.com/trollLemon/MPHarness/internal/otel"
 	"github.com/trollLemon/MPHarness/internal/output"
 	"github.com/trollLemon/MPHarness/internal/textutil"
 )
@@ -951,11 +952,10 @@ func TestExecuteTagsMetricsWithRunID(t *testing.T) {
 		TotalTimeout:  5 * time.Second,
 		LLM:           defaultLLMConfig(),
 		RunID:         "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5",
-		RunLabel:      "baseline:0198f0c1-2a3b-7c4d-8e5f-60718293a4b5",
-		RunName:       "baseline",
 	})
 	conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
-	if err := agent.Execute(context.Background(), conf, multipass.New(zerolog.Nop())); err != nil {
+	ctx := mphotel.WithRunIdentity(context.Background(), "baseline:0198f0c1-2a3b-7c4d-8e5f-60718293a4b5", "baseline")
+	if err := agent.Execute(ctx, conf, multipass.New(zerolog.Nop())); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 
@@ -1010,59 +1010,6 @@ func TestExecuteTagsMetricsWithRunID(t *testing.T) {
 		if !seen[name] {
 			t.Errorf("metric %q was never recorded", name)
 		}
-	}
-
-	if got := runSpanAttrs(withRunIdentity(context.Background(), "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5", "baseline")); len(got) == 0 {
-		t.Fatalf("runSpanAttrs must still carry mph.run.id on spans")
-	}
-}
-
-func TestRunIDFromContext(t *testing.T) {
-	const id = "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5"
-	tests := []struct {
-		name string
-		ctx  context.Context
-		want string
-	}{
-		{"bare context yields empty", context.Background(), ""},
-		{"run id round-trips", withRunIdentity(context.Background(), id, "baseline"), id},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := runIDFromContext(tt.ctx); got != tt.want {
-				t.Errorf("got %q want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestRunSpanAttrs(t *testing.T) {
-	const id = "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5"
-	iter := attribute.Int("mph.iteration", 3)
-	tests := []struct {
-		name      string
-		ctx       context.Context
-		wantKeys  []string
-		wantRunID string
-	}{
-		{"omits run id when unset", context.Background(), []string{"mph.iteration"}, ""},
-		{"adds run id when set", withRunIdentity(context.Background(), id, "baseline"), []string{"mph.iteration", "mph.run.id"}, id},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := runSpanAttrs(tt.ctx, iter)
-			if len(got) != len(tt.wantKeys) {
-				t.Fatalf("got %d attrs, want %d: %v", len(got), len(tt.wantKeys), got)
-			}
-			for i, key := range tt.wantKeys {
-				if string(got[i].Key) != key {
-					t.Errorf("attr %d key = %q, want %q", i, got[i].Key, key)
-				}
-			}
-			if tt.wantRunID != "" && got[1].Value.AsString() != tt.wantRunID {
-				t.Errorf("run id = %q, want %q", got[1].Value.AsString(), tt.wantRunID)
-			}
-		})
 	}
 }
 
@@ -1283,34 +1230,8 @@ func TestExecuteToolCallsEmitsOneResultEventPerCall(t *testing.T) {
 	}
 }
 
-func TestRunAttrsCarriesIdentity(t *testing.T) {
-	ctx := withRunIdentity(t.Context(), "baseline:01J9", "baseline")
-
-	got := runAttrs(ctx, attribute.Int("mph.iteration", 3))
-
-	want := map[string]string{
-		"mph.run.id":    "baseline:01J9",
-		"mph.run.name":  "baseline",
-		"mph.iteration": "3",
-	}
-	if len(got) != len(want) {
-		t.Fatalf("runAttrs() = %v, want %d attributes", got, len(want))
-	}
-	for _, kv := range got {
-		if want[string(kv.Key)] != kv.Value.String() {
-			t.Errorf("attribute %q = %q, want %q", kv.Key, kv.Value.String(), want[string(kv.Key)])
-		}
-	}
-}
-
-func TestRunAttrsWithoutIdentity(t *testing.T) {
-	if got := runAttrs(t.Context()); len(got) != 0 {
-		t.Errorf("runAttrs() with no identity = %v, want empty", got)
-	}
-}
-
 func TestEventAttrsAddsIteration(t *testing.T) {
-	ctx := withRunIdentity(t.Context(), "baseline:01J9", "baseline")
+	ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
 	ctx = withIteration(ctx, 6) // zero-based; label must be 7
 
 	got := eventAttrs(ctx, attribute.String("mph.tool.name", "multipass_exec"))
@@ -1334,7 +1255,7 @@ func TestEventAttrsAddsIteration(t *testing.T) {
 }
 
 func TestEventAttrsWithoutIteration(t *testing.T) {
-	ctx := withRunIdentity(t.Context(), "baseline:01J9", "baseline")
+	ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
 
 	for _, kv := range eventAttrs(ctx) {
 		if string(kv.Key) == "mph.iteration" {
@@ -1393,7 +1314,7 @@ func TestRecordTokenUsageReadsPrefillAndCache(t *testing.T) {
 	t.Cleanup(resetAgentMetrics)
 	initAgentMetrics()
 
-	ctx := withRunIdentity(t.Context(), "baseline:01J9", "baseline")
+	ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
 	ctx = withIteration(ctx, 2)
 
 	recordTokenUsage(ctx, &Agent{totals: runTotals{}}, trace.SpanFromContext(ctx), zerolog.Nop(), &model.Usage{
@@ -1449,8 +1370,6 @@ func TestRunOutcomeDistinguishesCleanFinishFromExhaustion(t *testing.T) {
 				TotalTimeout:  30 * time.Second,
 				LLM:           defaultLLMConfig(),
 				RunID:         "01J9",
-				RunLabel:      "baseline:01J9",
-				RunName:       "baseline",
 			})
 			rd := sdkmetric.NewManualReader()
 			mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(rd))
@@ -1461,7 +1380,8 @@ func TestRunOutcomeDistinguishesCleanFinishFromExhaustion(t *testing.T) {
 			t.Cleanup(resetAgentMetrics)
 
 			conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
-			if err := a.Execute(t.Context(), conf, multipass.New(zerolog.Nop())); err != nil {
+			ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
+			if err := a.Execute(ctx, conf, multipass.New(zerolog.Nop())); err != nil {
 				t.Fatalf("Execute: %v", err)
 			}
 
