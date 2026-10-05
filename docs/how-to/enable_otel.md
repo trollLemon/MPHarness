@@ -1,6 +1,6 @@
 # Enable OpenTelemetry in MPHarness
 
-OTel is **disabled by default**; when off, `mph` has zero behavioural change and near-zero overhead. When enabled it exports **traces, logs, and metrics** over OTLP/gRPC (default `localhost:4317`) to any OTLP collector.
+OTel is **disabled by default**; when off, `mph` has zero behavioural change and near-zero overhead. When enabled it exports **traces and logs** over OTLP/gRPC (default `localhost:4317`) to any OTLP collector.
 
 This page covers the three ways to enable it, the precedence rules, the bundled observability stack, and how to verify both.
 
@@ -46,7 +46,7 @@ The SDK reads these automatically; `mph` also respects them for precedence:
 - `OTEL_RESOURCE_ATTRIBUTES` (e.g. `environment=prod,region=eu`)
 - `OTEL_SDK_DISABLED=true` disables the SDK even if `mph` enabled it
 
-`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` / `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` also work per-signal if you need them.
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` also work per-signal if you need them.
 
 ### Precedence (highest first)
 
@@ -77,9 +77,8 @@ make otel-down  # stop it, keep the data
 
 ```text
 mph ──OTLP/gRPC :4317──▶ otel-collector
-                           ├── traces ──▶ Tempo      ◀── Grafana :3000
-                           ├── logs   ──▶ Loki       ┘
-                           └── metrics ─▶ Prometheus ┘
+                           ├── traces ──▶ Tempo ◀── Grafana :3000
+                           └── logs   ──▶ Loki  ┘
 ```
 
 `docker-compose/collector-config.yaml` routes each signal that way and also prints everything to the collector's own stdout via the `debug` exporter, which is the fastest way to confirm data is arriving before worrying about a UI.
@@ -93,23 +92,42 @@ Tempo replaced Jaeger here. Grafana's Jaeger datasource sends the search window 
 | `otel-collector` | 4317 | OTLP/gRPC receiver, fans signals out |
 | `grafana` | 3000 | Dashboards (admin/admin) and Explore |
 | `tempo` | 3200 | Trace search backend, also a usable trace UI of its own |
-| `prometheus` | 9090 | Metric storage, scraped by the collector's `prometheus` exporter |
+| `prometheus` | 9090 | Collector self-telemetry only (receiver/exporter health panels); `mph` exports no metrics |
 | `loki` | 3100 | Log storage, pushed to by the collector's `loki` exporter |
 
 ### Dashboard
 
-`example_grafana/dashboards/mph-otel.json` is provisioned automatically on start, so the **MPHarness - OTel (Metrics / Logs / Traces)** dashboard is in Grafana as soon as the stack is up.
+`example_grafana/dashboards/mph-otel.json` is provisioned automatically on start, so the **MPHarness - OTel (Logs / Traces)** dashboard is in Grafana as soon as the stack is up.
+
+Every run panel is a LogQL query over structured log events. Each dashboard-facing log line carries an `event` field; the Loki exporter nests it under `attributes`, so `| json` exposes it as `attributes_event`:
+
+| `event` | Key fields |
+|---|---|
+| `token_usage` | `iter`, `prompt_tokens`, `completion_tokens`, `total_tokens`, `tps`, `cached_tokens`, `reasoning_tokens`, `ttft_ms`, `ctx_window` |
+| `iteration` | `iter`, `dur_ms`, `chat_ms`, `tool_ms` |
+| `agent_tool_call` | `iter`, `tool`, `id`, `args` |
+| `tool_succeeded` / `tool_failed` | `iter`, `tool`, `id`, `dur_ms`, and `out` or `error` |
+| `context_compaction` | `iter`, `outcome`, `tok_before`, `tok_after`, `reclaimed`, `thr`, `summary`, `handles`, `compacted`, `try`, `dur_ms` |
+| `context_compaction_applied` | `iter`, `compacted` (the rewritten conversation) |
+| `run_summary` | `outcome`, `iterations`, `compactions`, `dur_ms`, `avg_iter_ms`, `prompt_tokens`, `completion_tokens`, `reclaimed_tokens`, `tool_calls`, `tool_failures`, `ctx_window` |
+
+For example, prompt tokens per iteration of one run:
+
+```logql
+max by (attributes_iter) (max_over_time({instance="<name>:<uuid>"} | json
+  | attributes_event="token_usage" | unwrap attributes_prompt_tokens [$__range]))
+```
 
 The **Run** selector scopes the summary, per-iteration timing and tokens,
 context, tools, and narrative panels to one run. The comparison row retains
-all runs in the selected time range. Run IDs combine the run name and UUID,
-so repeated runs with the same name stay distinct.
+all runs in the selected time range. Runs are selected by the Loki `instance`
+stream label (the `service.instance.id` resource), which combines the run
+name and UUID, so repeated runs with the same name stay distinct.
 
-**Context over time** is an XY line plot with a time axis fitted to the run's
-recorded samples. Samples at and after the first observed completion marker
-are excluded, at scrape resolution, so the chart does not extend toward
-“now” after completion. Select a time range containing the run to see its
-history. Token counts remain available, but there are no pricing controls or
+**Context over time** plots context used and remaining context (window minus
+used) from each `token_usage` event, with applied compactions as points. Its time
+axis spans the run itself, not the dashboard range; the range only has to
+include the run. Token counts remain available, but there are no pricing controls or
 monetary cost calculations in the dashboard or application.
 
 **Run traces** displays Tempo search results as a table. Click a trace ID to
@@ -155,12 +173,12 @@ make otel-up                # OTLP receiver must be listening
 
 Then:
 
-- Grafana on <http://localhost:3000> — the **MPH OTel** dashboard, or Explore → Tempo/Loki/Prometheus
+- Grafana on <http://localhost:3000> — the **MPH OTel** dashboard, or Explore → Tempo/Loki
 - The trace shape to expect is `mph.run` → `mph.vm.create` / `multipass.launch` → `mph.agent.iteration` × N (with `mph.agent.tool_call` / `tool_result` events and a `multipass.exec` child per command) → `mph.vm.delete`
 
-`mph.run.id` identifies the run on spans and metrics (exposed as `mph_run_id`
-in Prometheus). Logs carry `trace_id` and `span_id`, so a log line links back
-to the trace it belongs to.
+`mph.run.id` identifies the run on spans; in Loki the same `<name>:<uuid>`
+value is the `instance` stream label. Logs carry `trace_id` and `span_id`, so
+a log line links back to the trace it belongs to.
 
 Model replies land in Loki under the body `model output`, split by `part` (`content` or `reasoning`) with the payload in `text`. Nothing is logged for an iteration that produced neither, which is normal for a turn that is only a tool call.
 
@@ -183,7 +201,7 @@ Check 1 is the one that matters most: it is what proves the default-off promise,
 
 ### Long runs
 
-`testing/longrun.yaml` is the same shape with a 30-step checklist, `max_iterations: 60`, and a 90m total timeout, so a run takes long enough to watch iteration duration, tokens-per-second, and the context gauges climb on the dashboard rather than flashing past:
+`testing/longrun.yaml` is the same shape with a 30-step checklist, `max_iterations: 60`, and a 90m total timeout, so a run takes long enough to watch iteration duration, tokens-per-second, and context usage climb on the dashboard rather than flashing past:
 
 ```bash
 ./bin/mph ./testing/longrun.yaml
@@ -224,13 +242,14 @@ Any value of `0` or less is replaced by the default in `config.DefaultCommandOut
 
 ## 6. Where it lives in code
 
-- `internal/otel/otel.go` — `Config`, `Setup` (creates the `otlptracegrpc`/`otlpmetricgrpc`/`otlploggrpc` exporters, the providers, and `global.SetLoggerProvider`), returns `shutdown`, and `Hook` (zerolog → `otellog.Record` with trace correlation via `e.GetCtx()`).
+- `internal/otel/otel.go` — `Config`, `Setup` (creates the `otlptracegrpc`/`otlploggrpc` exporters, the tracer and logger providers, and `global.SetLoggerProvider`), returns `shutdown`, `Hook` (zerolog → `otellog.Record` with trace correlation via `e.GetCtx()`), and `LogEvent` (structured fields to both zerolog and OTLP).
 - `internal/config/config.go` — `OtelConfig`, `TruncationConfig`, YAML `otel:`/`truncation:` parsing, and the default constants.
 - `cmd/mph/main.go` — `--otel` flag, `MPH_OTEL` env, `resolveOtelConfig` (the precedence merge above), `otel.Setup`, and `log.Logger.Hook(NewHook("mph"))` with a deferred shutdown.
 - `internal/multipass/multipass.go` — a span per command (`multipass.*`); `Exec` takes the cap for its command echo attribute.
 - `internal/harness/harness.go` — the root `mph.run` span plus `mph.vm.create`/`delete`.
-- `internal/agent/agent.go` — `Execute` (ctx threaded from harness), `mph.agent.iteration` spans, and the length-limit nudge.
-- `internal/agent/agent_otel.go` — all agent metrics, span events, and the run-ID context.
+- `internal/agent/agent.go` — `Execute` (ctx threaded from harness), `mph.agent.iteration` spans, span events, the length-limit nudge, and the `token_usage`/`iteration`/tool log events.
+- `internal/agent/compaction.go` — the `mph.context.compaction` span and `context_compaction`/`context_compaction_applied` events.
+- `internal/agent/run_summary.go` — the run outcome and the `run_summary` event.
 - `internal/agent/model.go` — `zerolog.Ctx(ctx)` in `zerologAdapter` for log↔trace linkage, and the `mph.model.init` / `mph.model.load` spans.
 
 ## Related

@@ -26,14 +26,6 @@ exporters:
     tls:
       insecure: true
 
-  prometheus:
-    endpoint: "0.0.0.0:8889"
-    # MPH is a batch job: once a run exits nothing re-reports these series, so the
-    # 5m default drops them and Prometheus marks every panel's data stale. Retain
-    # them for a week instead. 0 is not "never" - cleanup runs per scrape and
-    # would expire everything immediately.
-    metric_expiration: 168h
-
   loki:
     endpoint: "http://loki:3100/loki/api/v1/push"
     tls:
@@ -61,10 +53,6 @@ service:
       receivers: [otlp]
       processors: [memory_limiter, batch]
       exporters: [debug, otlp/tempo]
-    metrics:
-      receivers: [otlp]
-      processors: [memory_limiter, batch]
-      exporters: [debug, prometheus]
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch]

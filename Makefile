@@ -70,6 +70,6 @@ help:
 	@echo "  clean        - remove bin/ and coverage.out"
 	@echo "  otel-up      - start OTel LGTM stack (Grafana+Loki+Tempo+Prometheus)"
 	@echo "  otel-down    - stop OTel stack"
-	@echo "  otel-reload-dashboards - recreate Grafana with a fresh volume to re-provision dashboards (keeps metrics)"
+	@echo "  otel-reload-dashboards - recreate Grafana with a fresh volume to re-provision dashboards (keeps logs and traces)"
 	@echo "  test-integration - run chunking/compaction fixture (needs VM + model)"
 	@echo "  test-integration-compaction - run compaction fixture on tiny model (needs VM + model)"

@@ -36,7 +36,7 @@ func printUsage(w io.Writer) {
 	flag.PrintDefaults()
 	_, _ = fmt.Fprintf(w, "\nConfig YAML keys:\n")
 	_, _ = fmt.Fprintf(w, "  run:\n")
-	_, _ = fmt.Fprintf(w, "    name: my-run        # optional, label for this run in metrics/traces; default MPH_RUN_NAME, vm.name, or mph\n")
+	_, _ = fmt.Fprintf(w, "    name: my-run        # optional, label for this run in logs/traces; default MPH_RUN_NAME, vm.name, or mph\n")
 	_, _ = fmt.Fprintf(w, "  vm:\n")
 	_, _ = fmt.Fprintf(w, "    name: mph-vm        # optional, default mph-vm\n")
 	_, _ = fmt.Fprintf(w, "    disk: 20G\n")

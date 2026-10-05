@@ -14,7 +14,6 @@ services:
       - "4317:4317"   # OTLP gRPC – mph default endpoint localhost:4317
       - "4318:4318"   # OTLP HTTP
       - "13133:13133" # health_check
-      - "8889:8889"   # prometheus exporter (mph metrics: mph.tokens etc.)
       - "8888:8888"   # collector self metrics
       - "55679:55679" # zpages
       - "1777:1777"   # pprof

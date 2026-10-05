@@ -16,7 +16,10 @@ ingester:
   # Short blocks so a local stack shows recent traces without waiting on
   # Tempo's production defaults.
   max_block_duration: 1m
-  complete_block_timeout: 1m
+  # Search only asks ingesters about the last query_backend_after (15m
+  # default). A flushed block has to stay in the ingester longer than that, or
+  # a just-finished run vanishes from search until it ages into backend range.
+  complete_block_timeout: 20m
 
 compactor:
   compaction:

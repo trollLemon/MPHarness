@@ -6,7 +6,7 @@ vm:
   ram: 2G
   cpu: 1
   image: bionic
-model: unsloth/Qwen3-0.6B-Q8_0
+model: unsloth/granite-4.0-h-1b
 allowed_commands:
   - ls
   - cat

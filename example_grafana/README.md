@@ -26,15 +26,19 @@ ever a viewer. Tempo traces are reachable through Grafana Explore.
 The dashboard's **Run traces** table lists one row per span for the selected run,
 so nested spans such as `multipass.exec` appear alongside their parent; each row
 links to its waterfall in Explore. TraceQL search only sees flushed blocks, so a
-run becomes searchable roughly a minute after it finishes. Tables use explicit
-measurement names rather than Grafana's default `Value #A` headers. Token counts
+run becomes searchable roughly a minute after it finishes. Every other run panel
+is LogQL over the structured `event=` log lines (see
+`docs/how-to/enable_otel.md`). Grafana's Loki datasource turns each instant
+query into one table frame (label columns plus `Value #<refId>`), so table
+panels combine their queries with *Merge* and name columns with *Organize*,
+not *Join by labels*. Token counts
 are shown without pricing or cost estimates; the application does not calculate
 monetary costs.
 
-**Context over time** is a line plot whose time axis fits the selected run's
-samples, not the continuously advancing dashboard clock. Samples at and after
-the first observed run-completion marker are excluded, at scrape resolution.
-The dashboard time range must include the run to display its history.
+**Context over time** plots context used and remaining context (window minus
+used) from each `token_usage` event, with applied compactions as points. It is an
+XY chart over the raw log lines, so its time axis spans the run itself rather
+than the dashboard range; the range only has to include the run.
 
 To discard only this stack's stored telemetry and Grafana state and restart
 with empty storage:
