@@ -11,10 +11,7 @@ import (
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	"github.com/rs/zerolog"
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -932,21 +929,14 @@ func TestCallChatUsesTimeout(t *testing.T) {
 	}
 }
 
-func TestExecuteTagsMetricsWithRunID(t *testing.T) {
-	reader := sdkmetric.NewManualReader()
-	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	prev := otel.GetMeterProvider()
-	otel.SetMeterProvider(provider)
-	t.Cleanup(func() {
-		otel.SetMeterProvider(prev)
-		resetAgentMetrics()
-	})
+func TestExecuteLogsTokenUsageAndIterationEvents(t *testing.T) {
+	var buf bytes.Buffer
 	mock := &mockKronk{
 		contextWidth: 32768,
 		responses: []model.ChatResponse{chatResp("done", "", model.FinishReasonStop, nil,
 			&model.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120, TokensPerSecond: 8.5})},
 	}
-	agent := NewAgent(zerolog.Nop(), mock, Options{
+	agent := NewAgent(zerolog.New(&buf), mock, Options{
 		MaxIterations: 2,
 		ChatTimeout:   time.Second,
 		TotalTimeout:  5 * time.Second,
@@ -959,94 +949,28 @@ func TestExecuteTagsMetricsWithRunID(t *testing.T) {
 		t.Fatalf("execute: %v", err)
 	}
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("collect: %v", err)
-	}
-
-	// Level metrics are the run-wide lines: they must carry the run identity but
-	// no iteration, or a single level reads as one frozen line per iteration.
-	levelNames := map[string]bool{
-		"mph.context.window": true,
-		"mph.context.tokens": true,
-		"mph.run.duration":   true,
-		"mph.run.tokens":     true,
-		"mph.run.iterations": true,
-	}
-
-	seen := map[string]bool{}
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			seen[m.Name] = true
-			for _, set := range dataPointAttrs(m.Data) {
-				if _, ok := set.Value("mph.run.id"); !ok {
-					t.Errorf("metric %q must carry mph.run.id", m.Name)
-				}
-				if _, ok := set.Value("mph.run.name"); !ok {
-					t.Errorf("metric %q must carry mph.run.name", m.Name)
-				}
-				_, hasIteration := set.Value("mph.iteration")
-				if levelNames[m.Name] && hasIteration {
-					t.Errorf("level metric %q must not carry mph.iteration", m.Name)
-				}
-			}
-			if m.Name == "mph.context.window" || m.Name == "mph.context.tokens" {
-				if _, ok := m.Data.(metricdata.Gauge[int64]); !ok {
-					t.Errorf("metric %q must be Int64Gauge, got %T", m.Name, m.Data)
-				}
-			}
-			if m.Name == "mph.run.duration" {
-				if _, ok := m.Data.(metricdata.Gauge[float64]); !ok {
-					t.Errorf("metric %q must be Float64Gauge, got %T", m.Name, m.Data)
-				}
-			}
-		}
-	}
-
-	for _, name := range []string{
-		"mph.agent.tokens", "mph.agent.tokens_per_second",
-		"mph.context.window", "mph.context.tokens",
+	events := decodeEvents(t, &buf)
+	usage := onlyEvent(t, events, eventTokenUsage)
+	for key, want := range map[string]float64{
+		"iter": 1, "prompt_tokens": 100, "completion_tokens": 20,
+		"total_tokens": 120, "tps": 8.5, "ctx_window": 32768,
 	} {
-		if !seen[name] {
-			t.Errorf("metric %q was never recorded", name)
+		if got := usage[key]; got != want {
+			t.Errorf("token_usage %s = %v, want %v", key, got, want)
 		}
 	}
-}
 
-func dataPointAttrs(data metricdata.Aggregation) []attribute.Set {
-	switch a := data.(type) {
-	case metricdata.Histogram[int64]:
-		out := make([]attribute.Set, 0, len(a.DataPoints))
-		for _, dp := range a.DataPoints {
-			out = append(out, dp.Attributes)
-		}
-		return out
-	case metricdata.Histogram[float64]:
-		out := make([]attribute.Set, 0, len(a.DataPoints))
-		for _, dp := range a.DataPoints {
-			out = append(out, dp.Attributes)
-		}
-		return out
-	case metricdata.Sum[int64]:
-		out := make([]attribute.Set, 0, len(a.DataPoints))
-		for _, dp := range a.DataPoints {
-			out = append(out, dp.Attributes)
-		}
-		return out
-	case metricdata.Sum[float64]:
-		out := make([]attribute.Set, 0, len(a.DataPoints))
-		for _, dp := range a.DataPoints {
-			out = append(out, dp.Attributes)
-		}
-		return out
-	case metricdata.Gauge[int64]:
-		out := make([]attribute.Set, 0, len(a.DataPoints))
-		for _, dp := range a.DataPoints {
-			out = append(out, dp.Attributes)
-		}
-		return out
+	iteration := onlyEvent(t, events, eventIteration)
+	if iteration["iter"] != float64(1) {
+		t.Errorf("iteration iter = %v, want 1", iteration["iter"])
 	}
-	return nil
+	for _, key := range []string{"dur_ms", "chat_ms", "tool_ms"} {
+		if _, ok := iteration[key].(float64); !ok {
+			t.Errorf("iteration event missing numeric %q: %v", key, iteration)
+		}
+	}
+
+	onlyEvent(t, events, eventRunSummary)
 }
 
 func TestFinalCommandOutput(t *testing.T) {
@@ -1264,60 +1188,13 @@ func TestEventAttrsWithoutIteration(t *testing.T) {
 	}
 }
 
-func TestDurationBucketsCoverLongIterations(t *testing.T) {
-	// testing/longrun.yaml runs ~90s per iteration; OTel's default boundaries
-	// stop at 10s, which would put every observation in overflow.
-	const longrunIteration = 90.0
-	var covered bool
-	for _, b := range durationBuckets {
-		if b >= longrunIteration {
-			covered = true
-			break
-		}
-	}
-	if !covered {
-		t.Errorf("durationBuckets = %v, must include a boundary at or above %v seconds", durationBuckets, longrunIteration)
-	}
-}
-
-func TestTTFTBucketsCoverBothRegimes(t *testing.T) {
-	if ttftBuckets[0] > 0.01 {
-		t.Errorf("ttftBuckets = %v, want a sub-second first boundary for cached prefills", ttftBuckets)
-	}
-	if ttftBuckets[len(ttftBuckets)-1] < 120 {
-		t.Errorf("ttftBuckets = %v, want coverage to 120s", ttftBuckets)
-	}
-}
-
-func collectMetricNames(t *testing.T, rd sdkmetric.Reader) map[string]bool {
-	t.Helper()
-	var rm metricdata.ResourceMetrics
-	if err := rd.Collect(t.Context(), &rm); err != nil {
-		t.Fatalf("collect: %v", err)
-	}
-	names := map[string]bool{}
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			names[m.Name] = true
-		}
-	}
-	return names
-}
-
 func TestRecordTokenUsageReadsPrefillAndCache(t *testing.T) {
-	rd := sdkmetric.NewManualReader()
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(rd))
-	prev := otel.GetMeterProvider()
-	otel.SetMeterProvider(mp)
-	t.Cleanup(func() { otel.SetMeterProvider(prev) })
-	resetAgentMetrics()
-	t.Cleanup(resetAgentMetrics)
-	initAgentMetrics()
-
+	var buf bytes.Buffer
 	ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
 	ctx = withIteration(ctx, 2)
 
-	recordTokenUsage(ctx, &Agent{totals: runTotals{}}, trace.SpanFromContext(ctx), zerolog.Nop(), &model.Usage{
+	a := &Agent{krn: &mockKronk{contextWidth: 8192}}
+	a.recordTokenUsage(ctx, trace.SpanFromContext(ctx), zerolog.New(&buf), &model.Usage{
 		PromptTokens:            1200,
 		CompletionTokens:        300,
 		TotalTokens:             1500,
@@ -1327,17 +1204,30 @@ func TestRecordTokenUsageReadsPrefillAndCache(t *testing.T) {
 		CompletionTokensDetails: model.CompletionTokensDetails{ReasoningTokens: 120},
 	})
 
-	found := collectMetricNames(t, rd)
-	for _, want := range []string{
-		"mph.agent.tokens",
-		"mph.model.prefill.ttft",
-		"mph.model.prefill.cached_tokens",
-		"mph.agent.reasoning.tokens",
-		"mph.agent.tokens_per_second",
+	usage := onlyEvent(t, decodeEvents(t, &buf), eventTokenUsage)
+	for key, want := range map[string]float64{
+		"iter": 3, "prompt_tokens": 1200, "completion_tokens": 300, "total_tokens": 1500,
+		"tps": 42.5, "ttft_ms": 850, "cached_tokens": 900, "reasoning_tokens": 120, "ctx_window": 8192,
 	} {
-		if !found[want] {
-			t.Errorf("metric %q was not recorded; got %v", want, found)
+		if got := usage[key]; got != want {
+			t.Errorf("token_usage %s = %v, want %v", key, got, want)
 		}
+	}
+	if a.totals.PromptTokens != 1200 || a.totals.CompletionTokens != 300 {
+		t.Errorf("totals = %+v, want prompt 1200 and completion 300", a.totals)
+	}
+}
+
+// A measured 0 means the inference cache reused nothing; dropping the field
+// would leave a dashboard column blank, which reads as broken logging.
+func TestRecordTokenUsageKeepsZeroCachedTokens(t *testing.T) {
+	var buf bytes.Buffer
+	a := &Agent{krn: &mockKronk{}}
+	a.recordTokenUsage(t.Context(), trace.SpanFromContext(t.Context()), zerolog.New(&buf), &model.Usage{PromptTokens: 10})
+
+	usage := onlyEvent(t, decodeEvents(t, &buf), eventTokenUsage)
+	if got, ok := usage["cached_tokens"]; !ok || got != float64(0) {
+		t.Errorf("cached_tokens = %v (present=%v), want an explicit 0", got, ok)
 	}
 }
 
@@ -1364,44 +1254,22 @@ func TestRunOutcomeDistinguishesCleanFinishFromExhaustion(t *testing.T) {
 			mock := &mockKronk{contextWidth: 32768, responses: []model.ChatResponse{
 				chatResp("", "", tt.finishReason, tt.toolCalls, &model.Usage{TotalTokens: 100}),
 			}}
-			a := NewAgent(zerolog.Nop(), mock, Options{
+			var buf bytes.Buffer
+			a := NewAgent(zerolog.New(&buf), mock, Options{
 				MaxIterations: tt.maxIter,
 				ChatTimeout:   time.Second,
 				TotalTimeout:  30 * time.Second,
 				LLM:           defaultLLMConfig(),
 				RunID:         "01J9",
 			})
-			rd := sdkmetric.NewManualReader()
-			mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(rd))
-			prev := otel.GetMeterProvider()
-			otel.SetMeterProvider(mp)
-			t.Cleanup(func() { otel.SetMeterProvider(prev) })
-			resetAgentMetrics()
-			t.Cleanup(resetAgentMetrics)
-
 			conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
 			ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
 			if err := a.Execute(ctx, conf, multipass.New(zerolog.Nop())); err != nil {
 				t.Fatalf("Execute: %v", err)
 			}
 
-			var rm metricdata.ResourceMetrics
-			if err := rd.Collect(t.Context(), &rm); err != nil {
-				t.Fatalf("collect: %v", err)
-			}
-			var got runOutcome
-			for _, sm := range rm.ScopeMetrics {
-				for _, m := range sm.Metrics {
-					if m.Name != "mph.run.finished" {
-						continue
-					}
-					for _, dp := range m.Data.(metricdata.Gauge[int64]).DataPoints {
-						v, _ := dp.Attributes.Value("outcome")
-						got = runOutcome(v.AsString())
-					}
-				}
-			}
-			if got != tt.want {
+			summary := onlyEvent(t, decodeEvents(t, &buf), eventRunSummary)
+			if got := runOutcome(summary["outcome"].(string)); got != tt.want {
 				t.Errorf("outcome = %q, want %q", got, tt.want)
 			}
 		})

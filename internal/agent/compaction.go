@@ -9,7 +9,6 @@ import (
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/trollLemon/MPHarness/internal/compact"
@@ -163,31 +162,18 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) string {
 	)
 	compLog := a.log.With().Ctx(compCtx).Logger()
 	mphotel.LogEvent(compCtx, compLog, zerolog.WarnLevel, "context compaction", map[string]any{
-		"iter": a.iteration + 1, "outcome": outcome, "tok_before": before, "tok_after": after,
-		"thr": cc.Threshold, "summary": summaryBytes, "handles": len(infos),
+		"event": eventContextCompaction,
+		"iter":  a.iteration + 1, "outcome": outcome, "tok_before": before, "tok_after": after,
+		"reclaimed": before - after, "thr": cc.Threshold, "summary": summaryBytes, "handles": len(infos),
 		"compacted": a.compactionsApplied,
 		"try":       a.compactionAttempts + 1, "dur_ms": duration.Milliseconds(),
 	})
-	if compactionsCounter != nil {
-		compactionsCounter.Add(compCtx, 1, metric.WithAttributes(eventAttrs(compCtx,
-			attribute.String("mph.context.compaction.outcome", outcome))...))
-	}
-	if compactionDurationHist != nil {
-		compactionDurationHist.Record(compCtx, duration.Seconds(), metric.WithAttributes(eventAttrs(compCtx,
-			attribute.String("mph.context.compaction.outcome", outcome))...))
-	}
 
 	switch outcome {
 	case "applied":
 		// Rewriting history invalidates the inference prefix cache. Accepted:
 		// one re-prefill of a small prompt buys back thousands of tokens.
 		a.totals.ReclaimedTokens += before - after
-		if tokensReclaimedHist != nil {
-			tokensReclaimedHist.Record(compCtx, before-after, metric.WithAttributes(eventAttrs(compCtx)...))
-		}
-		if contextTokensGauge != nil {
-			contextTokensGauge.Record(compCtx, after, metric.WithAttributes(mphotel.RunAttrs(compCtx)...))
-		}
 		a.compactionsApplied++
 		// A compaction that worked proves the summarizer and handover are
 		// healthy, so the failure budget is restored. Otherwise one failure
@@ -195,6 +181,8 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) string {
 		a.compactionAttempts = 0
 
 		mphotel.LogEvent(compCtx, compLog, zerolog.InfoLevel, "context compaction", map[string]any{
+			"event":     eventContextCompactionApplied,
+			"iter":      a.iteration + 1,
 			"compacted": newConv,
 		})
 

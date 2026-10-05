@@ -12,7 +12,6 @@ import (
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
@@ -20,9 +19,8 @@ import (
 // nothing and leave the globals alone, while enabled installs SDK providers.
 //
 // The returned shutdown is deliberately never called on the enabled paths.
-// The metric reader is periodic, and Shutdown forces a final
-// collect-and-export whether or not anything was recorded, so calling it
-// opens a socket to the configured endpoint. Pointing that at the default
+// Shutdown flushes the batch exporters, which can open a socket to the
+// configured endpoint. Pointing that at the default
 // endpoint would make the test depend on whatever OTLP collector the machine
 // happens to be running, and pointing it at a dead port would still spend the
 // full 5s exportTimeout proving the port is dead. Neither belongs in a unit
@@ -92,8 +90,8 @@ func TestSetup(t *testing.T) {
 			if _, ok := otel.GetTracerProvider().(*sdktrace.TracerProvider); !ok {
 				t.Fatalf("unexpected tracer provider type %T", otel.GetTracerProvider())
 			}
-			if _, ok := otel.GetMeterProvider().(*sdkmetric.MeterProvider); !ok {
-				t.Fatalf("unexpected meter provider type %T", otel.GetMeterProvider())
+			if got := otel.GetMeterProvider(); got != origMP {
+				t.Fatalf("meter provider installed; mph exports no metrics")
 			}
 			if _, ok := global.GetLoggerProvider().(*sdklog.LoggerProvider); !ok {
 				t.Fatalf("unexpected logger provider type %T", global.GetLoggerProvider())
@@ -242,17 +240,19 @@ func TestLogEventFieldOrder(t *testing.T) {
 	for range 20 {
 		buf.Reset()
 		LogEvent(context.Background(), logger, zerolog.InfoLevel, "tool succeeded", map[string]any{
-			"out":  strings.Repeat("x", 5000),
-			"id":   "call-1",
-			"tool": "multipass_exec",
-			"iter": 2,
+			"out":   strings.Repeat("x", 5000),
+			"id":    "call-1",
+			"tool":  "multipass_exec",
+			"iter":  2,
+			"event": "tool_succeeded",
 		})
 		line := buf.String()
+		event := strings.Index(line, `"event"`)
 		tool := strings.Index(line, `"tool"`)
 		id := strings.Index(line, `"id"`)
 		iter := strings.Index(line, `"iter"`)
 		out := strings.Index(line, `"out"`)
-		if tool <= iter || id <= tool || out <= id {
+		if event < 0 || iter <= event || tool <= iter || id <= tool || out <= id {
 			t.Fatalf("fields out of order: %q...", line[:120])
 		}
 	}

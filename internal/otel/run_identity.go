@@ -7,8 +7,8 @@ import (
 )
 
 // runIdentityKey carries the run's telemetry identity in the context so every
-// helper reached during a run can attribute its measurements without the
-// values being threaded through signatures.
+// helper reached during a run can attribute its spans without the values being
+// threaded through signatures.
 type runIdentityKey struct{}
 
 // runIdentity.label is the composite "<name>:<uuid>" form. It is not a bare
@@ -19,7 +19,7 @@ type runIdentity struct {
 }
 
 // WithRunIdentity tags ctx with the run's telemetry identity. Inject it before
-// starting the root span, so every span and measurement beneath inherits it.
+// starting the root span, so every span beneath inherits it.
 func WithRunIdentity(ctx context.Context, label, name string) context.Context {
 	return context.WithValue(ctx, runIdentityKey{}, runIdentity{label: label, name: name})
 }
@@ -29,9 +29,8 @@ func identityFromContext(ctx context.Context) runIdentity {
 	return v
 }
 
-// RunAttrs tags a measurement with the run identity. Measurements carry it
-// deliberately: per-run series are what make two runs comparable, and the
-// cardinality is bounded by how many runs a person actually starts.
+// RunAttrs tags an attribute set with the run identity, so telemetry from two
+// runs stays comparable side by side.
 func RunAttrs(ctx context.Context, extra ...attribute.KeyValue) []attribute.KeyValue {
 	v := identityFromContext(ctx)
 	if v.label == "" && v.name == "" {
@@ -48,7 +47,7 @@ func RunAttrs(ctx context.Context, extra ...attribute.KeyValue) []attribute.KeyV
 }
 
 // RunSpanAttrs tags a span with the run identity. Spans carry the label but not
-// the name, matching what RunAttrs stamps on measurements.
+// the name: the label alone identifies the run.
 func RunSpanAttrs(ctx context.Context, extra ...attribute.KeyValue) []attribute.KeyValue {
 	v := identityFromContext(ctx)
 	if v.label == "" {

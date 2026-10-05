@@ -17,13 +17,11 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	otellog "go.opentelemetry.io/otel/log"
 	"go.opentelemetry.io/otel/log/global"
 	"go.opentelemetry.io/otel/propagation"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
@@ -46,7 +44,6 @@ const (
 	exporterTimeout = 10 * time.Second
 	batchTimeout    = 2 * time.Second
 	exportTimeout   = 5 * time.Second
-	metricInterval  = 5 * time.Second
 	logInterval     = 1 * time.Second
 )
 
@@ -113,26 +110,6 @@ func Setup(ctx context.Context, cfg Config) (func(context.Context) error, error)
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 
-	metricExp, err := otlpmetricgrpc.New(ctx,
-		otlpmetricgrpc.WithEndpoint(cfg.Endpoint),
-		otlpmetricgrpc.WithInsecure(),
-		otlpmetricgrpc.WithTimeout(exporterTimeout),
-	)
-	if err != nil {
-		_ = tp.Shutdown(ctx)
-		return nil, err
-	}
-
-	reader := sdkmetric.NewPeriodicReader(metricExp,
-		sdkmetric.WithInterval(metricInterval),
-		sdkmetric.WithTimeout(exportTimeout),
-	)
-	mp := sdkmetric.NewMeterProvider(
-		sdkmetric.WithReader(reader),
-		sdkmetric.WithResource(res),
-	)
-	otel.SetMeterProvider(mp)
-
 	logExp, err := otlploggrpc.New(ctx,
 		otlploggrpc.WithEndpoint(cfg.Endpoint),
 		otlploggrpc.WithInsecure(),
@@ -140,7 +117,6 @@ func Setup(ctx context.Context, cfg Config) (func(context.Context) error, error)
 	)
 	if err != nil {
 		_ = tp.Shutdown(ctx)
-		_ = mp.Shutdown(ctx)
 		return nil, err
 	}
 
@@ -156,9 +132,6 @@ func Setup(ctx context.Context, cfg Config) (func(context.Context) error, error)
 	shutdown := func(ctx context.Context) error {
 		var errs []error
 		if err := tp.Shutdown(ctx); err != nil {
-			errs = append(errs, err)
-		}
-		if err := mp.Shutdown(ctx); err != nil {
 			errs = append(errs, err)
 		}
 		if err := lp.Shutdown(ctx); err != nil {
@@ -277,14 +250,14 @@ var runLogger = global.Logger("mph")
 // adding a speculative one makes the list look authoritative when it is not.
 var payloadKeyOrder = []string{"args", "text", "out", "command_output"}
 
-// orderedFieldKeys puts identity fields first so a log line reads who and what
+// orderedFieldKeys puts the event kind and identity fields first so a log line reads who and what
 // before the payload blobs. Blob fields always sort last in payloadKeyOrder so
 // the large payload closes the line. Middle fields sort alphabetically so the
 // field order is stable across runs.
 func orderedFieldKeys(fields map[string]any) []string {
 	keys := make([]string, 0, len(fields))
 	seen := map[string]bool{}
-	for _, k := range []string{"iter", "iteration", "tool", "id", "part", "finish", "finish_reason", "outcome"} {
+	for _, k := range []string{"event", "iter", "iteration", "tool", "id", "part", "finish", "finish_reason", "outcome"} {
 		if _, ok := fields[k]; ok {
 			keys = append(keys, k)
 			seen[k] = true

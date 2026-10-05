@@ -9,8 +9,8 @@ import (
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/trollLemon/MPHarness/internal/config"
@@ -49,6 +49,44 @@ const (
 	finalOutputBytes = 64 * 1024
 )
 
+// Every structured log line meant for dashboards carries one of these as its
+// "event" field, so LogQL can select a line by kind rather than by message text.
+const (
+	eventTokenUsage               = "token_usage"
+	eventIteration                = "iteration"
+	eventAgentToolCall            = "agent_tool_call"
+	eventToolSucceeded            = "tool_succeeded"
+	eventToolFailed               = "tool_failed"
+	eventContextCompaction        = "context_compaction"
+	eventContextCompactionApplied = "context_compaction_applied"
+	eventRunSummary               = "run_summary"
+)
+
+type iterationKey struct{}
+
+// withIteration stores iter+1 because iteration labels are 1-based while the
+// agent's loop counter is 0-based; converting here keeps the two from drifting.
+func withIteration(ctx context.Context, iter int) context.Context {
+	return context.WithValue(ctx, iterationKey{}, iter+1)
+}
+
+func iterationFromContext(ctx context.Context) (int, bool) {
+	v, ok := ctx.Value(iterationKey{}).(int)
+	return v, ok
+}
+
+// eventAttrs adds the iteration dimension to a run-scoped attribute set.
+func eventAttrs(ctx context.Context, extra ...attribute.KeyValue) []attribute.KeyValue {
+	if iter, ok := iterationFromContext(ctx); ok {
+		extra = append(extra, attribute.Int("mph.iteration", iter))
+	}
+	return mphotel.RunAttrs(ctx, extra...)
+}
+
+func getAgentTracer() trace.Tracer {
+	return otel.Tracer("mph")
+}
+
 func finalCommandOutput(commandOutputs []string) string {
 	if len(commandOutputs) == 0 {
 		return ""
@@ -83,14 +121,14 @@ type Agent struct {
 	toolDocs           []model.D     // Tool schemas sent alongside every request.
 	commandOutputs     []string      // Captured command results, in the order they ran.
 	store              *output.Store // Captured output handles, or nil when disabled.
-	contextTokens      int64         // Live context size, driving compaction and metrics.
+	contextTokens      int64         // Live context size, driving compaction.
 	fixedOverhead      int64         // Per-request cost outside the messages: tool schemas and template framing.
 	iteration          int           // Zero-based index of the round now running.
 	compactionAttempts int           // Failed compactions; budget for the current one.
 	compactionsApplied int           // Compactions that succeeded this run.
 	toolResultBudget   int           // Byte cutoff between inline output and a handle.
 	done               bool          // Set when the agent should stop looping.
-	totals             runTotals     // Per-run aggregate for the run-end summary gauges.
+	totals             runTotals     // Per-run aggregate for the run_summary event.
 }
 
 // Options carries the per-run bounds NewAgent needs.
@@ -117,7 +155,6 @@ func NewAgent(log zerolog.Logger, krn Kronk, opts Options) *Agent {
 		totalTimeout:  opts.TotalTimeout,
 		llmConfig:     opts.LLM,
 		runID:         opts.RunID,
-		totals:        runTotals{ToolCalls: map[string]int{}, ToolFailures: map[string]int{}},
 	}
 }
 
@@ -133,7 +170,7 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *multipass.
 		// clean finish that happens to land on the last permitted iteration also
 		// leaves iteration == maxIterations.
 		exhausted := a.iteration >= a.maxIterations && !a.done
-		a.recordRunSummary(ctx, classifyOutcome(ctx, err, exhausted), time.Since(start))
+		a.logRunSummary(ctx, classifyOutcome(ctx, err, exhausted), time.Since(start))
 	}()
 
 	ctx, cancel := context.WithTimeout(ctx, a.totalTimeout)
@@ -149,9 +186,6 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *multipass.
 
 	a.log.Info().Int("tools", len(a.toolDocs)).Msg("tool documents built")
 	a.log.Info().Str("run", a.runID).Msg("Starting inference")
-
-	initAgentMetrics()
-	recordContextWindow(ctx, a.krn)
 
 	for ; a.iteration < a.maxIterations && !a.done; a.iteration++ {
 		// Counted before the round runs, so an iteration that aborts the run is
@@ -191,14 +225,25 @@ func (a *Agent) runIteration(ctx context.Context, cli *multipass.Client, conf co
 	iterCtx, iterSpan := getAgentTracer().Start(ctx, "mph.agent.iteration",
 		trace.WithAttributes(mphotel.RunSpanAttrs(ctx, attribute.Int("mph.iteration", iter+1))...))
 	iterCtx = withIteration(iterCtx, iter)
-	iterStart := time.Now()
-	defer func() { recordIterationDuration(iterCtx, time.Since(iterStart)) }()
-
 	iterLog := a.log.With().Ctx(iterCtx).Logger()
+
+	var chatDur, toolDur time.Duration
+	iterStart := time.Now()
+	defer func() {
+		mphotel.LogEvent(iterCtx, iterLog, zerolog.DebugLevel, "iteration timing", map[string]any{
+			"event":   eventIteration,
+			"iter":    iter + 1,
+			"dur_ms":  time.Since(iterStart).Milliseconds(),
+			"chat_ms": chatDur.Milliseconds(),
+			"tool_ms": toolDur.Milliseconds(),
+		})
+	}()
 
 	iterLog.Debug().Int("iter", iter+1).Msg("running inference")
 
+	chatStart := time.Now()
 	resp, err := a.callChat(iterCtx, buildChatRequest(a.conversation, a.toolDocs, a.llmConfig), iter)
+	chatDur = time.Since(chatStart)
 	if err != nil {
 		mphotel.FailSpan(iterSpan, err)
 		iterSpan.End()
@@ -207,7 +252,7 @@ func (a *Agent) runIteration(ctx context.Context, cli *multipass.Client, conf co
 
 	// The reported usage is the measurement; anything this turn appends on top
 	// of it is tallied by addToolTokens below.
-	recordTokenUsage(iterCtx, a, iterSpan, iterLog, resp.Usage)
+	a.recordTokenUsage(iterCtx, iterSpan, iterLog, resp.Usage)
 	a.contextTokens = 0
 	if resp.Usage != nil {
 		a.contextTokens = int64(resp.Usage.TotalTokens)
@@ -264,7 +309,9 @@ func (a *Agent) runIteration(ctx context.Context, cli *multipass.Client, conf co
 	toolCallDocs := a.buildToolCallDocsWithContext(iterCtx, toolCalls, iter)
 	a.conversation = appendToConversation(a.conversation, buildAssistantMessage(msg, toolCallDocs, conf.Agent.Reasoning()))
 
+	toolStart := time.Now()
 	toolResponses, newOutputs := a.executeToolCalls(iterCtx, cli, conf, toolCalls)
+	toolDur = time.Since(toolStart)
 	a.commandOutputs = append(a.commandOutputs, newOutputs...)
 	a.conversation = appendToConversation(a.conversation, toolResponses...)
 	a.addToolTokens(iterCtx, toolResponses)
@@ -291,8 +338,51 @@ func (a *Agent) addToolTokens(ctx context.Context, msgs []model.D) {
 		return
 	}
 	a.contextTokens += added
-	if contextTokensGauge != nil {
-		contextTokensGauge.Record(ctx, a.contextTokens, metric.WithAttributes(mphotel.RunAttrs(ctx)...))
+}
+
+func (a *Agent) recordTokenUsage(ctx context.Context, span trace.Span, log zerolog.Logger, usage *model.Usage) {
+	if usage == nil {
+		return
+	}
+	a.totals.PromptTokens += int64(usage.PromptTokens)
+	a.totals.CompletionTokens += int64(usage.CompletionTokens)
+	fields := map[string]any{
+		"event":             eventTokenUsage,
+		"prompt_tokens":     usage.PromptTokens,
+		"completion_tokens": usage.CompletionTokens,
+		"total_tokens":      usage.TotalTokens,
+		"tps":               usage.TokensPerSecond,
+		// Logged even when 0: a measured 0 means the inference cache reused
+		// nothing this turn, which is a real signal rather than a gap.
+		"cached_tokens":    usage.PromptTokensDetails.CachedTokens,
+		"reasoning_tokens": usage.CompletionTokensDetails.ReasoningTokens,
+		"ttft_ms":          usage.TimeToFirstTokenMS,
+	}
+	if iter, ok := iterationFromContext(ctx); ok {
+		fields["iter"] = iter
+	}
+	// Kronk auto-tunes the window, so the configured value (0 = auto) is not
+	// the real limit; only the model's reported window is.
+	if window := a.krn.ModelConfig().ContextWindow(); window > 0 {
+		fields["ctx_window"] = window
+	}
+	mphotel.LogEvent(ctx, log, zerolog.InfoLevel, "token usage", fields)
+	span.SetAttributes(
+		attribute.Int("mph.tokens.prompt", usage.PromptTokens),
+		attribute.Int("mph.tokens.completion", usage.CompletionTokens),
+		attribute.Int("mph.tokens.total", usage.TotalTokens),
+		attribute.Float64("mph.tokens_per_second", usage.TokensPerSecond),
+	)
+}
+
+func addToolCallEvents(span trace.Span, toolCalls []model.ResponseToolCall, maxArgs int) {
+	for _, tc := range toolCalls {
+		argsJSON, _ := json.Marshal(tc.Function.Arguments)
+		span.AddEvent("mph.agent.tool_call", trace.WithAttributes(
+			attribute.String("mph.tool.name", tc.Function.Name),
+			attribute.String("mph.tool.id", tc.ID),
+			attribute.String("mph.tool.arguments", textutil.Truncate(string(argsJSON), maxArgs)),
+		))
 	}
 }
 
@@ -329,11 +419,7 @@ func (a *Agent) callChat(ctx context.Context, req model.D, iter int) (model.Chat
 	callCtx = mphotel.InjectTracing(callCtx, getAgentTracer(),
 		eventAttrs(ctx, attribute.Int("mph.iteration", iter+1))...)
 
-	start := time.Now()
 	resp, err := a.krn.Chat(callCtx, req)
-	if chatDurationHist != nil {
-		chatDurationHist.Record(callCtx, time.Since(start).Seconds(), metric.WithAttributes(eventAttrs(callCtx)...))
-	}
 	if err != nil {
 		return model.ChatResponse{}, fmt.Errorf("kronk chat iteration %d: %w", iter+1, err)
 	}
@@ -374,10 +460,11 @@ func (a *Agent) buildToolCallDocsWithContext(ctx context.Context, toolCalls []mo
 	for _, tc := range toolCalls {
 		argsJSON, _ := json.Marshal(tc.Function.Arguments)
 		mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "agent tool call", map[string]any{
-			"iter": iter + 1,
-			"tool": tc.Function.Name,
-			"id":   tc.ID,
-			"args": json.RawMessage(argsJSON),
+			"event": eventAgentToolCall,
+			"iter":  iter + 1,
+			"tool":  tc.Function.Name,
+			"id":    tc.ID,
+			"args":  json.RawMessage(argsJSON),
 		})
 
 		docs = append(docs, model.D{
@@ -397,6 +484,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg
 	var commandOutputs []string
 
 	span := trace.SpanFromContext(ctx)
+	iter, _ := iterationFromContext(ctx)
 	for _, tc := range toolCalls {
 		start := time.Now()
 		result, err := Call(ctx, cli, cfg, a.store, tc.Function.Name, map[string]any(tc.Function.Arguments))
@@ -406,11 +494,15 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg
 		detail := result
 		var content string
 
+		a.totals.ToolCalls++
 		if err == nil {
 			mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "tool succeeded", map[string]any{
-				"tool": tc.Function.Name,
-				"id":   tc.ID,
-				"out":  textutil.Truncate(result, cfg.Truncation.ToolResult),
+				"event":  eventToolSucceeded,
+				"iter":   iter,
+				"tool":   tc.Function.Name,
+				"id":     tc.ID,
+				"dur_ms": duration.Milliseconds(),
+				"out":    textutil.Truncate(result, cfg.Truncation.ToolResult),
 			})
 		}
 
@@ -419,16 +511,15 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg
 			status = "FAILED"
 			detail = err.Error()
 			mphotel.LogEvent(ctx, a.log, zerolog.ErrorLevel, "tool execution failed", map[string]any{
-				"tool":  tc.Function.Name,
-				"id":    tc.ID,
-				"error": err,
+				"event":  eventToolFailed,
+				"iter":   iter,
+				"tool":   tc.Function.Name,
+				"id":     tc.ID,
+				"dur_ms": duration.Milliseconds(),
+				"error":  err,
 			})
 			content = buildToolErrorContent(err)
-			if toolFailuresCounter != nil {
-				toolFailuresCounter.Add(ctx, 1, metric.WithAttributes(eventAttrs(ctx,
-					attribute.String("mph.tool.name", tc.Function.Name))...))
-			}
-			a.totals.ToolFailures[tc.Function.Name]++
+			a.totals.ToolFailures++
 		case isToolEnvelope(result):
 			if isCaptureEnvelope(result) {
 				if id := capturedOutputID(result); id != "" {
@@ -458,17 +549,6 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg
 			attribute.String("mph.tool.result", textutil.Truncate(detail, cfg.Truncation.ToolResult)),
 			attribute.Int64("mph.tool.duration_ms", duration.Milliseconds()),
 		))
-
-		if toolCallsCounter != nil {
-			toolCallsCounter.Add(ctx, 1, metric.WithAttributes(eventAttrs(ctx,
-				attribute.String("mph.tool.name", tc.Function.Name))...))
-		}
-		a.totals.ToolCalls[tc.Function.Name]++
-		if toolDurationHist != nil {
-			toolDurationHist.Record(ctx, duration.Seconds(), metric.WithAttributes(eventAttrs(ctx,
-				attribute.String("mph.tool.name", tc.Function.Name),
-				attribute.String("mph.tool.status", status))...))
-		}
 
 		toolResponses = append(toolResponses, buildToolResponseMessage(tc, content))
 	}

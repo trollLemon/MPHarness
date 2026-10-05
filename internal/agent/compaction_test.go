@@ -12,63 +12,12 @@ import (
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	"github.com/rs/zerolog"
-	"go.opentelemetry.io/otel"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/trollLemon/MPHarness/internal/config"
 	"github.com/trollLemon/MPHarness/internal/multipass"
 	mphotel "github.com/trollLemon/MPHarness/internal/otel"
 	"github.com/trollLemon/MPHarness/internal/output"
 )
-
-func resetAgentMetrics() {
-	contextTokensGauge, contextWindowGauge = nil, nil
-	iterationDurationHist, chatDurationHist, prefillTTFTHist = nil, nil, nil
-	prefillCachedHist, agentTokensHist, reasoningTokensHist, tpsHist = nil, nil, nil, nil
-	toolDurationHist, toolCallsCounter, toolFailuresCounter = nil, nil, nil
-	compactionsCounter, compactionDurationHist, tokensReclaimedHist = nil, nil, nil
-	runDurationGauge, runTokensGauge, runIterationsGauge = nil, nil, nil
-	runToolCallsGauge, runToolFailuresGauge, runCompactionsGauge, runFinishedGauge = nil, nil, nil, nil
-}
-
-func newManualReader(t *testing.T) *sdkmetric.ManualReader {
-	t.Helper()
-	reader := sdkmetric.NewManualReader()
-	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	prev := otel.GetMeterProvider()
-	otel.SetMeterProvider(provider)
-	t.Cleanup(func() {
-		otel.SetMeterProvider(prev)
-		resetAgentMetrics()
-	})
-	return reader
-}
-
-func lastGaugeValue(t *testing.T, reader *sdkmetric.ManualReader, name string) int64 {
-	t.Helper()
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("collect: %v", err)
-	}
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name != name {
-				continue
-			}
-			g, ok := m.Data.(metricdata.Gauge[int64])
-			if !ok {
-				t.Fatalf("%s is not Gauge[int64]: %T", name, m.Data)
-			}
-			if len(g.DataPoints) == 0 {
-				t.Fatalf("%s has no points", name)
-			}
-			return g.DataPoints[len(g.DataPoints)-1].Value
-		}
-	}
-	t.Fatalf("metric %s not found", name)
-	return 0
-}
 
 func bigToolStep(content string, total int) model.ChatResponse {
 	return chatResp(content, "", model.FinishReasonTool, []model.ResponseToolCall{
@@ -211,7 +160,6 @@ func TestExecuteCompaction(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			newManualReader(t)
 			mock := &mockKronk{contextWidth: 8192, responses: tt.responses, failHandover: tt.failHandover}
 			agt := NewAgent(zerolog.New(&buf), mock, Options{
 				MaxIterations: tt.maxIter,
@@ -234,8 +182,8 @@ func TestExecuteCompaction(t *testing.T) {
 	}
 }
 
-func TestCompactionGaugeDropsAfterApply(t *testing.T) {
-	reader := newManualReader(t)
+func TestCompactionEventReportsContextDrop(t *testing.T) {
+	var buf bytes.Buffer
 	big := strings.Repeat("s", 4000)
 	mock := &mockKronk{
 		contextWidth: 8192,
@@ -245,12 +193,12 @@ func TestCompactionGaugeDropsAfterApply(t *testing.T) {
 			chatResp("final", "", model.FinishReasonStop, nil, &model.Usage{TotalTokens: 1050}),
 		},
 	}
-	agt := NewAgent(zerolog.Nop(), mock, Options{
+	agt := NewAgent(zerolog.New(&buf), mock, Options{
 		MaxIterations: 5,
 		ChatTimeout:   time.Second,
 		TotalTimeout:  30 * time.Second,
 		LLM:           defaultLLMConfig(),
-		RunID:         "run-gauge",
+		RunID:         "run-compaction-drop",
 	})
 	conf := config.Config{
 		VM:         config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
@@ -262,14 +210,27 @@ func TestCompactionGaugeDropsAfterApply(t *testing.T) {
 		t.Fatalf("execute: %v", err)
 	}
 	if countHandovers(mock) == 0 {
-		t.Fatalf("no compaction summary call ran; gauge drop would not prove compaction")
+		t.Fatalf("no compaction summary call ran; the event would not prove compaction")
 	}
-	last := lastGaugeValue(t, reader, "mph.context.tokens")
-	if last >= 7500 {
-		t.Fatalf("post-compaction gauge %d must drop below pre-compaction 7500", last)
+	events := decodeEvents(t, &buf)
+	var applied map[string]any
+	for _, e := range eventsOf(events, eventContextCompaction) {
+		if e["outcome"] == "applied" {
+			applied = e
+		}
 	}
-	if last < 0 {
-		t.Fatalf("gauge must never go negative, got %d", last)
+	if applied == nil {
+		t.Fatalf("no applied context_compaction event in %v", eventsOf(events, eventContextCompaction))
+	}
+	before, after := applied["tok_before"].(float64), applied["tok_after"].(float64)
+	if after >= 7500 || after < 0 {
+		t.Fatalf("tok_after = %v, want 0 <= tok_after < 7500", after)
+	}
+	if got := applied["reclaimed"]; got != before-after {
+		t.Errorf("reclaimed = %v, want tok_before-tok_after = %v", got, before-after)
+	}
+	if len(eventsOf(events, eventContextCompactionApplied)) != 1 {
+		t.Errorf("want exactly one context_compaction_applied event")
 	}
 }
 
@@ -553,7 +514,7 @@ func TestCompactionAppliesBeforeWindowIsExceeded(t *testing.T) {
 }
 
 // slowSummarizerKronk makes the summarizer's chat call take measurable time, so
-// a compaction that lands in the histogram is large enough to tell seconds from
+// a compaction duration is large enough to tell seconds from
 // milliseconds.
 type slowSummarizerKronk struct {
 	*mockKronk
@@ -567,51 +528,36 @@ func (s *slowSummarizerKronk) Chat(ctx context.Context, req model.D) (model.Chat
 	return s.mockKronk.Chat(ctx, req)
 }
 
-// The compaction histogram is named without a unit, so a surviving query that
-// still expects milliseconds would read 1000x wrong instead of failing.
-func TestCompactionDurationIsRecordedInSeconds(t *testing.T) {
-	reader := newManualReader(t)
-	initAgentMetrics()
-
+// The field is named dur_ms, so a value recorded in seconds would read 1000x
+// too small on the dashboard instead of failing.
+func TestCompactionDurationIsLoggedInMilliseconds(t *testing.T) {
+	var buf bytes.Buffer
 	big := strings.Repeat("s", 4000)
 	mock := &slowSummarizerKronk{mockKronk: &mockKronk{contextWidth: 8192, responses: []model.ChatResponse{
 		bigToolStep(big, 7500), chatResp("final", "", model.FinishReasonStop, nil, &model.Usage{TotalTokens: 800}),
 	}}}
-	agent := NewAgent(zerolog.Nop(), mock, Options{
+	agent := NewAgent(zerolog.New(&buf), mock, Options{
 		MaxIterations: 3, ChatTimeout: time.Second, TotalTimeout: 30 * time.Second,
-		LLM: defaultLLMConfig(), RunID: "run-compact-seconds",
+		LLM: defaultLLMConfig(), RunID: "run-compact-ms",
 	})
 	conf := config.Config{
 		VM:         config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
 		Prompt:     "task",
 		Compaction: enabledCompaction(),
 	}
-	ctx := mphotel.WithRunIdentity(context.Background(), "baseline:run-compact-seconds", "baseline")
+	ctx := mphotel.WithRunIdentity(context.Background(), "baseline:run-compact-ms", "baseline")
 	if err := agent.Execute(ctx, conf, multipass.New(zerolog.Nop())); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("collect: %v", err)
+	compactions := eventsOf(decodeEvents(t, &buf), eventContextCompaction)
+	if len(compactions) == 0 {
+		t.Fatal("no context_compaction event was logged")
 	}
-	var found bool
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name != "mph.context.compaction.duration" {
-				continue
-			}
-			found = true
-			for _, dp := range m.Data.(metricdata.Histogram[float64]).DataPoints {
-				// The summarizer sleeps 50ms, so seconds land near 0.05 and
-				// milliseconds land near 50.
-				if dp.Sum > 5 {
-					t.Errorf("mph.context.compaction.duration sum = %v, too large to be seconds; the unit looks like milliseconds", dp.Sum)
-				}
-			}
+	for _, e := range compactions {
+		// The summarizer sleeps 50ms, so milliseconds land near 50 and seconds near 0.
+		if d := e["dur_ms"].(float64); d < 50 || d > 5000 {
+			t.Errorf("dur_ms = %v, want ~50 for a 50ms summarizer call", d)
 		}
-	}
-	if !found {
-		t.Fatal("mph.context.compaction.duration was never recorded")
 	}
 }
