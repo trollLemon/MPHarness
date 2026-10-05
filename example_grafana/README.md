@@ -23,10 +23,13 @@ provisioned read-only from `example_grafana/dashboards/`, so edit the JSON in th
 rather than the panel editor: the file is the source of truth and the UI is only
 ever a viewer. Tempo traces are reachable through Grafana Explore.
 
-The dashboard's **Run traces** table links each trace ID to its waterfall in
-Explore. Tables use explicit measurement names rather than Grafana's default
-`Value #A` headers. Token counts are shown without pricing or cost estimates;
-the application does not calculate monetary costs.
+The dashboard's **Run traces** table lists one row per span for the selected run,
+so nested spans such as `multipass.exec` appear alongside their parent; each row
+links to its waterfall in Explore. TraceQL search only sees flushed blocks, so a
+run becomes searchable roughly a minute after it finishes. Tables use explicit
+measurement names rather than Grafana's default `Value #A` headers. Token counts
+are shown without pricing or cost estimates; the application does not calculate
+monetary costs.
 
 **Context over time** is a line plot whose time axis fits the selected run's
 samples, not the continuously advancing dashboard clock. Samples at and after
