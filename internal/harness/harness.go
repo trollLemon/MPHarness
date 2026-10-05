@@ -64,20 +64,26 @@ type Options struct {
 	IgnoreExisting bool
 	Keep           bool
 	RunID          string
+	RunLabel       string
+	RunName        string
 }
 
 func Start(ctx context.Context, agt *agent.Agent, client *multipass.Client, cfg config.Config, opts Options) error {
 	tracer := otel.Tracer("mph")
+	// Injected before the root span so mph.run and every span beneath it carry
+	// the run identity, not just the agent's own spans.
+	ctx = mphotel.WithRunIdentity(ctx, opts.RunLabel, opts.RunName)
 	ctx, span := tracer.Start(ctx, "mph.run", trace.WithAttributes(
-		attribute.String("mph.vm.name", cfg.VM.Name),
-		attribute.String("mph.model", cfg.Model),
-		attribute.String("mph.prompt", textutil.Truncate(cfg.Prompt, cfg.Truncation.LogContent)),
-		attribute.Bool("mph.keep", opts.Keep),
-		attribute.Bool("mph.ignore_existing", opts.IgnoreExisting),
-		attribute.StringSlice("mph.allowed_commands", cfg.AllowedCommandsList()),
-		attribute.String("mph.content_dir", cfg.ContentDir),
-		attribute.String("mph.content.destination", config.VMContentDir),
-	))
+		append(mphotel.RunSpanAttrs(ctx),
+			attribute.String("mph.vm.name", cfg.VM.Name),
+			attribute.String("mph.model", cfg.Model),
+			attribute.String("mph.prompt", textutil.Truncate(cfg.Prompt, cfg.Truncation.LogContent)),
+			attribute.Bool("mph.keep", opts.Keep),
+			attribute.Bool("mph.ignore_existing", opts.IgnoreExisting),
+			attribute.StringSlice("mph.allowed_commands", cfg.AllowedCommandsList()),
+			attribute.String("mph.content_dir", cfg.ContentDir),
+			attribute.String("mph.content.destination", config.VMContentDir),
+		)...))
 	defer span.End()
 
 	_, infoErr := client.Info(ctx, cfg.VM.Name)

@@ -45,16 +45,16 @@ golangci-lint run
 - Only add comments for non-obvious workarounds or constraints
 
 ## Testing OTel Instrumentation
-OTel is disabled by default; when enabled it exports logs, traces, and metrics via OTLP/gRPC (default `localhost:4317`).
+OTel is disabled by default; when enabled it exports logs and traces via OTLP/gRPC (default `localhost:4317`). There are no OTel metrics: dashboards use LogQL over structured log events.
 
 ### Smoke test (tiny deterministic model)
 Uses `testing/test.yaml` (Ministral-3-14B-Instruct-2512-UD-Q4_K_XL, `llm.temperature: 0.0` so output is stable across runs) with `otel.enabled: true`:
 ```bash
 make build
-make otel-up                       # Compose stack under testing/, OTLP on localhost:4317
+make otel-up                       # Compose stack under docker-compose/, OTLP on localhost:4317
 ./bin/mph ./testing/test.yaml
 ```
-Traces: `mph.run` → `mph.vm.create`/`multipass.launch` → `mph.agent.iteration`×N (with `mph.agent.tool_call`/`tool_result` events and `multipass.exec` children) → `mph.vm.delete`; logs mirror console lines with `trace_id`; metrics like `mph.tokens`, `mph.agent.tool.calls`.
+Traces: `mph.run` → `mph.vm.create`/`multipass.launch` → `mph.agent.iteration`×N (with `mph.agent.tool_call`/`tool_result` events and `multipass.exec` children) → `mph.vm.delete`; logs mirror console lines with `trace_id`; dashboard data comes from log lines tagged `event=` (`token_usage`, `iteration`, `agent_tool_call`, `tool_succeeded`, `tool_failed`, `context_compaction`, `context_compaction_applied`, `run_summary`).
 
 ### Negative checks
 - Run `./bin/mph ./test.yaml` with collector down. It must complete with no `:4317` dials. This proves default-off.

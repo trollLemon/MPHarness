@@ -1,10 +1,12 @@
+run:
+  name: long-run-test-3
 vm:
-  name: mph-longrun
+  name: mph-longrun-3
   disk: 10G
   ram: 2G
   cpu: 1
   image: bionic
-model: unsloth/Ministral-3-3B-Reasoning-2512-UD-Q4_K_XL
+model: unsloth/granite-4.0-h-1b
 allowed_commands:
   - ls
   - cat
@@ -23,14 +25,27 @@ allowed_commands:
   - date
   - whoami
 llm:
-  temperature: 1.0
-  top_p: 0.95
-  top_k: 64
   tool_choice: auto
 agent:
   max_iterations: 60
   chat_timeout: 60m
   total_timeout: 90m
+
+compaction:
+  enabled: true
+  threshold: 0.91
+  max_summary_tokens: 900
+  min_messages: 6
+  max_attempts: 3  
+
+output:
+  enabled: true
+  mode: always
+  inline_max_size: 0
+  max_command_size: 64MiB
+  max_total_size: 512MiB
+  search_max_matches: 200
+
 prompt: |
   Inside the Multipass VM, please do the following.
   1. Run `uname -a`.
@@ -69,6 +84,6 @@ prompt: |
 otel:
   enabled: true
   endpoint: localhost:4317
-  service_name: mph-longrun
+  service_name: mph-longrun-3
   resource_attributes:
     environment: dev

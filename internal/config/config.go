@@ -325,7 +325,12 @@ func (c CompactionConfig) Validate() error {
 	return nil
 }
 
+type RunConfig struct {
+	Name string `yaml:"name"`
+}
+
 type Config struct {
+	Run             RunConfig        `yaml:"run"`
 	VM              VMConfig         `yaml:"vm"`
 	Model           string           `yaml:"model"`
 	Prompt          string           `yaml:"prompt"`

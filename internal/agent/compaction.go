@@ -9,7 +9,6 @@ import (
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/trollLemon/MPHarness/internal/compact"
@@ -124,8 +123,13 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) string {
 	}
 
 	compCtx, compSpan := getAgentTracer().Start(ctx, "mph.context.compaction",
-		trace.WithAttributes(runSpanAttrs(ctx, attribute.Int("mph.iteration", a.iteration+1))...))
+		trace.WithAttributes(mphotel.RunSpanAttrs(ctx, attribute.Int("mph.iteration", a.iteration+1))...))
 	defer compSpan.End()
+
+	// eventAttrs reads the iteration from ctx, and compCtx is about to become
+	// the summarizer's chat context, so the labelled tracer has to be built
+	// from the caller's context rather than the derived one.
+	compCtx = mphotel.InjectTracing(compCtx, getAgentTracer(), eventAttrs(ctx)...)
 
 	start := time.Now()
 	summarizer := &agentSummarizer{krn: a.krn, chatTimeout: a.chatTimeout}
@@ -158,28 +162,18 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) string {
 	)
 	compLog := a.log.With().Ctx(compCtx).Logger()
 	mphotel.LogEvent(compCtx, compLog, zerolog.WarnLevel, "context compaction", map[string]any{
-		"iter": a.iteration + 1, "outcome": outcome, "tok_before": before, "tok_after": after,
-		"thr": cc.Threshold, "summary": summaryBytes, "handles": len(infos),
+		"event": eventContextCompaction,
+		"iter":  a.iteration + 1, "outcome": outcome, "tok_before": before, "tok_after": after,
+		"reclaimed": before - after, "thr": cc.Threshold, "summary": summaryBytes, "handles": len(infos),
 		"compacted": a.compactionsApplied,
 		"try":       a.compactionAttempts + 1, "dur_ms": duration.Milliseconds(),
 	})
-	if compactionsCounter != nil {
-		compactionsCounter.Add(compCtx, 1, metric.WithAttributes(attribute.String("mph.context.compaction.outcome", outcome)))
-	}
-	if compactionDurationHist != nil {
-		compactionDurationHist.Record(compCtx, float64(duration.Milliseconds()), metric.WithAttributes(attribute.String("mph.context.compaction.outcome", outcome)))
-	}
 
 	switch outcome {
 	case "applied":
 		// Rewriting history invalidates the inference prefix cache. Accepted:
 		// one re-prefill of a small prompt buys back thousands of tokens.
-		if tokensReclaimedHist != nil {
-			tokensReclaimedHist.Record(compCtx, before-after)
-		}
-		if contextTokensGauge != nil {
-			contextTokensGauge.Record(compCtx, after)
-		}
+		a.totals.ReclaimedTokens += before - after
 		a.compactionsApplied++
 		// A compaction that worked proves the summarizer and handover are
 		// healthy, so the failure budget is restored. Otherwise one failure
@@ -187,6 +181,8 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) string {
 		a.compactionAttempts = 0
 
 		mphotel.LogEvent(compCtx, compLog, zerolog.InfoLevel, "context compaction", map[string]any{
+			"event":     eventContextCompactionApplied,
+			"iter":      a.iteration + 1,
 			"compacted": newConv,
 		})
 

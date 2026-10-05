@@ -11,15 +11,14 @@ import (
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	"github.com/rs/zerolog"
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/trollLemon/MPHarness/internal/config"
 	"github.com/trollLemon/MPHarness/internal/multipass"
+	mphotel "github.com/trollLemon/MPHarness/internal/otel"
 	"github.com/trollLemon/MPHarness/internal/output"
 	"github.com/trollLemon/MPHarness/internal/textutil"
 )
@@ -930,24 +929,14 @@ func TestCallChatUsesTimeout(t *testing.T) {
 	}
 }
 
-func TestExecuteTagsMetricsWithRunID(t *testing.T) {
-	reader := sdkmetric.NewManualReader()
-	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	prev := otel.GetMeterProvider()
-	otel.SetMeterProvider(provider)
-	t.Cleanup(func() {
-		otel.SetMeterProvider(prev)
-		tokensHist, tpsHist, iterationsCounter = nil, nil, nil
-		toolDurationHist, toolCallsCounter, toolFailuresCounter = nil, nil, nil
-		contextWindowGauge, contextTokensGauge = nil, nil
-		compactionsCounter, compactionDurationHist, tokensReclaimedHist = nil, nil, nil
-	})
+func TestExecuteLogsTokenUsageAndIterationEvents(t *testing.T) {
+	var buf bytes.Buffer
 	mock := &mockKronk{
 		contextWidth: 32768,
 		responses: []model.ChatResponse{chatResp("done", "", model.FinishReasonStop, nil,
 			&model.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120, TokensPerSecond: 8.5})},
 	}
-	agent := NewAgent(zerolog.Nop(), mock, Options{
+	agent := NewAgent(zerolog.New(&buf), mock, Options{
 		MaxIterations: 2,
 		ChatTimeout:   time.Second,
 		TotalTimeout:  5 * time.Second,
@@ -955,129 +944,33 @@ func TestExecuteTagsMetricsWithRunID(t *testing.T) {
 		RunID:         "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5",
 	})
 	conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
-	if err := agent.Execute(context.Background(), conf, multipass.New(zerolog.Nop())); err != nil {
+	ctx := mphotel.WithRunIdentity(context.Background(), "baseline:0198f0c1-2a3b-7c4d-8e5f-60718293a4b5", "baseline")
+	if err := agent.Execute(ctx, conf, multipass.New(zerolog.Nop())); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 
-	var rm metricdata.ResourceMetrics
-	if err := reader.Collect(context.Background(), &rm); err != nil {
-		t.Fatalf("collect: %v", err)
-	}
-
-	seen := map[string]bool{}
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			seen[m.Name] = true
-			for _, set := range dataPointAttrs(m.Data) {
-				if v, ok := set.Value("mph.run.id"); ok {
-					t.Fatalf("metric %q must not carry mph.run.id, got %q", m.Name, v.AsString())
-				}
-			}
-			if m.Name == "mph.context.window" || m.Name == "mph.context.tokens" {
-				if _, ok := m.Data.(metricdata.Gauge[int64]); !ok {
-					t.Errorf("metric %q must be Int64Gauge, got %T", m.Name, m.Data)
-				}
-			}
-		}
-	}
-
-	for _, name := range []string{
-		"mph.tokens", "mph.tokens_per_second", "mph.iterations",
-		"mph.context.window", "mph.context.tokens",
+	events := decodeEvents(t, &buf)
+	usage := onlyEvent(t, events, eventTokenUsage)
+	for key, want := range map[string]float64{
+		"iter": 1, "prompt_tokens": 100, "completion_tokens": 20,
+		"total_tokens": 120, "tps": 8.5, "ctx_window": 32768,
 	} {
-		if !seen[name] {
-			t.Errorf("metric %q was never recorded", name)
+		if got := usage[key]; got != want {
+			t.Errorf("token_usage %s = %v, want %v", key, got, want)
 		}
 	}
 
-	if got := runSpanAttrs(withRunID(context.Background(), "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5")); len(got) == 0 {
-		t.Fatalf("runSpanAttrs must still carry mph.run.id on spans")
+	iteration := onlyEvent(t, events, eventIteration)
+	if iteration["iter"] != float64(1) {
+		t.Errorf("iteration iter = %v, want 1", iteration["iter"])
 	}
-}
+	for _, key := range []string{"dur_ms", "chat_ms", "tool_ms"} {
+		if _, ok := iteration[key].(float64); !ok {
+			t.Errorf("iteration event missing numeric %q: %v", key, iteration)
+		}
+	}
 
-func TestRunIDFromContext(t *testing.T) {
-	const id = "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5"
-	tests := []struct {
-		name string
-		ctx  context.Context
-		want string
-	}{
-		{"bare context yields empty", context.Background(), ""},
-		{"run id round-trips", withRunID(context.Background(), id), id},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := runIDFromContext(tt.ctx); got != tt.want {
-				t.Errorf("got %q want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestRunSpanAttrs(t *testing.T) {
-	const id = "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5"
-	iter := attribute.Int("mph.iteration", 3)
-	tests := []struct {
-		name      string
-		ctx       context.Context
-		wantKeys  []string
-		wantRunID string
-	}{
-		{"omits run id when unset", context.Background(), []string{"mph.iteration"}, ""},
-		{"adds run id when set", withRunID(context.Background(), id), []string{"mph.iteration", "mph.run.id"}, id},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := runSpanAttrs(tt.ctx, iter)
-			if len(got) != len(tt.wantKeys) {
-				t.Fatalf("got %d attrs, want %d: %v", len(got), len(tt.wantKeys), got)
-			}
-			for i, key := range tt.wantKeys {
-				if string(got[i].Key) != key {
-					t.Errorf("attr %d key = %q, want %q", i, got[i].Key, key)
-				}
-			}
-			if tt.wantRunID != "" && got[1].Value.AsString() != tt.wantRunID {
-				t.Errorf("run id = %q, want %q", got[1].Value.AsString(), tt.wantRunID)
-			}
-		})
-	}
-}
-
-func dataPointAttrs(data metricdata.Aggregation) []attribute.Set {
-	switch a := data.(type) {
-	case metricdata.Histogram[int64]:
-		out := make([]attribute.Set, 0, len(a.DataPoints))
-		for _, dp := range a.DataPoints {
-			out = append(out, dp.Attributes)
-		}
-		return out
-	case metricdata.Histogram[float64]:
-		out := make([]attribute.Set, 0, len(a.DataPoints))
-		for _, dp := range a.DataPoints {
-			out = append(out, dp.Attributes)
-		}
-		return out
-	case metricdata.Sum[int64]:
-		out := make([]attribute.Set, 0, len(a.DataPoints))
-		for _, dp := range a.DataPoints {
-			out = append(out, dp.Attributes)
-		}
-		return out
-	case metricdata.Sum[float64]:
-		out := make([]attribute.Set, 0, len(a.DataPoints))
-		for _, dp := range a.DataPoints {
-			out = append(out, dp.Attributes)
-		}
-		return out
-	case metricdata.Gauge[int64]:
-		out := make([]attribute.Set, 0, len(a.DataPoints))
-		for _, dp := range a.DataPoints {
-			out = append(out, dp.Attributes)
-		}
-		return out
-	}
-	return nil
+	onlyEvent(t, events, eventRunSummary)
 }
 
 func TestFinalCommandOutput(t *testing.T) {
@@ -1258,5 +1151,127 @@ func TestExecuteToolCallsEmitsOneResultEventPerCall(t *testing.T) {
 	}
 	if results != len(calls) {
 		t.Fatalf("want %d mph.agent.tool_result events, got %d", len(calls), results)
+	}
+}
+
+func TestEventAttrsAddsIteration(t *testing.T) {
+	ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
+	ctx = withIteration(ctx, 6) // zero-based; label must be 7
+
+	got := eventAttrs(ctx, attribute.String("mph.tool.name", "multipass_exec"))
+
+	var iteration string
+	var hasRun bool
+	for _, kv := range got {
+		switch string(kv.Key) {
+		case "mph.iteration":
+			iteration = kv.Value.String()
+		case "mph.run.id":
+			hasRun = true
+		}
+	}
+	if iteration != "7" {
+		t.Errorf("mph.iteration = %q, want %q (iteration labels are 1-based)", iteration, "7")
+	}
+	if !hasRun {
+		t.Error("eventAttrs() dropped the run id")
+	}
+}
+
+func TestEventAttrsWithoutIteration(t *testing.T) {
+	ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
+
+	for _, kv := range eventAttrs(ctx) {
+		if string(kv.Key) == "mph.iteration" {
+			t.Errorf("eventAttrs() without iteration context emitted %q", kv.Key)
+		}
+	}
+}
+
+func TestRecordTokenUsageReadsPrefillAndCache(t *testing.T) {
+	var buf bytes.Buffer
+	ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
+	ctx = withIteration(ctx, 2)
+
+	a := &Agent{krn: &mockKronk{contextWidth: 8192}}
+	a.recordTokenUsage(ctx, trace.SpanFromContext(ctx), zerolog.New(&buf), &model.Usage{
+		PromptTokens:            1200,
+		CompletionTokens:        300,
+		TotalTokens:             1500,
+		TokensPerSecond:         42.5,
+		TimeToFirstTokenMS:      850,
+		PromptTokensDetails:     model.PromptTokensDetails{CachedTokens: 900},
+		CompletionTokensDetails: model.CompletionTokensDetails{ReasoningTokens: 120},
+	})
+
+	usage := onlyEvent(t, decodeEvents(t, &buf), eventTokenUsage)
+	for key, want := range map[string]float64{
+		"iter": 3, "prompt_tokens": 1200, "completion_tokens": 300, "total_tokens": 1500,
+		"tps": 42.5, "ttft_ms": 850, "cached_tokens": 900, "reasoning_tokens": 120, "ctx_window": 8192,
+	} {
+		if got := usage[key]; got != want {
+			t.Errorf("token_usage %s = %v, want %v", key, got, want)
+		}
+	}
+	if a.totals.PromptTokens != 1200 || a.totals.CompletionTokens != 300 {
+		t.Errorf("totals = %+v, want prompt 1200 and completion 300", a.totals)
+	}
+}
+
+// A measured 0 means the inference cache reused nothing; dropping the field
+// would leave a dashboard column blank, which reads as broken logging.
+func TestRecordTokenUsageKeepsZeroCachedTokens(t *testing.T) {
+	var buf bytes.Buffer
+	a := &Agent{krn: &mockKronk{}}
+	a.recordTokenUsage(t.Context(), trace.SpanFromContext(t.Context()), zerolog.New(&buf), &model.Usage{PromptTokens: 10})
+
+	usage := onlyEvent(t, decodeEvents(t, &buf), eventTokenUsage)
+	if got, ok := usage["cached_tokens"]; !ok || got != float64(0) {
+		t.Errorf("cached_tokens = %v (present=%v), want an explicit 0", got, ok)
+	}
+}
+
+// A run that stops early has a lower a.iteration than the cap, so it must not
+// be labelled budget_exhausted even though the cap was reached in the sense of
+// "the loop would have run again".
+func TestRunOutcomeDistinguishesCleanFinishFromExhaustion(t *testing.T) {
+	tests := []struct {
+		name         string
+		maxIter      int
+		finishReason string
+		toolCalls    []model.ResponseToolCall
+		want         runOutcome
+	}{
+		{"clean finish below the cap", 5, model.FinishReasonStop, nil, outcomeOK},
+		{"clean finish on the last permitted iteration", 1, model.FinishReasonStop, nil, outcomeOK},
+		{"cap reached while still calling tools", 1, model.FinishReasonTool, []model.ResponseToolCall{
+			{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{Name: "multipass_info", Arguments: model.ToolCallArguments{}}},
+		}, outcomeBudgetExhausted},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockKronk{contextWidth: 32768, responses: []model.ChatResponse{
+				chatResp("", "", tt.finishReason, tt.toolCalls, &model.Usage{TotalTokens: 100}),
+			}}
+			var buf bytes.Buffer
+			a := NewAgent(zerolog.New(&buf), mock, Options{
+				MaxIterations: tt.maxIter,
+				ChatTimeout:   time.Second,
+				TotalTimeout:  30 * time.Second,
+				LLM:           defaultLLMConfig(),
+				RunID:         "01J9",
+			})
+			conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
+			ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
+			if err := a.Execute(ctx, conf, multipass.New(zerolog.Nop())); err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+
+			summary := onlyEvent(t, decodeEvents(t, &buf), eventRunSummary)
+			if got := runOutcome(summary["outcome"].(string)); got != tt.want {
+				t.Errorf("outcome = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

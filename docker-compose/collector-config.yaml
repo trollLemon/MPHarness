@@ -26,9 +26,6 @@ exporters:
     tls:
       insecure: true
 
-  prometheus:
-    endpoint: "0.0.0.0:8889"
-
   loki:
     endpoint: "http://loki:3100/loki/api/v1/push"
     tls:
@@ -56,10 +53,6 @@ service:
       receivers: [otlp]
       processors: [memory_limiter, batch]
       exporters: [debug, otlp/tempo]
-    metrics:
-      receivers: [otlp]
-      processors: [memory_limiter, batch]
-      exporters: [debug, prometheus]
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch]

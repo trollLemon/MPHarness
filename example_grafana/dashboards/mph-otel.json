@@ -1,0 +1,2353 @@
+{
+ "uid": "mph-otel",
+ "title": "MPHarness - OTel (Logs / Traces)",
+ "tags": [
+  "mph",
+  "otel",
+  "batch"
+ ],
+ "timezone": "browser",
+ "schemaVersion": 41,
+ "version": 6,
+ "refresh": "30s",
+ "editable": true,
+ "description": "Telemetry from batch test runs, not a long-running service. Every panel is LogQL over the structured log events mph emits (event=token_usage, iteration, agent_tool_call, tool_succeeded, tool_failed, context_compaction, context_compaction_applied, run_summary) plus Tempo traces. The $run variable picks one run by its Loki instance label, a <name>:<uuid> composite, so two runs sharing a name stay separate.",
+ "time": {
+  "from": "now-1h",
+  "to": "now"
+ },
+ "timepicker": {},
+ "annotations": {
+  "list": [
+   {
+    "name": "Compactions",
+    "datasource": {
+     "type": "loki",
+     "uid": "mph-loki"
+    },
+    "enable": true,
+    "hide": true,
+    "iconColor": "red",
+    "expr": "{instance=\"$run\"} |= \"context_compaction\" | json | attributes_event=\"context_compaction\"",
+    "titleFormat": "compaction {{attributes_outcome}}",
+    "textFormat": "iteration {{attributes_iter}}: {{attributes_tok_before}} -> {{attributes_tok_after}} tokens"
+   }
+  ]
+ },
+ "templating": {
+  "list": [
+   {
+    "name": "run",
+    "label": "Run",
+    "type": "query",
+    "datasource": {
+     "type": "loki",
+     "uid": "mph-loki"
+    },
+    "query": "label_values(instance)",
+    "definition": "label_values(instance)",
+    "refresh": 2,
+    "sort": 2,
+    "multi": false,
+    "includeAll": false,
+    "current": {},
+    "options": [],
+    "hide": 0,
+    "skipUrlSync": false
+   },
+   {
+    "name": "run_name",
+    "label": "Run name",
+    "type": "query",
+    "datasource": {
+     "type": "loki",
+     "uid": "mph-loki"
+    },
+    "query": "label_values({instance=\"$run\"}, instance)",
+    "definition": "label_values({instance=\"$run\"}, instance)",
+    "regex": "/^(.*):[^:]*$/",
+    "refresh": 1,
+    "sort": 1,
+    "multi": false,
+    "includeAll": false,
+    "current": {},
+    "options": [],
+    "hide": 2,
+    "skipUrlSync": false
+   }
+  ]
+ },
+ "panels": [
+  {
+   "type": "row",
+   "id": 200,
+   "title": "Run",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 0
+   },
+   "panels": []
+  },
+  {
+   "id": 201,
+   "type": "text",
+   "title": "Run name",
+   "description": "Selected run. `$run` is the composite `<name>:<uuid v7>` telemetry identity, read from the Loki `instance` stream label (the `service.instance.id` resource).",
+   "datasource": null,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 1
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "options": {
+    "mode": "markdown",
+    "content": "**Run:** `$run` &nbsp;&nbsp; **Name:** `$run_name`",
+    "showInEditor": false
+   }
+  },
+  {
+   "id": 202,
+   "type": "stat",
+   "title": "Outcome",
+   "description": "The outcome field of the run's run_summary log event, logged once when the run ends: a run with no value has not finished. ok green, budget_exhausted yellow, error and timeout red.",
+   "datasource": {
+    "type": "loki",
+    "uid": "mph-loki"
+   },
+   "gridPos": {
+    "h": 3,
+    "w": 3,
+    "x": 0,
+    "y": 2
+   },
+   "fieldConfig": {
+    "defaults": {
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "text"
+     },
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "ok": {
+         "index": 0,
+         "text": "ok",
+         "color": "green"
+        },
+        "budget_exhausted": {
+         "index": 1,
+         "text": "budget_exhausted",
+         "color": "yellow"
+        },
+        "error": {
+         "index": 2,
+         "text": "error",
+         "color": "red"
+        },
+        "timeout": {
+         "index": 3,
+         "text": "timeout",
+         "color": "red"
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "/^attributes_outcome$/",
+     "values": false
+    },
+    "orientation": "auto",
+    "textMode": "value",
+    "colorMode": "value",
+    "graphMode": "none",
+    "justifyMode": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "sum by (attributes_outcome) (count_over_time({instance=\"$run\"} |= \"run_summary\" | json | attributes_event=\"run_summary\" [$__range]))",
+     "queryType": "instant",
+     "legendFormat": "{{attributes_outcome}}"
+    }
+   ]
+  },
+  {
+   "id": 203,
+   "type": "stat",
+   "title": "Duration",
+   "description": "dur_ms of the run_summary event: wall time of the whole agent run.",
+   "datasource": {
+    "type": "loki",
+    "uid": "mph-loki"
+   },
+   "gridPos": {
+    "h": 3,
+    "w": 3,
+    "x": 3,
+    "y": 2
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "decimals": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "blue"
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "textMode": "value",
+    "colorMode": "value",
+    "graphMode": "none",
+    "justifyMode": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max(max_over_time({instance=\"$run\"} |= \"run_summary\" | json | attributes_event=\"run_summary\" | unwrap attributes_dur_ms | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    }
+   ]
+  },
+  {
+   "id": 204,
+   "type": "stat",
+   "title": "Iterations",
+   "description": "iterations of the run_summary event. An iteration that aborted the run is still counted.",
+   "datasource": {
+    "type": "loki",
+    "uid": "mph-loki"
+   },
+   "gridPos": {
+    "h": 3,
+    "w": 3,
+    "x": 6,
+    "y": 2
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "decimals": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "blue"
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "textMode": "value",
+    "colorMode": "value",
+    "graphMode": "none",
+    "justifyMode": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max(max_over_time({instance=\"$run\"} |= \"run_summary\" | json | attributes_event=\"run_summary\" | unwrap attributes_iterations | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    }
+   ]
+  },
+  {
+   "id": 205,
+   "type": "stat",
+   "title": "Prompt tokens",
+   "description": "prompt_tokens of the run_summary event: prompt tokens accumulated across the whole run.",
+   "datasource": {
+    "type": "loki",
+    "uid": "mph-loki"
+   },
+   "gridPos": {
+    "h": 3,
+    "w": 3,
+    "x": 9,
+    "y": 2
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "decimals": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "blue"
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "textMode": "value",
+    "colorMode": "value",
+    "graphMode": "none",
+    "justifyMode": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max(max_over_time({instance=\"$run\"} |= \"run_summary\" | json | attributes_event=\"run_summary\" | unwrap attributes_prompt_tokens | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    }
+   ]
+  },
+  {
+   "id": 206,
+   "type": "stat",
+   "title": "Completion tokens",
+   "description": "completion_tokens of the run_summary event: completion tokens accumulated across the whole run.",
+   "datasource": {
+    "type": "loki",
+    "uid": "mph-loki"
+   },
+   "gridPos": {
+    "h": 3,
+    "w": 3,
+    "x": 12,
+    "y": 2
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "decimals": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "blue"
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "textMode": "value",
+    "colorMode": "value",
+    "graphMode": "none",
+    "justifyMode": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max(max_over_time({instance=\"$run\"} |= \"run_summary\" | json | attributes_event=\"run_summary\" | unwrap attributes_completion_tokens | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    }
+   ]
+  },
+  {
+   "id": 207,
+   "type": "stat",
+   "title": "Reclaimed tokens",
+   "description": "reclaimed_tokens of the run_summary event: context tokens freed by applied compactions.",
+   "datasource": {
+    "type": "loki",
+    "uid": "mph-loki"
+   },
+   "gridPos": {
+    "h": 3,
+    "w": 3,
+    "x": 15,
+    "y": 2
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "decimals": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "blue"
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "textMode": "value",
+    "colorMode": "value",
+    "graphMode": "none",
+    "justifyMode": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max(max_over_time({instance=\"$run\"} |= \"run_summary\" | json | attributes_event=\"run_summary\" | unwrap attributes_reclaimed_tokens | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    }
+   ]
+  },
+  {
+   "id": 208,
+   "type": "stat",
+   "title": "Compactions",
+   "description": "compactions of the run_summary event: compactions applied during the run.",
+   "datasource": {
+    "type": "loki",
+    "uid": "mph-loki"
+   },
+   "gridPos": {
+    "h": 3,
+    "w": 3,
+    "x": 18,
+    "y": 2
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "decimals": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "blue"
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "textMode": "value",
+    "colorMode": "value",
+    "graphMode": "none",
+    "justifyMode": "auto"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max(max_over_time({instance=\"$run\"} |= \"run_summary\" | json | attributes_event=\"run_summary\" | unwrap attributes_compactions | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    }
+   ]
+  },
+  {
+   "type": "row",
+   "id": 210,
+   "title": "Where did the time go",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 5
+   },
+   "panels": []
+  },
+  {
+   "id": 211,
+   "type": "barchart",
+   "title": "Iteration duration split",
+   "description": "Per-iteration wall time from the iteration log event, split into model chat (chat_ms), tool execution (tool_ms) and overhead (dur_ms minus both).",
+   "datasource": {
+    "type": "loki",
+    "uid": "mph-loki"
+   },
+   "gridPos": {
+    "h": 9,
+    "w": 12,
+    "x": 0,
+    "y": 6
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "decimals": 0,
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 80,
+      "gradientMode": "none",
+      "axisPlacement": "auto"
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "iteration"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "none"
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "xField": "iteration",
+    "orientation": "vertical",
+    "showValue": "auto",
+    "stacking": "normal",
+    "groupWidth": 0.7,
+    "width": 0.9,
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "none"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max by (attributes_iter) (max_over_time({instance=\"$run\"} |= \"iteration\" | json | attributes_event=\"iteration\" | unwrap attributes_chat_ms | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max by (attributes_iter) (max_over_time({instance=\"$run\"} |= \"iteration\" | json | attributes_event=\"iteration\" | unwrap attributes_tool_ms | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max by (attributes_iter) (max_over_time({instance=\"$run\"} |= \"iteration\" | json | attributes_event=\"iteration\" | label_format overhead_ms=\"{{ sub (sub .attributes_dur_ms .attributes_chat_ms) .attributes_tool_ms }}\" | unwrap overhead_ms | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "merge",
+     "options": {}
+    },
+    {
+     "id": "convertFieldType",
+     "options": {
+      "conversions": [
+       {
+        "targetField": "attributes_iter",
+        "destinationType": "number"
+       }
+      ],
+      "fields": {}
+     }
+    },
+    {
+     "id": "sortBy",
+     "options": {
+      "sort": [
+       {
+        "field": "attributes_iter",
+        "desc": false
+       }
+      ]
+     }
+    },
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true
+      },
+      "renameByName": {
+       "attributes_iter": "iteration",
+       "Value #A": "chat",
+       "Value #B": "tools",
+       "Value #C": "overhead"
+      },
+      "indexByName": {
+       "attributes_iter": 0
+      }
+     }
+    },
+    {
+     "id": "convertFieldType",
+     "options": {
+      "conversions": [
+       {
+        "targetField": "iteration",
+        "destinationType": "string"
+       }
+      ],
+      "fields": {}
+     }
+    }
+   ]
+  },
+  {
+   "id": 212,
+   "type": "table",
+   "title": "Prefill TTFT",
+   "description": "ttft_ms and cached_tokens of each token_usage event. A cached_tokens of 0 is logged on purpose: the inference cache reused nothing that turn.",
+   "datasource": {
+    "type": "loki",
+    "uid": "mph-loki"
+   },
+   "gridPos": {
+    "h": 9,
+    "w": 6,
+    "x": 12,
+    "y": 6
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "decimals": 0,
+     "noValue": "0",
+     "custom": {
+      "align": "auto",
+      "cellOptions": {
+       "type": "auto"
+      },
+      "inspect": false
+     },
+     "mappings": []
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "ttft"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "ms"
+       },
+       {
+        "id": "decimals",
+        "value": 0
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max by (attributes_iter) (max_over_time({instance=\"$run\"} |= \"token_usage\" | json | attributes_event=\"token_usage\" | unwrap attributes_ttft_ms | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max by (attributes_iter) (max_over_time({instance=\"$run\"} |= \"token_usage\" | json | attributes_event=\"token_usage\" | unwrap attributes_cached_tokens | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "merge",
+     "options": {}
+    },
+    {
+     "id": "convertFieldType",
+     "options": {
+      "conversions": [
+       {
+        "targetField": "attributes_iter",
+        "destinationType": "number"
+       }
+      ],
+      "fields": {}
+     }
+    },
+    {
+     "id": "sortBy",
+     "options": {
+      "sort": [
+       {
+        "field": "attributes_iter",
+        "desc": false
+       }
+      ]
+     }
+    },
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true
+      },
+      "renameByName": {
+       "attributes_iter": "iteration",
+       "Value #A": "ttft",
+       "Value #B": "cached tokens"
+      },
+      "indexByName": {
+       "attributes_iter": 0
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": 213,
+   "type": "table",
+   "title": "Run traces",
+   "description": "One row per span for the selected run, so nested spans such as multipass.exec appear next to their parent. Select a row to open its trace in Explore. TraceQL search only covers flushed blocks, so a run becomes searchable about a minute after it finishes.",
+   "datasource": {
+    "type": "tempo",
+    "uid": "mph-tempo"
+   },
+   "gridPos": {
+    "h": 9,
+    "w": 6,
+    "x": 18,
+    "y": 6
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "tempo",
+      "uid": "mph-tempo"
+     },
+     "queryType": "traceqlSearch",
+     "filters": [
+      {
+       "id": "service-instance-id",
+       "scope": "resource",
+       "tag": "service.instance.id",
+       "operator": "=",
+       "value": "$run",
+       "valueType": "string"
+      }
+     ],
+     "limit": 100,
+     "tableType": "spans"
+    }
+   ]
+  },
+  {
+   "type": "row",
+   "id": 220,
+   "title": "Tokens",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 15
+   },
+   "panels": []
+  },
+  {
+   "id": 221,
+   "type": "table",
+   "title": "Tokens per iteration",
+   "description": "prompt_tokens, completion_tokens and tps of each token_usage event.",
+   "datasource": {
+    "type": "loki",
+    "uid": "mph-loki"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 16
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "decimals": 0,
+     "noValue": "0",
+     "custom": {
+      "align": "auto",
+      "cellOptions": {
+       "type": "auto"
+      },
+      "inspect": false
+     },
+     "mappings": []
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "tokens/s"
+      },
+      "properties": [
+       {
+        "id": "decimals",
+        "value": 1
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max by (attributes_iter) (max_over_time({instance=\"$run\"} |= \"token_usage\" | json | attributes_event=\"token_usage\" | unwrap attributes_prompt_tokens | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max by (attributes_iter) (max_over_time({instance=\"$run\"} |= \"token_usage\" | json | attributes_event=\"token_usage\" | unwrap attributes_completion_tokens | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max by (attributes_iter) (max_over_time({instance=\"$run\"} |= \"token_usage\" | json | attributes_event=\"token_usage\" | unwrap attributes_tps | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "merge",
+     "options": {}
+    },
+    {
+     "id": "convertFieldType",
+     "options": {
+      "conversions": [
+       {
+        "targetField": "attributes_iter",
+        "destinationType": "number"
+       }
+      ],
+      "fields": {}
+     }
+    },
+    {
+     "id": "sortBy",
+     "options": {
+      "sort": [
+       {
+        "field": "attributes_iter",
+        "desc": false
+       }
+      ]
+     }
+    },
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true
+      },
+      "renameByName": {
+       "attributes_iter": "iteration",
+       "Value #A": "prompt",
+       "Value #B": "completion",
+       "Value #C": "tokens/s"
+      },
+      "indexByName": {
+       "attributes_iter": 0
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": 222,
+   "type": "table",
+   "title": "Reasoning tokens per iteration",
+   "description": "reasoning_tokens of each token_usage event. 0 for models that do not reason.",
+   "datasource": {
+    "type": "loki",
+    "uid": "mph-loki"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 16
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "decimals": 0,
+     "noValue": "0",
+     "custom": {
+      "align": "auto",
+      "cellOptions": {
+       "type": "auto"
+      },
+      "inspect": false
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max by (attributes_iter) (max_over_time({instance=\"$run\"} |= \"token_usage\" | json | attributes_event=\"token_usage\" | unwrap attributes_reasoning_tokens | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "merge",
+     "options": {}
+    },
+    {
+     "id": "convertFieldType",
+     "options": {
+      "conversions": [
+       {
+        "targetField": "attributes_iter",
+        "destinationType": "number"
+       }
+      ],
+      "fields": {}
+     }
+    },
+    {
+     "id": "sortBy",
+     "options": {
+      "sort": [
+       {
+        "field": "attributes_iter",
+        "desc": false
+       }
+      ]
+     }
+    },
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true
+      },
+      "renameByName": {
+       "attributes_iter": "iteration",
+       "Value #A": "reasoning"
+      },
+      "indexByName": {
+       "attributes_iter": 0
+      }
+     }
+    }
+   ]
+  },
+  {
+   "type": "row",
+   "id": 230,
+   "title": "Context and compaction",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 24
+   },
+   "panels": []
+  },
+  {
+   "id": 231,
+   "type": "xychart",
+   "pluginVersion": "12.2.0",
+   "title": "Context over time",
+   "description": "One point per token_usage event: context used (total_tokens) and remaining context (ctx_window minus total_tokens), plus tok_after of each applied context_compaction. Points are raw log lines rather than time buckets, so the time axis spans the run itself, not the dashboard range; the range only has to include the run.",
+   "datasource": {
+    "type": "loki",
+    "uid": "mph-loki"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 16,
+    "x": 0,
+    "y": 25
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "show": "lines",
+      "lineWidth": 2,
+      "fillOpacity": 0,
+      "axisPlacement": "auto"
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "Time"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "time:HH:mm:ss"
+       },
+       {
+        "id": "custom.axisLabel",
+        "value": "Time"
+       }
+      ]
+     },
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "After compaction"
+      },
+      "properties": [
+       {
+        "id": "custom.show",
+        "value": "points"
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "mapping": "auto",
+    "series": [
+     {
+      "x": {
+       "matcher": {
+        "id": "byName",
+        "options": "Time"
+       }
+      }
+     }
+    ],
+    "legend": {
+     "showLegend": true,
+     "displayMode": "list",
+     "placement": "bottom"
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "queryType": "range",
+     "maxLines": 5000,
+     "expr": "{instance=\"$run\"} |= \"token_usage\" | json | attributes_event=\"token_usage\" | label_format remaining=\"{{ sub .attributes_ctx_window .attributes_total_tokens }}\" | keep attributes_total_tokens, remaining"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "queryType": "range",
+     "maxLines": 5000,
+     "expr": "{instance=\"$run\"} |= \"context_compaction\" | json | attributes_event=\"context_compaction\" | attributes_outcome=\"applied\" | keep attributes_tok_after"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "extractFields",
+     "options": {
+      "source": "labels",
+      "format": "auto",
+      "replace": false,
+      "keepTime": false
+     }
+    },
+    {
+     "id": "convertFieldType",
+     "options": {
+      "fields": {},
+      "conversions": [
+       {
+        "targetField": "attributes_total_tokens",
+        "destinationType": "number"
+       },
+       {
+        "targetField": "remaining",
+        "destinationType": "number"
+       },
+       {
+        "targetField": "attributes_tok_after",
+        "destinationType": "number"
+       }
+      ]
+     }
+    },
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "labels": true,
+       "Line": true,
+       "tsNs": true,
+       "id": true,
+       "labelTypes": true
+      },
+      "renameByName": {
+       "attributes_total_tokens": "Context used",
+       "remaining": "Remaining context",
+       "attributes_tok_after": "After compaction"
+      }
+     }
+    },
+    {
+     "id": "sortBy",
+     "options": {
+      "sort": [
+       {
+        "field": "Time",
+        "desc": false
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": 232,
+   "type": "table",
+   "title": "Tokens reclaimed per iteration",
+   "description": "reclaimed of each applied context_compaction event (tok_before minus tok_after).",
+   "datasource": {
+    "type": "loki",
+    "uid": "mph-loki"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 25
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "decimals": 0,
+     "noValue": "0",
+     "custom": {
+      "align": "auto",
+      "cellOptions": {
+       "type": "auto"
+      },
+      "inspect": false
+     },
+     "mappings": []
+    },
+    "overrides": []
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max by (attributes_iter) (max_over_time({instance=\"$run\"} |= \"context_compaction\" | json | attributes_event=\"context_compaction\" | attributes_outcome=\"applied\" | unwrap attributes_reclaimed | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "merge",
+     "options": {}
+    },
+    {
+     "id": "convertFieldType",
+     "options": {
+      "conversions": [
+       {
+        "targetField": "attributes_iter",
+        "destinationType": "number"
+       }
+      ],
+      "fields": {}
+     }
+    },
+    {
+     "id": "sortBy",
+     "options": {
+      "sort": [
+       {
+        "field": "attributes_iter",
+        "desc": false
+       }
+      ]
+     }
+    },
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true
+      },
+      "renameByName": {
+       "attributes_iter": "iteration",
+       "Value #A": "reclaimed"
+      },
+      "indexByName": {
+       "attributes_iter": 0
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": 233,
+   "type": "table",
+   "title": "Compaction events",
+   "description": "One row per context_compaction event: outcome, context before and after, tokens reclaimed and duration. applied means the rewritten history shrank, reverted means it did not, failed means the summary call errored or came back empty.",
+   "datasource": {
+    "type": "loki",
+    "uid": "mph-loki"
+   },
+   "gridPos": {
+    "h": 6,
+    "w": 24,
+    "x": 0,
+    "y": 33
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "decimals": 0,
+     "noValue": "0",
+     "custom": {
+      "align": "auto",
+      "cellOptions": {
+       "type": "auto"
+      },
+      "inspect": false
+     },
+     "mappings": []
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "duration"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "ms"
+       },
+       {
+        "id": "decimals",
+        "value": 0
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max by (attributes_iter, attributes_outcome) (max_over_time({instance=\"$run\"} |= \"context_compaction\" | json | attributes_event=\"context_compaction\" | unwrap attributes_tok_before | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max by (attributes_iter, attributes_outcome) (max_over_time({instance=\"$run\"} |= \"context_compaction\" | json | attributes_event=\"context_compaction\" | unwrap attributes_tok_after | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max by (attributes_iter, attributes_outcome) (max_over_time({instance=\"$run\"} |= \"context_compaction\" | json | attributes_event=\"context_compaction\" | unwrap attributes_reclaimed | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    },
+    {
+     "refId": "D",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max by (attributes_iter, attributes_outcome) (max_over_time({instance=\"$run\"} |= \"context_compaction\" | json | attributes_event=\"context_compaction\" | unwrap attributes_dur_ms | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "merge",
+     "options": {}
+    },
+    {
+     "id": "convertFieldType",
+     "options": {
+      "conversions": [
+       {
+        "targetField": "attributes_iter",
+        "destinationType": "number"
+       }
+      ],
+      "fields": {}
+     }
+    },
+    {
+     "id": "sortBy",
+     "options": {
+      "sort": [
+       {
+        "field": "attributes_iter",
+        "desc": false
+       }
+      ]
+     }
+    },
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true
+      },
+      "renameByName": {
+       "attributes_iter": "iteration",
+       "attributes_outcome": "outcome",
+       "Value #A": "before",
+       "Value #B": "after",
+       "Value #C": "reclaimed",
+       "Value #D": "duration"
+      },
+      "indexByName": {
+       "attributes_iter": 0,
+       "attributes_outcome": 1
+      }
+     }
+    }
+   ]
+  },
+  {
+   "type": "row",
+   "id": 240,
+   "title": "Tools",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 39
+   },
+   "panels": []
+  },
+  {
+   "id": 241,
+   "type": "table",
+   "title": "Tool duration per iteration",
+   "description": "Sum of dur_ms over the tool_succeeded and tool_failed events of each iteration, per tool.",
+   "datasource": {
+    "type": "loki",
+    "uid": "mph-loki"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 40
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "decimals": 0,
+     "noValue": "0",
+     "custom": {
+      "align": "auto",
+      "cellOptions": {
+       "type": "auto"
+      },
+      "inspect": false
+     },
+     "mappings": []
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "duration"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "ms"
+       },
+       {
+        "id": "decimals",
+        "value": 0
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "sum by (attributes_iter, attributes_tool) (sum_over_time({instance=\"$run\"} |~ \"tool_(succeeded|failed)\" | json | attributes_event=~\"tool_(succeeded|failed)\" | unwrap attributes_dur_ms | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "sum by (attributes_iter, attributes_tool) (count_over_time({instance=\"$run\"} |~ \"tool_(succeeded|failed)\" | json | attributes_event=~\"tool_(succeeded|failed)\" [$__range]))",
+     "queryType": "instant"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "merge",
+     "options": {}
+    },
+    {
+     "id": "convertFieldType",
+     "options": {
+      "conversions": [
+       {
+        "targetField": "attributes_iter",
+        "destinationType": "number"
+       }
+      ],
+      "fields": {}
+     }
+    },
+    {
+     "id": "sortBy",
+     "options": {
+      "sort": [
+       {
+        "field": "attributes_iter",
+        "desc": false
+       }
+      ]
+     }
+    },
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true
+      },
+      "renameByName": {
+       "attributes_iter": "iteration",
+       "attributes_tool": "tool",
+       "Value #A": "duration",
+       "Value #B": "calls"
+      },
+      "indexByName": {
+       "attributes_iter": 0,
+       "attributes_tool": 1
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": 242,
+   "type": "table",
+   "title": "Per-tool rollup",
+   "description": "Calls and failures counted from the tool_succeeded and tool_failed events, with the p95 of their dur_ms.",
+   "datasource": {
+    "type": "loki",
+    "uid": "mph-loki"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 40
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "decimals": 0,
+     "noValue": "0",
+     "custom": {
+      "align": "auto",
+      "cellOptions": {
+       "type": "auto"
+      },
+      "inspect": false
+     },
+     "mappings": []
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "p95 duration"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "ms"
+       },
+       {
+        "id": "decimals",
+        "value": 0
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "sum by (attributes_tool) (count_over_time({instance=\"$run\"} |~ \"tool_(succeeded|failed)\" | json | attributes_event=~\"tool_(succeeded|failed)\" [$__range]))",
+     "queryType": "instant"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "sum by (attributes_tool) (count_over_time({instance=\"$run\"} |~ \"tool_(succeeded|failed)\" | json | attributes_event=~\"tool_failed\" [$__range]))",
+     "queryType": "instant"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "quantile_over_time(0.95, {instance=\"$run\"} |~ \"tool_(succeeded|failed)\" | json | attributes_event=~\"tool_(succeeded|failed)\" | unwrap attributes_dur_ms | __error__=\"\" [$__range]) by (attributes_tool)",
+     "queryType": "instant"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "merge",
+     "options": {}
+    },
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true
+      },
+      "renameByName": {
+       "attributes_tool": "tool",
+       "Value #A": "calls",
+       "Value #B": "failures",
+       "Value #C": "p95 duration"
+      },
+      "indexByName": {
+       "attributes_tool": 0
+      }
+     }
+    }
+   ]
+  },
+  {
+   "type": "row",
+   "id": 250,
+   "title": "Run comparison",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 55
+   },
+   "panels": []
+  },
+  {
+   "id": 251,
+   "type": "table",
+   "title": "All runs",
+   "description": "One row per run_summary event in the range. Runs sharing a name are separate rows because the instance label carries the uuid.",
+   "datasource": {
+    "type": "loki",
+    "uid": "mph-loki"
+   },
+   "gridPos": {
+    "h": 10,
+    "w": 24,
+    "x": 0,
+    "y": 56
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "decimals": 0,
+     "noValue": "0",
+     "custom": {
+      "align": "auto",
+      "cellOptions": {
+       "type": "auto"
+      },
+      "inspect": false
+     },
+     "mappings": []
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "duration"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "ms"
+       },
+       {
+        "id": "decimals",
+        "value": 0
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max by (instance, attributes_outcome) (max_over_time({instance=~\".+\"} |= \"run_summary\" | json | attributes_event=\"run_summary\" | unwrap attributes_iterations | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max by (instance, attributes_outcome) (max_over_time({instance=~\".+\"} |= \"run_summary\" | json | attributes_event=\"run_summary\" | unwrap attributes_prompt_tokens | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max by (instance, attributes_outcome) (max_over_time({instance=~\".+\"} |= \"run_summary\" | json | attributes_event=\"run_summary\" | unwrap attributes_completion_tokens | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    },
+    {
+     "refId": "D",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max by (instance, attributes_outcome) (max_over_time({instance=~\".+\"} |= \"run_summary\" | json | attributes_event=\"run_summary\" | unwrap attributes_reclaimed_tokens | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    },
+    {
+     "refId": "E",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max by (instance, attributes_outcome) (max_over_time({instance=~\".+\"} |= \"run_summary\" | json | attributes_event=\"run_summary\" | unwrap attributes_compactions | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    },
+    {
+     "refId": "F",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max by (instance, attributes_outcome) (max_over_time({instance=~\".+\"} |= \"run_summary\" | json | attributes_event=\"run_summary\" | unwrap attributes_tool_calls | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    },
+    {
+     "refId": "G",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max by (instance, attributes_outcome) (max_over_time({instance=~\".+\"} |= \"run_summary\" | json | attributes_event=\"run_summary\" | unwrap attributes_tool_failures | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    },
+    {
+     "refId": "H",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max by (instance, attributes_outcome) (max_over_time({instance=~\".+\"} |= \"run_summary\" | json | attributes_event=\"run_summary\" | unwrap attributes_dur_ms | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "merge",
+     "options": {}
+    },
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true
+      },
+      "renameByName": {
+       "instance": "run",
+       "attributes_outcome": "outcome",
+       "Value #A": "iterations",
+       "Value #B": "prompt tokens",
+       "Value #C": "completion tokens",
+       "Value #D": "reclaimed tokens",
+       "Value #E": "compactions",
+       "Value #F": "tool calls",
+       "Value #G": "tool failures",
+       "Value #H": "duration"
+      },
+      "indexByName": {
+       "instance": 0,
+       "attributes_outcome": 1
+      }
+     }
+    }
+   ]
+  },
+  {
+   "id": 252,
+   "type": "barchart",
+   "title": "Duration across runs",
+   "description": "dur_ms of every run_summary event in the range, one bar per run.",
+   "datasource": {
+    "type": "loki",
+    "uid": "mph-loki"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 24,
+    "x": 0,
+    "y": 66
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "ms",
+     "decimals": 0,
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "lineWidth": 1,
+      "fillOpacity": 80
+     }
+    },
+    "overrides": [
+     {
+      "matcher": {
+       "id": "byName",
+       "options": "run"
+      },
+      "properties": [
+       {
+        "id": "unit",
+        "value": "none"
+       }
+      ]
+     }
+    ]
+   },
+   "options": {
+    "xField": "run",
+    "orientation": "horizontal",
+    "showValue": "auto",
+    "stacking": "none",
+    "groupWidth": 0.7,
+    "width": 0.9,
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "calcs": []
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "editorMode": "code",
+     "expr": "max by (instance) (max_over_time({instance=~\".+\"} |= \"run_summary\" | json | attributes_event=\"run_summary\" | unwrap attributes_dur_ms | __error__=\"\" [$__range]))",
+     "queryType": "instant"
+    }
+   ],
+   "transformations": [
+    {
+     "id": "merge",
+     "options": {}
+    },
+    {
+     "id": "organize",
+     "options": {
+      "excludeByName": {
+       "Time": true
+      },
+      "renameByName": {
+       "instance": "run",
+       "Value #A": "duration"
+      },
+      "indexByName": {
+       "instance": 0
+      }
+     }
+    }
+   ]
+  },
+  {
+   "type": "row",
+   "id": 260,
+   "title": "Narrative",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 74
+   },
+   "panels": []
+  },
+  {
+   "id": 261,
+   "type": "logs",
+   "title": "Run log",
+   "description": "Filtered to the selected run. Model output arrives under the body \"model output\", split by attributes.part (content or reasoning). The unfiltered equivalent is in the Logs row below.",
+   "datasource": {
+    "type": "loki",
+    "uid": "mph-loki"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 16,
+    "x": 0,
+    "y": 75
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "options": {
+    "showTime": true,
+    "sortOrder": "Descending",
+    "wrapLogMessage": true,
+    "enableLogDetails": true,
+    "prettifyLogMessage": false,
+    "dedupStrategy": "none",
+    "showCommonLabels": false
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "expr": "{instance=\"$run\"}",
+     "queryType": "range",
+     "direction": "backward",
+     "maxLines": 500
+    }
+   ]
+  },
+  {
+   "id": 262,
+   "type": "table",
+   "title": "Run warnings and errors",
+   "description": "Warn, error and fatal records for the selected run. Matches the severity field inside each record, not the level stream label. A quiet run correctly shows no rows.",
+   "datasource": {
+    "type": "loki",
+    "uid": "mph-loki"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 75
+   },
+   "fieldConfig": {
+    "defaults": {},
+    "overrides": []
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "footer": {
+     "show": false
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "expr": "{instance=\"$run\"} | json | severity=~\"warn|error|fatal\"",
+     "queryType": "range",
+     "direction": "backward",
+     "maxLines": 200
+    }
+   ]
+  },
+  {
+   "id": 23,
+   "type": "logs",
+   "title": "Log lines with trace correlation",
+   "description": "Caller attribution was removed from the logger, so this shows the message with its trace and span ids. The model text itself arrives under body=\"model output\" split by attributes.part (content or reasoning) with the payload in attributes.text.",
+   "datasource": {
+    "type": "loki",
+    "uid": "mph-loki"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 24,
+    "x": 0,
+    "y": 83
+   },
+   "options": {
+    "showTime": true,
+    "sortOrder": "Descending",
+    "wrapLogMessage": true,
+    "enableLogDetails": true,
+    "prettifyLogMessage": false,
+    "dedupStrategy": "none",
+    "showCommonLabels": false
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "loki",
+      "uid": "mph-loki"
+     },
+     "expr": "{service_name=~\".+\"} | json",
+     "queryType": "range",
+     "direction": "backward",
+     "maxLines": 200,
+     "line_format": "{{.body}}  |  {{.severity}}  trace_id={{.traceid}} span_id={{.spanid}}"
+    }
+   ]
+  },
+  {
+   "type": "row",
+   "id": 102,
+   "title": "OTel collector",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 90
+   },
+   "panels": []
+  },
+  {
+   "id": 40,
+   "type": "timeseries",
+   "title": "OTLP received per interval (spans / logs)",
+   "description": "Records arriving per interval, so gaps in traffic read as zero. Spans and log records differ by orders of magnitude, so read the shape rather than the height.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "mph-prometheus"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 12,
+    "x": 0,
+    "y": 91
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 20,
+      "showPoints": "never",
+      "spanNulls": false,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      },
+      "axisPlacement": "auto"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "mph-prometheus"
+     },
+     "expr": "sum(increase(otelcol_receiver_accepted_spans_total[$__rate_interval]))",
+     "range": true,
+     "instant": false,
+     "format": "time_series",
+     "legendFormat": "spans"
+    },
+    {
+     "refId": "C",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "mph-prometheus"
+     },
+     "expr": "sum(increase(otelcol_receiver_accepted_log_records_total[$__rate_interval]))",
+     "range": true,
+     "instant": false,
+     "format": "time_series",
+     "legendFormat": "log records"
+    }
+   ]
+  },
+  {
+   "id": 41,
+   "type": "timeseries",
+   "title": "Export failures (should stay flat at zero)",
+   "description": "Any non-zero value means telemetry was dropped on the way to Tempo / Prometheus / Loki.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "mph-prometheus"
+   },
+   "gridPos": {
+    "h": 7,
+    "w": 12,
+    "x": 12,
+    "y": 91
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "color": {
+      "mode": "palette-classic"
+     },
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 20,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "normal",
+       "group": "A"
+      },
+      "axisPlacement": "auto"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "table",
+     "placement": "right",
+     "calcs": [
+      "max",
+      "lastNotNull"
+     ]
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "mph-prometheus"
+     },
+     "expr": "sum by (otelcol_exporter) (increase(otelcol_exporter_send_failed_spans_total[$__range]))",
+     "range": true,
+     "instant": false,
+     "format": "time_series",
+     "legendFormat": "spans {{otelcol_exporter}}"
+    },
+    {
+     "refId": "B",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "mph-prometheus"
+     },
+     "expr": "sum by (otelcol_exporter) (increase(otelcol_exporter_send_failed_log_records_total[$__range]))",
+     "range": true,
+     "instant": false,
+     "format": "time_series",
+     "legendFormat": "logs {{otelcol_exporter}}"
+    }
+   ]
+  }
+ ]
+}

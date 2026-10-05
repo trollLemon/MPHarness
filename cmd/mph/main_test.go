@@ -1,7 +1,10 @@
 package main
 
 import (
+	"os"
+	"strings"
 	"testing"
+	"uuid"
 
 	"github.com/trollLemon/MPHarness/internal/config"
 )
@@ -80,7 +83,7 @@ func TestResolveOtelConfig(t *testing.T) {
 			t.Setenv("OTEL_SERVICE_NAME", tt.envService)
 			t.Setenv("MPH_OTEL", tt.envMPHOtel)
 
-			got := resolveOtelConfig(tt.yaml, tt.flagEnabled, "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5")
+			got := resolveOtelConfig(tt.yaml, tt.flagEnabled, "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5", "baseline")
 			if got.Enabled != tt.wantEnabled {
 				t.Errorf("Enabled = %v, want %v", got.Enabled, tt.wantEnabled)
 			}
@@ -93,6 +96,62 @@ func TestResolveOtelConfig(t *testing.T) {
 			if got.RunID != "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5" {
 				t.Errorf("RunID = %q, want test run id", got.RunID)
 			}
+			if got.RunName != "baseline" {
+				t.Errorf("RunName = %q, want %q", got.RunName, "baseline")
+			}
 		})
+	}
+}
+
+func TestResolveRunName(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		env  string
+		vm   string
+		want string
+	}{
+		{"yaml wins", "from-yaml", "from-env", "mph-vm", "from-yaml"},
+		{"env over vm", "", "from-env", "mph-vm", "from-env"},
+		{"vm over fallback", "", "", "mph-longrun", "mph-longrun"},
+		{"fallback last", "", "", "", "mph"},
+		{"blank yaml falls through", "   ", "", "mph-vm", "mph-vm"},
+		{"blank env falls through", "", "\t", "mph-vm", "mph-vm"},
+		{"blank vm falls through", "", "", "  ", "mph"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("MPH_RUN_NAME", tt.env)
+			if got := resolveRunName(tt.yaml, os.Getenv("MPH_RUN_NAME"), tt.vm); got != tt.want {
+				t.Errorf("resolveRunName() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewRunIdentity(t *testing.T) {
+	t.Setenv("MPH_RUN_NAME", "")
+
+	got := newRunIdentity(config.RunConfig{Name: "baseline"}, "mph-vm")
+
+	if got.Name != "baseline" {
+		t.Errorf("Name = %q, want %q", got.Name, "baseline")
+	}
+	if got.Label != "baseline:"+got.ID {
+		t.Errorf("Label = %q, want %q", got.Label, "baseline:"+got.ID)
+	}
+	if _, err := uuid.Parse(got.ID); err != nil {
+		t.Errorf("ID = %q, want a parseable uuid: %v", got.ID, err)
+	}
+}
+
+func TestRunIdentityIDIsBareUUID(t *testing.T) {
+	t.Setenv("MPH_RUN_NAME", "")
+
+	got := newRunIdentity(config.RunConfig{Name: "baseline"}, "mph-vm")
+
+	if strings.Contains(got.ID, ":") {
+		t.Errorf("ID = %q, must not contain a separator: it becomes a filesystem path", got.ID)
 	}
 }
