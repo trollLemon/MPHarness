@@ -58,6 +58,7 @@ Tool dispatch (`Call`, `callExec`, `callInfo`) lives in `internal/agent/spec.go`
 5. **VM lifecycle & agent loop.** `harness.Start` starts root span `mph.run` (`mph.vm.name`, `mph.model`, truncated `mph.prompt`, `mph.keep`, `mph.ignore_existing`, `mph.allowed_commands`, `mph.content_dir`):
    - Calls `multipass info` to check if the named VM exists.
    - If not found: launches the VM with the configured spec.
+   - If `vm.kernel` is set: installs the kernel package and its modules, updates grub, reboots the VM, waits for it to come back online, and verifies `uname -r` matches the expected version under child span `mph.vm.install_kernel`.
    - If found and `-i` not passed: prompts the user to continue with the existing VM.
    - If `content_dir` is set: `mkdir -p /home/ubuntu/content` then `multipass transfer --recursive --parents` under `mph.vm.content` child span (with its own `multipass.transfer` child) before the agent starts.
    - Runs `Agent.Execute` with the multipass client.
