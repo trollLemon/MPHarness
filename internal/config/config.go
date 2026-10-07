@@ -339,7 +339,35 @@ type SecretsConfig struct {
 
 // Validate reports whether Source names a supported resolver.
 func (s SecretsConfig) Validate() error {
-	panic("not implemented: SecretsConfig.Validate")
+	switch s.Source {
+	case "", "env", "keyring":
+		return nil
+	default:
+		return ErrInvalidSecretsSource
+	}
+}
+
+// IsSafeValue reports whether a secret value can be substituted raw into a
+// command string that becomes `bash -c`. Values must match
+// [A-Za-z0-9._+/=:@-]+ (non-empty): this covers GitHub PATs, JWTs, base64
+// (+/=), UUIDs and AWS/Azure key shapes, while rejecting anything the remote
+// shell would reinterpret (whitespace, quotes, `$`, backticks, `;`, `|`, ...).
+// `~` is excluded on purpose: at the start of a word it triggers tilde
+// expansion.
+func IsSafeValue(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
+		case c == '_' || c == '.' || c == '+' || c == '/' || c == '=' || c == ':' || c == '@' || c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 type RunConfig struct {
@@ -378,6 +406,9 @@ func (c Config) Validate() error {
 	if err := c.Compaction.Validate(); err != nil {
 		return err
 	}
+	if err := c.Secrets.Validate(); err != nil {
+		return err
+	}
 	if strings.TrimSpace(c.ContentDir) != "" {
 		cleaned := filepath.Clean(strings.TrimSpace(c.ContentDir))
 		info, err := os.Stat(cleaned)
@@ -412,7 +443,7 @@ func (c *Config) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// AllowedCommandsList returns the allowed commands as a sorted slice, useful for display.
+// AllowedCommandsList returns the allowed commands as a sorted slice.
 func (c Config) AllowedCommandsList() []string {
 	if len(c.AllowedCommands) == 0 {
 		return nil

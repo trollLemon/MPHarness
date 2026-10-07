@@ -5,13 +5,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 	"io"
 	"os"
 	"strings"
 	"time"
 	"uuid"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 
 	"github.com/trollLemon/MPHarness/internal/agent"
 	"github.com/trollLemon/MPHarness/internal/config"
@@ -87,7 +88,10 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "    threshold: 0.8      # fraction of context window, (0.5, 0.95]\n")
 	_, _ = fmt.Fprintf(w, "    max_summary_tokens: %d\n", config.DefaultCompactionMaxTokens)
 	_, _ = fmt.Fprintf(w, "    min_messages: %d\n", config.DefaultCompactionMinMessages)
-	_, _ = fmt.Fprintf(w, "    max_attempts: %d\n\n", config.DefaultCompactionMaxAttempts)
+	_, _ = fmt.Fprintf(w, "    max_attempts: %d\n", config.DefaultCompactionMaxAttempts)
+	_, _ = fmt.Fprintf(w, "  secrets:              # optional, %%{NAME} placeholders in commands\n")
+	_, _ = fmt.Fprintf(w, "    source: env         # env|keyring\n")
+	_, _ = fmt.Fprintf(w, "    service: mph        # keyring service name\n\n")
 	_, _ = fmt.Fprintf(w, "Example:\n")
 	_, _ = fmt.Fprintf(w, "  mph -v ./mph.yaml\n")
 
@@ -146,8 +150,16 @@ func run() error {
 		return err
 	}
 
-	resolver, err := newSecretsResolver(cfg)
+	resolver, err := secrets.New(cfg.Secrets)
 	if err != nil {
+		return err
+	}
+
+	// Fail fast when the prompt names a secret the configured source cannot
+	// supply, so a missing secret surfaces before the VM is created rather
+	// than part-way through the run. The prompt itself is never substituted:
+	// that would put the secret into the model's context.
+	if err := secrets.Validate(cfg.Prompt, resolver); err != nil {
 		return err
 	}
 
@@ -309,14 +321,6 @@ func resolveOtelConfig(yamlCfg config.OtelConfig, flagEnabled bool, runID, runNa
 		RunID:              runID,
 		RunName:            runName,
 	}
-}
-
-// newSecretsResolver builds the placeholder resolver for this run and fails
-// fast when the prompt names a secret the configured source cannot supply, so a
-// missing secret surfaces before the VM is created rather than part-way through
-// the run.
-func newSecretsResolver(cfg config.Config) (secrets.Resolver, error) {
-	panic("not implemented: newSecretsResolver")
 }
 
 func isEnvTrue(v string) bool {

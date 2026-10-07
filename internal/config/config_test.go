@@ -709,3 +709,34 @@ func TestParseSecrets(t *testing.T) {
 		})
 	}
 }
+
+func TestIsSafeValue(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{"token", "token123", true},
+		{"github pat", "ghp_abc123", true},
+		{"jwt dots", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature", true},
+		{"base64", "aGVsbG8rL3dvcmxkPQ==", true},
+		{"uuid", "01a0ec35-3962-7a15-be5e-a9372f3401b7", true},
+		{"arn colons", "arn:aws:iam::123456789012:user/name", true},
+		{"empty", "", false},
+		{"space", "not safe", false},
+		{"command substitution", "$(id -u)", false},
+		{"backtick", "`id`", false},
+		{"semicolon", "a;b", false},
+		{"pipe", "a|b", false},
+		{"tilde", "~/.token", false},
+		{"quote", "a'b", false},
+		{"backslash", `a\b`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsSafeValue(tt.value); got != tt.want {
+				t.Fatalf("IsSafeValue(%q) = %v, want %v", tt.value, got, tt.want)
+			}
+		})
+	}
+}

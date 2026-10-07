@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -54,6 +53,9 @@ func newFakeMultipass(t *testing.T) (bin string, argsFile string) {
 
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatalf("write fake multipass: %v", err)
+	}
+	if err := os.WriteFile(argsFile, []byte{}, 0o644); err != nil {
+		t.Fatalf("write args file: %v", err)
 	}
 	return script, argsFile
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/rs/zerolog"
@@ -45,9 +46,42 @@ func getTracer() trace.Tracer {
 	return otel.Tracer("mph")
 }
 
+// scrubValues replaces each value in values with %{NAME}, longest value first
+// so overlapping secrets cannot leave fragments behind.
+func scrubValues(s string, values map[string]string) string {
+	if s == "" || len(values) == 0 {
+		return s
+	}
+	type pair struct {
+		name, value string
+	}
+	pairs := make([]pair, 0, len(values))
+	for name, value := range values {
+		if value == "" {
+			continue
+		}
+		pairs = append(pairs, pair{name: name, value: value})
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if len(pairs[i].value) != len(pairs[j].value) {
+			return len(pairs[i].value) > len(pairs[j].value)
+		}
+		return pairs[i].name < pairs[j].name
+	})
+	for _, p := range pairs {
+		s = strings.ReplaceAll(s, p.value, "%{"+p.name+"}")
+	}
+	return s
+}
+
 // New returns a Client. A nil resolver disables placeholder resolution.
 func New(log zerolog.Logger, resolver secrets.Resolver) *Client {
-	panic("not implemented: New")
+	return &Client{
+		log:     log.With().Str("component", MultipassBin).Logger(),
+		bin:     MultipassBin,
+		secrets: resolver,
+		used:    make(map[string]string),
+	}
 }
 
 // Info runs `multipass info --format json` for the named VM and returns the
@@ -143,21 +177,35 @@ func (c *Client) Exec(ctx context.Context, name string, command string, maxAttrB
 	))
 	defer span.End()
 
-	execArgs := []string{"exec", name, "--", "bash", "-c", command}
-	span.SetAttributes(attribute.StringSlice("multipass.args", execArgs))
+	resolved, values, err := secrets.Redact(command, c.secrets)
+	if err != nil {
+		c.log.Debug().Err(err).Str("vm", name).Str("cmd", command).Msg("multipass exec failed to resolve secrets")
+		mphotel.FailSpan(span, err)
+		return "", fmt.Errorf("multipass exec %q %q failed: %w", name, command, err)
+	}
+	if c.used == nil {
+		c.used = make(map[string]string)
+	}
+	for k, v := range values {
+		c.used[k] = v
+	}
+
+	execArgs := []string{"exec", name, "--", "bash", "-c", resolved}
+	span.SetAttributes(attribute.StringSlice("multipass.args", []string{"exec", name, "--", "bash", "-c", command}))
 
 	c.log.Debug().Str("vm", name).Str("cmd", command).Msgf("Running %s", command)
 
 	cmd := exec.CommandContext(ctx, c.bin, execArgs...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		msg := strings.TrimSpace(string(out))
-		c.log.Debug().Err(err).Str("vm", name).Str("cmd", command).Str("args", strings.Join(execArgs, ",")).Msg("multipass exec failed")
+		msg := scrubValues(strings.TrimSpace(string(out)), c.used)
+		maskedArgs := []string{"exec", name, "--", "bash", "-c", command}
+		c.log.Debug().Err(err).Str("vm", name).Str("cmd", command).Str("args", strings.Join(maskedArgs, ",")).Msg("multipass exec failed")
 		mphotel.FailSpan(span, err)
 		return "", fmt.Errorf("multipass exec %q %q failed: %w: %s", name, command, err, msg)
 	}
 
-	return string(out), nil
+	return scrubValues(string(out), c.used), nil
 }
 
 // Transfer copies a host directory recursively into the VM.

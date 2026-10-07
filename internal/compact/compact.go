@@ -267,8 +267,7 @@ func renderBudgetBytes(win Window, budget int, estimate func(string) int) int {
 
 // Compact rewrites the conversation into a system message plus a summary, or
 // returns the original with skipped, reverted, failed, or applied. The third
-// return is the summary length in bytes (0 when no summary was produced), so
-// callers can log what the summarizer emitted even when the rewrite reverts.
+// return is the summary length in bytes (0 when no summary was produced).
 // A revert never counts against retry budgets: it means "not worth it yet",
 // and the next attempt with a longer history may win.
 func Compact(ctx context.Context, conversation []model.D, handles []HandleInfo, maxSummaryTokens, budget int, win Window, s Summarizer, estimate func(string) int, compactionsApplied int) ([]model.D, string, int) {
