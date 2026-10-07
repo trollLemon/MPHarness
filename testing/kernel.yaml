@@ -1,0 +1,27 @@
+vm:
+  name: mph-kernel-test
+  disk: 15G
+  ram: 4G
+  cpu: 2
+  image: resolute
+  kernel: linux-image-7.0.0-14-generic
+model: unsloth/granite-4.0-350m-IQ4_XS
+allowed_commands:
+  - coreUtils
+  - sudo
+  - apt
+llm:
+  temperature: 0.0
+  top_p: 0.95
+  top_k: 40
+  tool_choice: auto
+agent:
+  max_iterations: 10
+  chat_timeout: 300s
+  total_timeout: 30m
+prompt: |
+  Inside the Multipass VM, verify the kernel installation:
+  1. run `uname -r` and confirm it contains 7.0.0-14-generic
+  2. run `ls /lib/modules` and confirm the kernel modules directory exists
+  3. run `dpkg -l | grep linux-image-7.0.0-14-generic` to verify the package is installed
+  Output a summary of the test results.

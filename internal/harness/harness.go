@@ -105,6 +105,22 @@ func Start(ctx context.Context, agt *agent.Agent, client *multipass.Client, cfg 
 			mphotel.FailSpan(span, err)
 			return err
 		}
+
+		if strings.TrimSpace(cfg.VM.Kernel) != "" {
+			kCtx, kSpan := tracer.Start(ctx, "mph.vm.install_kernel", trace.WithAttributes(
+				attribute.String("mph.vm.name", cfg.VM.Name),
+				attribute.String("mph.kernel.package", cfg.VM.Kernel),
+			))
+			err := client.InstallKernel(kCtx, cfg.VM.Name, cfg.VM.Kernel)
+			if err != nil {
+				mphotel.FailSpan(kSpan, err)
+			}
+			kSpan.End()
+			if err != nil {
+				mphotel.FailSpan(span, err)
+				return err
+			}
+		}
 	case infoErr != nil:
 		err := fmt.Errorf("failed to check if VM exists: %w", infoErr)
 		mphotel.FailSpan(span, err)

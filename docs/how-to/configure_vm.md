@@ -10,7 +10,8 @@ vm:
   disk: 20G
   ram: 4G
   cpu: 2
-  image: noble
+  image: resolute
+  kernel: linux-image-7.0.0-14-generic
 ```
 
 ## Keys
@@ -22,6 +23,7 @@ vm:
 | `ram`   | yes      | none       | Memory, e.g. `4G`. |
 | `cpu`   | yes      | none       | CPU count, must be greater than `0`. |
 | `image` | no       | default LTS | Ubuntu image to use (see below). |
+| `kernel` | no       | none        | APT kernel package to install (e.g. `linux-image-7.0.0-14-generic` or `linux-image-unsigned-7.0.0-14-realtime`). Installs kernel, modules, and modules-extra, updates grub, reboots, and verifies the new kernel is running before handing off to the agent. |
 
 Top-level `content_dir` copies a local directory into the VM before the agent starts (see [Provide local content](provide_content.md)):
 

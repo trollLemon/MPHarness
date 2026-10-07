@@ -93,11 +93,12 @@ var coreUtils = [...]string{
 }
 
 type VMConfig struct {
-	Disk  string `yaml:"disk"`
-	RAM   string `yaml:"ram"`
-	CPU   int    `yaml:"cpu"`
-	Name  string `yaml:"name"`
-	Image string `yaml:"image"`
+	Disk   string `yaml:"disk"`
+	RAM    string `yaml:"ram"`
+	CPU    int    `yaml:"cpu"`
+	Name   string `yaml:"name"`
+	Image  string `yaml:"image"`
+	Kernel string `yaml:"kernel"`
 }
 
 func (v VMConfig) Validate() error {
