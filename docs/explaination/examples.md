@@ -106,6 +106,23 @@ prompt: |
 
 ---
 
+## Custom Kernel
+
+Use a specific kernel (e.g., realtime, gcp, or a custom compiled kernel). Installs the kernel and modules, updates grub, reboots, and verifies the running kernel before the agent starts.
+
+```yaml
+vm:
+  disk: 20G
+  ram: 4G
+  cpu: 2
+  image: resolute
+  kernel: linux-image-7.0.0-14-generic
+model: unsloth/Qwen3-0.6B-Q8_0
+prompt: "Run `uname -r` and confirm the kernel version."
+```
+
+---
+
 ## Full-Featured
 
 Shows every available option: allowed commands, tuned LLM, generous timeouts, and a multi-step prompt. Uses a larger model (27B) suited for GPU machines.

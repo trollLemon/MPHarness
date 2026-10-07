@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/trollLemon/MPHarness/internal/config"
@@ -279,4 +280,83 @@ func (c *Client) Delete(ctx context.Context, name string, purge bool) error {
 
 	c.log.Info().Str("vm", name).Bool("purge", purge).Msg("VM deleted")
 	return nil
+}
+
+// InstallKernel installs a kernel package and its modules in the VM, updates grub,
+// reboots, and verifies the new kernel is running.
+func (c *Client) InstallKernel(ctx context.Context, name, kernelPkg string) error {
+	ctx, span := getTracer().Start(ctx, "multipass.install_kernel", trace.WithAttributes(
+		attribute.String("multipass.command", "install_kernel"),
+		attribute.String("mph.vm.name", name),
+		attribute.String("mph.kernel.package", kernelPkg),
+	))
+	defer span.End()
+
+	c.log.Info().Str("vm", name).Str("kernel", kernelPkg).Msg("installing kernel")
+
+	installCmd := fmt.Sprintf("sudo apt-get update && sudo apt-get install -y %s", kernelPkg)
+	if _, err := c.Exec(ctx, name, installCmd, 4096); err != nil {
+		mphotel.FailSpan(span, err)
+		return fmt.Errorf("failed to install kernel packages: %w", err)
+	}
+
+	if _, err := c.Exec(ctx, name, "sudo update-grub", 512); err != nil {
+		mphotel.FailSpan(span, err)
+		return fmt.Errorf("failed to update grub: %w", err)
+	}
+
+	c.log.Info().Str("vm", name).Msg("rebooting VM for new kernel")
+	if _, err := c.Exec(ctx, name, "sudo reboot", 256); err != nil {
+		mphotel.FailSpan(span, err)
+		return fmt.Errorf("failed to reboot VM: %w", err)
+	}
+
+	if err := c.waitForVMReady(ctx, name); err != nil {
+		mphotel.FailSpan(span, err)
+		return fmt.Errorf("VM did not come back after reboot: %w", err)
+	}
+
+	runningKernel, err := c.Exec(ctx, name, "uname -r", 256)
+	if err != nil {
+		mphotel.FailSpan(span, err)
+		return fmt.Errorf("failed to get running kernel version: %w", err)
+	}
+	runningKernel = strings.TrimSpace(runningKernel)
+
+	expectedVersion := strings.TrimPrefix(kernelPkg, "linux-image-unsigned-")
+	expectedVersion = strings.TrimPrefix(expectedVersion, "linux-image-")
+
+	if !strings.Contains(runningKernel, expectedVersion) {
+		err := fmt.Errorf("kernel version mismatch: expected %q to contain %q", runningKernel, expectedVersion)
+		mphotel.FailSpan(span, err)
+		return err
+	}
+
+	c.log.Info().Str("vm", name).Str("kernel", runningKernel).Msg("kernel installed and verified")
+	return nil
+}
+
+// waitForVMReady polls the VM until it responds to multipass exec.
+func (c *Client) waitForVMReady(ctx context.Context, name string) error {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(5 * time.Minute)
+	}
+
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		_, err := c.Exec(ctx, name, "echo ready", 64)
+		if err == nil {
+			return nil
+		}
+		c.log.Debug().Str("vm", name).Err(err).Msg("waiting for VM to be ready")
+		time.Sleep(5 * time.Second)
+	}
+
+	return fmt.Errorf("timeout waiting for VM %s to become ready", name)
 }
