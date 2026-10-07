@@ -745,7 +745,7 @@ func TestAssistantMessageShapeLogged(t *testing.T) {
 		Model:  "m",
 		Prompt: "task",
 	}
-	if err := agt.Execute(context.Background(), conf, multipass.New(zerolog.Nop())); err != nil {
+	if err := agt.Execute(context.Background(), conf, multipass.New(zerolog.Nop(), nil)); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	found := false
@@ -787,7 +787,7 @@ func TestExecuteReportsNoOutputWithoutError(t *testing.T) {
 		Prompt: "task",
 	}
 
-	if err := agt.Execute(context.Background(), conf, multipass.New(zerolog.Nop())); err != nil {
+	if err := agt.Execute(context.Background(), conf, multipass.New(zerolog.Nop(), nil)); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 }
@@ -886,7 +886,7 @@ func TestExecute(t *testing.T) {
 				prompt = tt.prompt
 			}
 			conf := config.Config{VM: vm, Prompt: prompt}
-			cli := multipass.New(zerolog.Nop())
+			cli := multipass.New(zerolog.Nop(), nil)
 			err := agent.Execute(context.Background(), conf, cli)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err %v wantErr %v", err, tt.wantErr)
@@ -945,7 +945,7 @@ func TestExecuteLogsTokenUsageAndIterationEvents(t *testing.T) {
 	})
 	conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
 	ctx := mphotel.WithRunIdentity(context.Background(), "baseline:0198f0c1-2a3b-7c4d-8e5f-60718293a4b5", "baseline")
-	if err := agent.Execute(ctx, conf, multipass.New(zerolog.Nop())); err != nil {
+	if err := agent.Execute(ctx, conf, multipass.New(zerolog.Nop(), nil)); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 
@@ -1068,7 +1068,7 @@ func TestRunIterationCountsToolResultsInContext(t *testing.T) {
 	agt.toolDocs = buildToolDocuments(cfg)
 	agt.store = store
 
-	if err := agt.runIteration(context.Background(), multipass.New(zerolog.Nop()), cfg); err != nil {
+	if err := agt.runIteration(context.Background(), multipass.New(zerolog.Nop(), nil), cfg); err != nil {
 		t.Fatalf("runIteration: %v", err)
 	}
 	if agt.contextTokens <= usageTotal {
@@ -1106,7 +1106,7 @@ func TestRunIterationUsageSupersedesEarlierToolResults(t *testing.T) {
 	agt.toolDocs = buildToolDocuments(cfg)
 	agt.contextTokens = 12345
 
-	if err := agt.runIteration(context.Background(), multipass.New(zerolog.Nop()), cfg); err != nil {
+	if err := agt.runIteration(context.Background(), multipass.New(zerolog.Nop(), nil), cfg); err != nil {
 		t.Fatalf("runIteration: %v", err)
 	}
 	if agt.contextTokens != 5000 {
@@ -1264,7 +1264,7 @@ func TestRunOutcomeDistinguishesCleanFinishFromExhaustion(t *testing.T) {
 			})
 			conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
 			ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
-			if err := a.Execute(ctx, conf, multipass.New(zerolog.Nop())); err != nil {
+			if err := a.Execute(ctx, conf, multipass.New(zerolog.Nop(), nil)); err != nil {
 				t.Fatalf("Execute: %v", err)
 			}
 

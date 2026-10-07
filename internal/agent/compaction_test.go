@@ -174,7 +174,7 @@ func TestExecuteCompaction(t *testing.T) {
 				Prompt:     "task",
 				Compaction: tt.compaction,
 			}
-			if err := agt.Execute(context.Background(), conf, multipass.New(zerolog.Nop())); err != nil {
+			if err := agt.Execute(context.Background(), conf, multipass.New(zerolog.Nop(), nil)); err != nil {
 				t.Fatalf("compaction failure must not end the run: %v", err)
 			}
 			tt.check(t, mock, buf.String())
@@ -206,7 +206,7 @@ func TestCompactionEventReportsContextDrop(t *testing.T) {
 		Prompt:     "task",
 		Compaction: enabledCompaction(),
 	}
-	if err := agt.Execute(context.Background(), conf, multipass.New(zerolog.Nop())); err != nil {
+	if err := agt.Execute(context.Background(), conf, multipass.New(zerolog.Nop(), nil)); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	if countHandovers(mock) == 0 {
@@ -437,7 +437,7 @@ func TestCompactionSeesToolResultBeforeNextModelCall(t *testing.T) {
 	if reported >= threshold {
 		t.Fatalf("setup: reported %d must sit below the %d threshold, or there is nothing to react to", reported, threshold)
 	}
-	if err := agt.runIteration(context.Background(), multipass.New(zerolog.Nop()), cfg); err != nil {
+	if err := agt.runIteration(context.Background(), multipass.New(zerolog.Nop(), nil), cfg); err != nil {
 		t.Fatalf("runIteration: %v", err)
 	}
 
@@ -503,7 +503,7 @@ func TestCompactionAppliesBeforeWindowIsExceeded(t *testing.T) {
 				MaxIterations: tt.steps + 4, ChatTimeout: time.Second, TotalTimeout: 30 * time.Second,
 				LLM: cfg.LLM, RunID: "run-window",
 			})
-			if err := agt.Execute(context.Background(), cfg, multipass.New(zerolog.Nop())); err != nil {
+			if err := agt.Execute(context.Background(), cfg, multipass.New(zerolog.Nop(), nil)); err != nil {
 				t.Fatalf("run grew past the window without compacting: %v (handovers=%d)", err, countHandovers(mock.mockKronk))
 			}
 			if agt.compactionsApplied == 0 {
@@ -546,7 +546,7 @@ func TestCompactionDurationIsLoggedInMilliseconds(t *testing.T) {
 		Compaction: enabledCompaction(),
 	}
 	ctx := mphotel.WithRunIdentity(context.Background(), "baseline:run-compact-ms", "baseline")
-	if err := agent.Execute(ctx, conf, multipass.New(zerolog.Nop())); err != nil {
+	if err := agent.Execute(ctx, conf, multipass.New(zerolog.Nop(), nil)); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 
