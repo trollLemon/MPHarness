@@ -248,14 +248,12 @@ func (c *Client) InstallKernel(ctx context.Context, name, kernelPkg string) erro
 
 	c.log.Info().Str("vm", name).Str("kernel", kernelPkg).Msg("installing kernel")
 
-	// Install kernel
 	installCmd := fmt.Sprintf("sudo apt-get update && sudo apt-get install -y %s", kernelPkg)
 	if _, err := c.Exec(ctx, name, installCmd, 4096); err != nil {
 		mphotel.FailSpan(span, err)
 		return fmt.Errorf("failed to install kernel packages: %w", err)
 	}
 
-	// Update grub
 	if _, err := c.Exec(ctx, name, "sudo update-grub", 512); err != nil {
 		mphotel.FailSpan(span, err)
 		return fmt.Errorf("failed to update grub: %w", err)
@@ -272,7 +270,6 @@ func (c *Client) InstallKernel(ctx context.Context, name, kernelPkg string) erro
 		return fmt.Errorf("VM did not come back after reboot: %w", err)
 	}
 
-	// Verify kernel version
 	runningKernel, err := c.Exec(ctx, name, "uname -r", 256)
 	if err != nil {
 		mphotel.FailSpan(span, err)
@@ -280,7 +277,6 @@ func (c *Client) InstallKernel(ctx context.Context, name, kernelPkg string) erro
 	}
 	runningKernel = strings.TrimSpace(runningKernel)
 
-	// Extract version from kernel package (e.g., "7.0.0-14-generic" from "linux-image-7.0.0-14-generic")
 	expectedVersion := strings.TrimPrefix(kernelPkg, "linux-image-unsigned-")
 	expectedVersion = strings.TrimPrefix(expectedVersion, "linux-image-")
 
