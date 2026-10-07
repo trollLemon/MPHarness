@@ -18,6 +18,8 @@ var (
 	ErrVMCPURequired  = errors.New("vm.cpu must be > 0")
 	ErrModelRequired  = errors.New("model is required (LLM, e.g. \"unsloth/Qwen3-0.6B-Q8_0\")")
 	ErrPromptRequired = errors.New("prompt is required")
+
+	ErrInvalidSecretsSource = errors.New(`secrets.source must be "env" or "keyring"`)
 )
 
 // VMContentDir is the fixed directory inside the VM where host content_dir is copied.
@@ -325,6 +327,21 @@ func (c CompactionConfig) Validate() error {
 	return nil
 }
 
+// SecretsConfig selects where %{NAME} placeholders in agent commands are
+// resolved from.
+type SecretsConfig struct {
+	// Source is "env" or "keyring"; Parse defaults it to "env".
+	Source string `yaml:"source"`
+	// Service is the freedesktop Secret Service service name. Entries are
+	// stored under it with the placeholder name as the username.
+	Service string `yaml:"service"`
+}
+
+// Validate reports whether Source names a supported resolver.
+func (s SecretsConfig) Validate() error {
+	panic("not implemented: SecretsConfig.Validate")
+}
+
 type RunConfig struct {
 	Name string `yaml:"name"`
 }
@@ -342,6 +359,7 @@ type Config struct {
 	Otel            OtelConfig       `yaml:"otel"`
 	Output          OutputConfig     `yaml:"output"`
 	Compaction      CompactionConfig `yaml:"compaction"`
+	Secrets         SecretsConfig    `yaml:"secrets"`
 }
 
 func (c Config) Validate() error {

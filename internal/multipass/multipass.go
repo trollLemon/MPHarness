@@ -10,6 +10,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/trollLemon/MPHarness/internal/config"
 	mphotel "github.com/trollLemon/MPHarness/internal/otel"
+	"github.com/trollLemon/MPHarness/internal/secrets"
 	"github.com/trollLemon/MPHarness/internal/textutil"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -30,17 +31,23 @@ var (
 type Client struct {
 	log zerolog.Logger
 	bin string
+	// secrets resolves %{NAME} placeholders in commands. A nil Resolver
+	// means no placeholder can be resolved, which leaves marker-free
+	// commands behaving exactly as they did before this field existed.
+	secrets secrets.Resolver
+	// used holds every secret value resolved so far this run, so that no
+	// exec can hand one back. It needs no synchronisation: the harness runs
+	// tool calls sequentially and the set is per-Client, i.e. per-run.
+	used map[string]string
 }
 
 func getTracer() trace.Tracer {
 	return otel.Tracer("mph")
 }
 
-func New(log zerolog.Logger) *Client {
-	return &Client{
-		log: log.With().Str("component", MultipassBin).Logger(),
-		bin: MultipassBin,
-	}
+// New returns a Client. A nil resolver disables placeholder resolution.
+func New(log zerolog.Logger, resolver secrets.Resolver) *Client {
+	panic("not implemented: New")
 }
 
 // Info runs `multipass info --format json` for the named VM and returns the

@@ -26,7 +26,7 @@ func startRootSpan(t *testing.T, opts Options) sdktrace.ReadOnlySpan {
 	t.Cleanup(func() { otel.SetTracerProvider(prev) })
 
 	cfg := config.Config{VM: config.VMConfig{Name: ""}, Prompt: "task"}
-	if err := Start(context.Background(), nil, multipass.New(zerolog.Nop()), cfg, opts); err == nil {
+	if err := Start(context.Background(), nil, multipass.New(zerolog.Nop(), nil), cfg, opts); err == nil {
 		t.Fatal("Start succeeded with an empty VM name; test setup is wrong")
 	}
 

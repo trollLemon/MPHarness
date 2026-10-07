@@ -155,3 +155,68 @@ func TestRunIdentityIDIsBareUUID(t *testing.T) {
 		t.Errorf("ID = %q, must not contain a separator: it becomes a filesystem path", got.ID)
 	}
 }
+
+// TestNewSecretsResolver covers the fail-fast path: a prompt naming a secret the
+// configured source cannot supply must be rejected before the VM is created, not
+// part-way through a run.
+func TestNewSecretsResolver(t *testing.T) {
+	tests := []struct {
+		name      string
+		prompt    string
+		source    string
+		envSecret string
+		wantErr   bool
+	}{
+		{
+			name:   "prompt without a placeholder",
+			prompt: "check the disk usage",
+			source: "env",
+		},
+		{
+			name:      "placeholder resolvable from the environment",
+			prompt:    "run sudo pro attach %{PRO_TOKEN}",
+			source:    "env",
+			envSecret: "ghp_abc123",
+		},
+		{
+			name:    "placeholder not present in the environment",
+			prompt:  "run sudo pro attach %{PRO_TOKEN}",
+			source:  "env",
+			wantErr: true,
+		},
+		{
+			name:    "unknown source",
+			prompt:  "check the disk usage",
+			source:  "vault",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.envSecret != "" {
+				t.Setenv("PRO_TOKEN", tt.envSecret)
+			}
+
+			cfg := config.Config{
+				Prompt:  tt.prompt,
+				Secrets: config.SecretsConfig{Source: tt.source},
+			}
+
+			r, err := newSecretsResolver(cfg)
+
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("newSecretsResolver succeeded, want an error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if r == nil {
+				t.Fatal("newSecretsResolver returned a nil resolver with no error")
+			}
+		})
+	}
+}

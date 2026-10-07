@@ -18,6 +18,7 @@ import (
 	"github.com/trollLemon/MPHarness/internal/harness"
 	"github.com/trollLemon/MPHarness/internal/multipass"
 	mphotel "github.com/trollLemon/MPHarness/internal/otel"
+	"github.com/trollLemon/MPHarness/internal/secrets"
 )
 
 var version = "dev"
@@ -145,6 +146,11 @@ func run() error {
 		return err
 	}
 
+	resolver, err := newSecretsResolver(cfg)
+	if err != nil {
+		return err
+	}
+
 	ctx := context.Background()
 
 	ident := newRunIdentity(cfg.Run, cfg.VM.Name)
@@ -213,7 +219,7 @@ func run() error {
 		RunID:         ident.ID,
 	})
 
-	client := multipass.New(log.Logger)
+	client := multipass.New(log.Logger, resolver)
 
 	return harness.Start(ctx, agt, client, cfg, harness.Options{
 		IgnoreExisting: ignoreExisting,
@@ -303,6 +309,14 @@ func resolveOtelConfig(yamlCfg config.OtelConfig, flagEnabled bool, runID, runNa
 		RunID:              runID,
 		RunName:            runName,
 	}
+}
+
+// newSecretsResolver builds the placeholder resolver for this run and fails
+// fast when the prompt names a secret the configured source cannot supply, so a
+// missing secret surfaces before the VM is created rather than part-way through
+// the run.
+func newSecretsResolver(cfg config.Config) (secrets.Resolver, error) {
+	panic("not implemented: newSecretsResolver")
 }
 
 func isEnvTrue(v string) bool {
