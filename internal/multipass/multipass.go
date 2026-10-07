@@ -227,15 +227,6 @@ func (c *Client) Delete(ctx context.Context, name string, purge bool) error {
 	return nil
 }
 
-// deriveModulePackages derives the linux-modules and linux-modules-extra package names
-// from a kernel package name. Handles both "linux-image-<ver>-<flavor>" and
-// "linux-image-unsigned-<ver>-<flavor>" patterns.
-func deriveModulePackages(kernelPkg string) (string, string) {
-	base := strings.TrimPrefix(kernelPkg, "linux-image-unsigned-")
-	base = strings.TrimPrefix(base, "linux-image-")
-	return "linux-modules-" + base, "linux-modules-extra-" + base
-}
-
 // InstallKernel installs a kernel package and its modules in the VM, updates grub,
 // reboots, and verifies the new kernel is running.
 func (c *Client) InstallKernel(ctx context.Context, name, kernelPkg string) error {
