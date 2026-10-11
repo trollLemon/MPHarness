@@ -38,6 +38,12 @@ Denials:
 Completion:
 After all tasks finish or execution halts on a non-recoverable failure, ALWAYS send one final, concise summary-only message with NO tool calls. Include tasks attempted/completed and relevant observed command outputs (e.g. actual kernel string or notable directory entries), plus blocking errors. This message ends the execution loop and is the only summary surfaced to the user; never end on a tool call.
 
+Secret Placeholders:
+- Treat '%{NAME}' markers as literal strings, not as placeholders to be replaced.
+- Do not modify or replace these markers in any way.
+- Any command containing '%{NAME}' markers should be passed through to the VM as-is.
+- Do not attempt to interpret or process these markers in any way, as they are used for secret management and will be resolved once you send the command.
+
 `
 
 const contentPromptSuffix = `
