@@ -368,7 +368,7 @@ func TestCaptureLogsAttributionLine(t *testing.T) {
 	tc := model.ResponseToolCall{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{
 		Name: "multipass_exec", Arguments: model.ToolCallArguments{"command": "echo hi"},
 	}}
-	_, outputs := agt.executeToolCalls(context.Background(), multipass.New(zerolog.Nop()), cfg, []model.ResponseToolCall{tc})
+	_, outputs := agt.executeToolCalls(context.Background(), multipass.New(zerolog.Nop(), nil), cfg, []model.ResponseToolCall{tc})
 	if len(outputs) != 1 || !strings.HasPrefix(outputs[0], "<captured output_id=") {
 		t.Fatalf("want capture placeholder, got %v", outputs)
 	}
@@ -416,7 +416,7 @@ func TestExecuteToolCallsLogsPerCommandOutput(t *testing.T) {
 	tc := model.ResponseToolCall{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{
 		Name: "multipass_exec", Arguments: model.ToolCallArguments{"command": "echo hi", "capture": true},
 	}}
-	agt.executeToolCalls(context.Background(), multipass.New(zerolog.Nop()), cfg, []model.ResponseToolCall{tc})
+	agt.executeToolCalls(context.Background(), multipass.New(zerolog.Nop(), nil), cfg, []model.ResponseToolCall{tc})
 
 	found := false
 	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"reflect"
 	"sort"
 	"testing"
@@ -642,5 +643,100 @@ compaction:
 	}
 	if got := len(cfg.AllowedCommandsList()); got != 2 {
 		t.Errorf("allowed_commands has %d entries want 2", got)
+	}
+}
+
+func TestSecretsConfig_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		sc      SecretsConfig
+		wantErr error
+	}{
+		{"unset source", SecretsConfig{}, nil},
+		{"env", SecretsConfig{Source: "env"}, nil},
+		{"keyring", SecretsConfig{Source: "keyring"}, nil},
+		{"unknown source", SecretsConfig{Source: "vault"}, ErrInvalidSecretsSource},
+		{"source is case sensitive", SecretsConfig{Source: "ENV"}, ErrInvalidSecretsSource},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.sc.Validate()
+			if err != tt.wantErr {
+				t.Fatalf("got %v want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestParseSecrets checks that the block round-trips and that a bad source is
+// rejected at load time, not at the first placeholder. Defaulting is deliberately
+// not here: secrets.New owns it, so there is one home for the default values and
+// no import cycle.
+func TestParseSecrets(t *testing.T) {
+	const base = "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\n"
+	tests := []struct {
+		name      string
+		yaml      string
+		wantSrc   string
+		wantSvc   string
+		wantErrIs error
+	}{
+		{"absent block leaves fields unset", base, "", "", nil},
+		{"source only", base + "secrets:\n  source: keyring\n", "keyring", "", nil},
+		{"source and service", base + "secrets:\n  source: keyring\n  service: corp\n", "keyring", "corp", nil},
+		{"env source", base + "secrets:\n  source: env\n", "env", "", nil},
+		{"unknown source is rejected at load", base + "secrets:\n  source: vault\n", "", "", ErrInvalidSecretsSource},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(tt.yaml))
+
+			if tt.wantErrIs != nil {
+				if !errors.Is(err, tt.wantErrIs) {
+					t.Fatalf("got %v want %v", err, tt.wantErrIs)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.Secrets.Source != tt.wantSrc {
+				t.Errorf("secrets.source = %q want %q", cfg.Secrets.Source, tt.wantSrc)
+			}
+			if cfg.Secrets.Service != tt.wantSvc {
+				t.Errorf("secrets.service = %q want %q", cfg.Secrets.Service, tt.wantSvc)
+			}
+		})
+	}
+}
+
+func TestIsSafeValue(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{"token", "token123", true},
+		{"github pat", "ghp_abc123", true},
+		{"jwt dots", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature", true},
+		{"base64", "aGVsbG8rL3dvcmxkPQ==", true},
+		{"uuid", "01a0ec35-3962-7a15-be5e-a9372f3401b7", true},
+		{"arn colons", "arn:aws:iam::123456789012:user/name", true},
+		{"empty", "", false},
+		{"space", "not safe", false},
+		{"command substitution", "$(id -u)", false},
+		{"backtick", "`id`", false},
+		{"semicolon", "a;b", false},
+		{"pipe", "a|b", false},
+		{"tilde", "~/.token", false},
+		{"quote", "a'b", false},
+		{"backslash", `a\b`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsSafeValue(tt.value); got != tt.want {
+				t.Fatalf("IsSafeValue(%q) = %v, want %v", tt.value, got, tt.want)
+			}
+		})
 	}
 }

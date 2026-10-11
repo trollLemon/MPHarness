@@ -5,19 +5,21 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 	"io"
 	"os"
 	"strings"
 	"time"
 	"uuid"
 
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
+
 	"github.com/trollLemon/MPHarness/internal/agent"
 	"github.com/trollLemon/MPHarness/internal/config"
 	"github.com/trollLemon/MPHarness/internal/harness"
 	"github.com/trollLemon/MPHarness/internal/multipass"
 	mphotel "github.com/trollLemon/MPHarness/internal/otel"
+	"github.com/trollLemon/MPHarness/internal/secrets"
 )
 
 var version = "dev"
@@ -86,7 +88,10 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "    threshold: 0.8      # fraction of context window, (0.5, 0.95]\n")
 	_, _ = fmt.Fprintf(w, "    max_summary_tokens: %d\n", config.DefaultCompactionMaxTokens)
 	_, _ = fmt.Fprintf(w, "    min_messages: %d\n", config.DefaultCompactionMinMessages)
-	_, _ = fmt.Fprintf(w, "    max_attempts: %d\n\n", config.DefaultCompactionMaxAttempts)
+	_, _ = fmt.Fprintf(w, "    max_attempts: %d\n", config.DefaultCompactionMaxAttempts)
+	_, _ = fmt.Fprintf(w, "  secrets:              # optional, %%{NAME} placeholders in commands\n")
+	_, _ = fmt.Fprintf(w, "    source: env         # env|keyring\n")
+	_, _ = fmt.Fprintf(w, "    service: mph        # keyring service name\n\n")
 	_, _ = fmt.Fprintf(w, "Example:\n")
 	_, _ = fmt.Fprintf(w, "  mph -v ./mph.yaml\n")
 
@@ -142,6 +147,19 @@ func run() error {
 
 	cfg, err := config.LoadFile(configPath)
 	if err != nil {
+		return err
+	}
+
+	resolver, err := secrets.New(cfg.Secrets)
+	if err != nil {
+		return err
+	}
+
+	// Fail fast when the prompt names a secret the configured source cannot
+	// supply, so a missing secret surfaces before the VM is created rather
+	// than part-way through the run. The prompt itself is never substituted:
+	// that would put the secret into the model's context.
+	if err := secrets.Validate(cfg.Prompt, resolver); err != nil {
 		return err
 	}
 
@@ -213,7 +231,7 @@ func run() error {
 		RunID:         ident.ID,
 	})
 
-	client := multipass.New(log.Logger)
+	client := multipass.New(log.Logger, resolver)
 
 	return harness.Start(ctx, agt, client, cfg, harness.Options{
 		IgnoreExisting: ignoreExisting,

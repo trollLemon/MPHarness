@@ -64,7 +64,7 @@ func TestExecuteLogsToolEvents(t *testing.T) {
 		LLM: defaultLLMConfig(), RunID: "01J9",
 	})
 	conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
-	if err := a.Execute(t.Context(), conf, multipass.New(zerolog.Nop())); err != nil {
+	if err := a.Execute(t.Context(), conf, multipass.New(zerolog.Nop(), nil)); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 
