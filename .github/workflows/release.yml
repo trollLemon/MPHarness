@@ -27,7 +27,6 @@ jobs:
           VERSION="${GITHUB_REF_NAME}"
           for arch in amd64 arm64; do
             GOOS=linux GOARCH="$arch" go build -trimpath -ldflags "-X main.version=${VERSION} -s -w" -o "dist/mph-${VERSION}-linux-${arch}/mph" ./cmd/mph
-            "dist/mph-${VERSION}-linux-${arch}/mph" --version
             tar -C dist -czf "dist/mph-${VERSION}-linux-${arch}.tar.gz" "mph-${VERSION}-linux-${arch}/mph"
             rm -rf "dist/mph-${VERSION}-linux-${arch}"
           done
