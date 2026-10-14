@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags: ['v[0-9]*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.27'
+      - name: Vet and test
+        run: |
+          go vet ./...
+          go test -count=1 ./...
+      - name: Build release binaries
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          VERSION="${GITHUB_REF_NAME}"
+          for arch in amd64 arm64; do
+            GOOS=linux GOARCH="$arch" go build -trimpath -ldflags "-X main.version=${VERSION} -s -w" -o "dist/mph-${VERSION}-linux-${arch}/mph" ./cmd/mph
+            "dist/mph-${VERSION}-linux-${arch}/mph" --version
+            tar -C dist -czf "dist/mph-${VERSION}-linux-${arch}.tar.gz" "mph-${VERSION}-linux-${arch}/mph"
+            rm -rf "dist/mph-${VERSION}-linux-${arch}"
+          done
+          (cd dist && sha256sum *.tar.gz > SHA256SUMS && sha256sum -c SHA256SUMS)
+          ls -l dist
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          FLAGS="--title ${TAG} --generate-notes"
+          if [[ "${TAG}" == *-* ]]; then
+            FLAGS="${FLAGS} --prerelease"
+          fi
+          # shellcheck disable=SC2086
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" --clobber dist/*
+          else
+            gh release create "${TAG}" ${FLAGS} dist/*
+          fi

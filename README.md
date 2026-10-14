@@ -22,6 +22,15 @@ Every command the agent tries to run is parsed as shell AST and checked against 
 - Hardware that can run a small LLM (CPU works for 0.6B–1.7B models; a GPU helps for larger ones)
 
 
+## Install
+
+Tagged releases cut a GitHub release with `linux-amd64`/`linux-arm64` tarballs
+and make the module installable at that version:
+
+```bash
+go install github.com/trollLemon/MPHarness/cmd/mph@v0.1.0
+```
+
 ## Quickstart
 
 Create `first-task.yaml`:

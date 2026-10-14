@@ -7,7 +7,7 @@ GOFLAGS ?=
 OTEL_COMPOSE := docker-compose/docker-compose.yaml
 OTEL_PROJECT := mph-otel
 
-.PHONY: all build vet test test-cover test-verbose fmt tidy run clean help otel-up otel-down otel-reload-dashboards test-integration
+.PHONY: all build install vet test test-race test-cover test-verbose fmt tidy run clean help otel-up otel-down otel-reload-dashboards test-integration
 
 test-integration: build
 	sh testing/integration-output.sh
@@ -21,11 +21,17 @@ build:
 	@mkdir -p bin
 	go build -trimpath $(GOFLAGS) -ldflags "$(LDFLAGS)" -o bin/$(BINARY) $(CMD)
 
+install:
+	go install -trimpath $(GOFLAGS) -ldflags "$(LDFLAGS)" $(CMD)
+
 vet:
 	go vet ./...
 
 test:
 	go test -count=1 -v ./...
+
+test-race:
+	go test -race -count=1 ./...
 
 test-cover:
 	go test -count=1 -coverprofile=coverage.out ./...
@@ -61,6 +67,7 @@ otel-reload-dashboards:
 help:
 	@echo "Targets:"
 	@echo "  build        - build bin/$(BINARY) with version $(VERSION)"
+	@echo "  install      - go install ./cmd/mph with version $(VERSION) (GOPATH/bin)"
 	@echo "  vet          - go vet ./..."
 	@echo "  test         - go test -count=1 ./..."
 	@echo "  test-race    - go test -race -count=1 ./... (race detector)"
