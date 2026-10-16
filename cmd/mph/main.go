@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 	"uuid"
@@ -23,6 +24,41 @@ import (
 )
 
 var version = "dev"
+
+func Version() string {
+	if version != "dev" {
+		return version
+	}
+
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return version
+	}
+
+	if v := info.Main.Version; v != "" && v != "(devel)" {
+		return v
+	}
+
+	var rev, modified string
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs.revision":
+			rev = setting.Value
+			if len(rev) > 7 {
+				rev = rev[:7]
+			}
+		case "vcs.modified":
+			if setting.Value == "true" {
+				modified = "-dirty"
+			}
+		}
+	}
+	if rev != "" {
+		return fmt.Sprintf("%s (%s%s)", version, rev, modified)
+	}
+
+	return version
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -133,7 +169,7 @@ func run() error {
 	setupLogger(verbose, pretty)
 
 	if showVersion {
-		fmt.Printf("mph %s\n", version)
+		fmt.Printf("mph %s\n", Version())
 		return nil
 	}
 
