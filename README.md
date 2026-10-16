@@ -19,7 +19,7 @@ Every command the agent tries to run is parsed as shell AST and checked against 
 - [Multipass](https://multipass.run/) installed and on `PATH` (`multipass version` works)
 - Go 1.27+ (only needed to build from source)
 - A few GB free disk (VM image + model + llama.cpp runtimes)
-- Hardware that can run a small LLM (CPU works for 0.6B–1.7B models; a GPU helps for larger ones)
+- Hardware that can run a small LLM (CPU works for 0.6B to 1.7B models; a GPU helps for larger ones)
 
 
 ## Install
@@ -88,7 +88,7 @@ prompt: "test the build"
 
 content_dir: ./my-build   # optional: copied to /home/ubuntu/content in the VM
 
-allowed_commands:         # optional: omit = allow everything
+allowed_commands:         # optional: omit = allow everything (shell binaries always blocked)
   - coreUtils             # meta-entry expanding to GNU coreutils
   - apt
   - git
@@ -109,7 +109,7 @@ secrets:                  # optional %{NAME} placeholders, never sent to the mod
   source: env             # env|keyring
 ```
 
-Full reference: `mph --help` prints every key with defaults. Guides:
+Full reference: `mph --help` lists the config keys, but with illustrative values rather than defaults. See the guides for the real defaults. Guides:
 
 - [Configure the VM](docs/how-to/configure_vm.md) · [Configure the LLM](docs/how-to/configure_llm.md) · [Good models](docs/reference/good_models.md)
 - [Restrict commands](docs/how-to/restrict_commands.md) · [Provide content](docs/how-to/provide_content.md)
@@ -121,14 +121,16 @@ Full reference: `mph --help` prints every key with defaults. Guides:
 mph [flags] <config.yaml>
 
   -c, --config <file>   path to YAML config (positional arg also works)
-  -i, --ignore-existing reuse an existing VM with the same name without prompting
-  -k, --keep            keep the VM after the task instead of deleting it
+  -i                    reuse an existing VM with the same name without prompting
+  -k                    keep the VM after the task instead of deleting it
   -v, --verbose         debug logging
   --pretty              human-readable console logs instead of JSON
   --otel                enable OpenTelemetry tracing (also MPH_OTEL=true)
   --version             print version and exit
   -h, --help            show help
 ```
+
+Note: `-i` and `-k` have no long forms.
 
 ## Observability
 

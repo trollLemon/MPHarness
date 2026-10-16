@@ -227,7 +227,7 @@ func BuildUserMessage(task, summary string, handles []HandleInfo, compactionsApp
 	b.WriteString(strings.TrimSpace(summary) + "\n\n")
 	b.WriteString("## Active output handles\n")
 	if len(handles) == 0 {
-		b.WriteString("(none — do not call output_search or output_read; run new commands with multipass_exec)\n")
+		b.WriteString("(none; do not call output_search or output_read, run new commands with multipass_exec)\n")
 	} else {
 		for _, h := range handles {
 			fmt.Fprintf(&b, "- %s (%d lines, %d bytes) from `%s`\n", h.ID, h.TotalLines, h.TotalBytes, h.Command)

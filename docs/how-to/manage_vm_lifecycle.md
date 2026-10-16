@@ -1,6 +1,6 @@
 # Managing the VM lifecycle
 
-The harness manages the VM lifecycle **outside** the agent loop. The agent's only tools are `multipass_exec` and `multipass_info`. It cannot create, start, stop, or delete the VM.
+The harness manages the VM lifecycle **outside** the agent loop. The agent's core tools are `multipass_exec` and `multipass_info` (plus `output_search`/`output_read` for captured output; see [How tool calling works](../explaination/tool_calling.md)). It cannot create, start, stop, or delete the VM.
 
 ## Harness VM lifecycle
 
@@ -21,7 +21,7 @@ flowchart TD
 
 ## The agent's tool cycle
 
-Inside the agent loop, the two tools work together:
+Inside the agent loop, the core tools work together:
 
 ```mermaid
 flowchart LR
@@ -31,13 +31,13 @@ flowchart LR
     EXEC -->|repeat as needed| INFO
 ```
 
-- `multipass_info` returns the raw JSON output from `multipass info --format json` for the configured VM. Use it for orientation before or between commands.
+- `multipass_info` returns the raw JSON output from `multipass info --format json` for the configured VM, wrapped in the standard tool-result envelope (`{"status":"SUCCESS","data":{"result":"<raw JSON>"}}`). Use it for orientation before or between commands.
 - `multipass_exec` runs a command and returns its combined stdout/stderr.
 
 Your prompt only needs to describe the task. There is nothing to write about creating, starting, stopping, or deleting the VM, because the agent cannot do any of those.
 
 The harness will prompt for confirmation to continue if a VM with the same name already exists (unless you pass the `-i` flag to ignore and reuse it). 
-If you don't pass the `-k` flag, the harness will delete the VM once the task has finished.
+If you don't pass the `-k` flag, the harness will delete the VM once the task has finished successfully. On a run that fails (timeout, agent error), the harness exits before the delete step, so the VM is left running for inspection.
 
 - [How tool calling works](../explaination/tool_calling.md)
 - [Software architecture](../reference/arch.md)

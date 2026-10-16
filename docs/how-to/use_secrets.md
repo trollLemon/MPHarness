@@ -61,7 +61,7 @@ This matters most for captured output: `capture: true` redirects stdout to a raw
 
 ## Scope and limitations
 
-- Substitution happens only inside `multipass_exec`. `prompt`, `model`, `content_dir`, `vm.*`, `otel.*`, and `allowed_commands` are never substituted.
+- Substitution happens only inside commands run in the VM (`multipass_exec` and the harness's own VM commands). `prompt`, `model`, `content_dir`, `otel.*`, `allowed_commands`, and the VM resource fields (`vm.name`, `vm.disk`, `vm.ram`, `vm.cpu`, `vm.image`) are never substituted. (`vm.kernel` is the exception: the harness installs it via a command run in the VM, so a marker there would be substituted.)
 - One source per run; there is no per-marker override.
 - The VM-side raw capture file still holds the secret on disk. Redaction stops it coming back through `mph`, not `mph` un-writing it: any command the agent runs in the VM (`cat`, `env`) can still read what was printed there.
 

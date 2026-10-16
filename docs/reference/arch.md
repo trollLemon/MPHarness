@@ -12,7 +12,7 @@ MPHarness is a local harness for running agent-driven technical tasks inside a [
 flowchart TD
     CLI["cmd/mph (CLI entry)"]
     CONF["internal/config<br/>YAML parsing, validation, defaults"]
-    OTEL["internal/otel<br/>OTLP pipeline: Tracer/Meter/Logger providers + zerolog Hook"]
+    OTEL["internal/otel<br/>OTLP pipeline: Tracer/Logger providers + zerolog Hook"]
     AGENT["internal/agent<br/>Agent loop, LLM client, tool specs + dispatch"]
     HARNESS["internal/harness<br/>VM lifecycle: info, launch, prompt, delete"]
     MULTIPASS["internal/multipass<br/>multipass CLI wrapper"]
@@ -29,15 +29,15 @@ flowchart TD
     MULTIPASS -.-> OTEL
 ```
 
-Tool dispatch (`Call`, `callExec`, `callInfo`) lives in `internal/agent/spec.go` alongside tool specifications.
+Tool dispatch (`Call`, plus `callExec`, `callOutputSearch`, `callOutputRead`; `multipass_info` is handled inline in `Call`) lives in `internal/agent/spec.go` alongside tool specifications.
 
 ## Package responsibilities
 
 | Package | Responsibility |
 |---------|----------------|
 | `cmd/mph` | CLI entry point. Parses flags (`-i` to reuse existing VM, `-k` to keep VM after run, `--otel`/`MPH_OTEL` for tracing), configures zerolog logging, loads config, merges OTel precedence (flag/env > YAML > defaults), calls `otel.Setup`, installs the zerolog Hook, and runs the harness with a deferred `shutdown`. |
-| `internal/config` | YAML config model, parsing, validation, and defaults. Owns the `allowed_commands` -> allowlist map, the `coreUtils` meta expansion, the optional `content_dir` (validated to be an existing dir, copied to `VMContentDir = "/home/ubuntu/content"`), and the optional `otel:` block (`enabled`, `endpoint`, `service_name`, `resource_attributes`) with defaults `localhost:4317`/`mph`. |
-| `internal/otel` | Owns the OTLP pipeline. `Setup(Config)` creates gRPC exporters for traces/logs (`otlptracegrpc`/`otlploggrpc`), builds `TracerProvider`/`LoggerProvider` (`sdk/log`) with a `resource` (`service.name` + `OTEL_RESOURCE_ATTRIBUTES` + YAML `resource_attributes`), sets `otel.SetTracerProvider`/`global.SetLoggerProvider`, and returns a `shutdown` that flushes. `Hook` bridges every zerolog event to OTLP logs (level 1:1, body = message, trace correlation via `e.GetCtx()`); `LogEvent` writes structured fields to both. There are no OTel metrics. Other packages use the OTel globals (`Tracer("mph")`) – cheap no-ops when disabled, so no constructor changes. |
+| `internal/config` | YAML config model, parsing, validation, and defaults. Owns the `allowed_commands` -> allowlist map, the `coreUtils` meta expansion, the optional `content_dir` (validated to be an existing dir, copied to `VMContentDir = "/home/ubuntu/content"`), and the optional `otel:` block (`enabled`, `endpoint`, `service_name`, `resource_attributes`); `enabled` defaults to `false`, while endpoint/service name are left empty for `cmd/mph.resolveOtelConfig` to fill in. |
+| `internal/otel` | Owns the OTLP pipeline. `Setup(Config)` creates gRPC exporters for traces/logs (`otlptracegrpc`/`otlploggrpc`), builds `TracerProvider`/`LoggerProvider` (`sdk/log`) with a `resource` (`service.name` + `OTEL_RESOURCE_ATTRIBUTES` + YAML `resource_attributes`), sets `otel.SetTracerProvider`/`global.SetLoggerProvider`, and returns a `shutdown` that flushes. `Hook` bridges every zerolog event to OTLP logs (level 1:1, body = message, trace correlation via `e.GetCtx()`); `LogEvent` writes structured fields to both. There are no OTel metrics. Other packages use the OTel globals (`Tracer("mph")`), which are cheap no-ops when disabled, so no constructor changes. |
 | `internal/agent` | The agent loop, the LLM client, tool specifications, and the tool dispatcher. When enabled, each `Execute` iteration creates an `mph.agent.iteration` span (parent `mph.run` via the threaded `ctx`), emits `mph.agent.tool_call`/`tool_result`/`length_nudge` span events, and logs structured `event=` lines (`token_usage`, `iteration`, `agent_tool_call`, `tool_succeeded`/`tool_failed`, `context_compaction`, `run_summary`) that the Grafana dashboard queries with LogQL. `InitializeModelFiles`/`NewKronk` optionally emit `mph.model.init`/`load`. System prompt is built via `buildSystemPrompt(cfg)` which appends a content notice when `content_dir` is set. |
 | `internal/harness` | Orchestrates VM lifecycle: checks if VM exists, launches if needed, prompts to reuse existing VM (unless `-i`), copies `content_dir` to `VMContentDir` via `mkdir -p` + `Transfer` under child span `mph.vm.content` (if set), runs the agent with the root `mph.run` ctx, and deletes VM after task (unless `-k`). Creates root span `mph.run` (now includes `mph.content_dir`) and child `mph.vm.create`/`delete`/`content` spans around `Launch`/`Delete`/`Transfer` (which themselves create `multipass.*` children). |
 | `internal/multipass` | A thin wrapper around the `multipass` CLI binary. Each method (`Info`/`Launch`/`Exec`/`Delete`/`Transfer`) creates a `multipass.*` span (`multipass.command`, `mph.vm.name`, `mph.command` truncated 4000, `multipass.args`). `Transfer` wraps `multipass transfer --recursive --parents`. |
@@ -47,9 +47,9 @@ Tool dispatch (`Call`, `callExec`, `callInfo`) lives in `internal/agent/spec.go`
 
 ## Runtime flow
 
-1. **Config load.** `config.LoadFile` reads the YAML, applies defaults (VM name `mph-vm`, `tool_choice: auto`, `max_iterations: 10`, `chat_timeout: 300s`, `total_timeout: 30m`, `otel.endpoint: localhost:4317`, `otel.service_name: mph`) and validates required fields (`vm.disk`, `vm.ram`, `vm.cpu > 0`, `model`, `prompt`). `content_dir` when set must be an existing local directory. OTel `enabled` defaults to `false`.
+1. **Config load.** `config.LoadFile` reads the YAML, applies defaults (VM name `mph-vm`, `tool_choice: auto`, `max_iterations: 10`, `chat_timeout: 300s`, `total_timeout: 30m`) and validates required fields (`vm.disk`, `vm.ram`, `vm.cpu > 0`, `model`, `prompt`). `content_dir` when set must be an existing local directory. OTel `enabled` defaults to `false`; `otel.endpoint`/`otel.service_name` are filled in later by `cmd/mph.resolveOtelConfig` (`localhost:4317`/`mph`).
 
-2. **OTel setup (if enabled).** `cmd/mph` merges `--otel`/`MPH_OTEL` > `OTEL_EXPORTER_OTLP_ENDPOINT`/`OTEL_SERVICE_NAME` > YAML `otel:` > defaults, calls `otel.Setup` (OTLP/gRPC exporters + `TracerProvider`/`MeterProvider`/`LoggerProvider` + `resource`), and installs the zerolog `Hook` on `log.Logger` so every later `log` line is also exported with `trace_id`/`span_id` when inside a span (`zerologAdapter` uses `logger.Info().Ctx(ctx)`).
+2. **OTel setup (if enabled).** `cmd/mph` merges `--otel`/`MPH_OTEL` > `OTEL_EXPORTER_OTLP_ENDPOINT`/`OTEL_SERVICE_NAME` > YAML `otel:` > defaults, calls `otel.Setup` (OTLP/gRPC exporters + `TracerProvider`/`LoggerProvider` + `resource`), and installs the zerolog `Hook` on `log.Logger` so every later `log` line is also exported with `trace_id`/`span_id` when inside a span (`zerologAdapter` uses `logger.Info().Ctx(ctx)`).
 
 3. **Model initialisation.** `InitializeModelFiles` (span `mph.model.init`, `mph.model`) detects/downloads the native llama.cpp libraries, initialises the kronk runtime, and downloads the model identified by `cfg.Model`. `NewKronk` (span `mph.model.load`, `mph.context_window`=`"auto"` when `0`) loads the model into memory (with optional `context_window`; `0` means auto-tune).
 
@@ -70,7 +70,7 @@ Tool dispatch (`Call`, `callExec`, `callInfo`) lives in `internal/agent/spec.go`
    - Repeats, up to `max_iterations` times: send messages + tools to the LLM, extract the assistant message, and either
      - **terminate** when the model replies with no tool calls (its final summary), or
      - **execute** the tool calls, append their results to the conversation, and continue.
-   - Independent tool calls are batched into one turn (`parallel_tool_calls: true`, and the "Batching Work" section of the system prompt); dependent ones are chained with `&&` inside a single `multipass_exec`. Note that kronk parses `parallel_tool_calls` but does not forward it to the inference backend, so the prompt is what actually drives batching — the flag is kept accurate so the request does not contradict the prompt.
+   - Independent tool calls are batched into one turn (`parallel_tool_calls: true`, and the "Batching Work" section of the system prompt); dependent ones are chained with `&&` inside a single `multipass_exec`. Note that kronk parses `parallel_tool_calls` but does not forward it to the inference backend, so the prompt is what actually drives batching. The flag is kept accurate so the request does not contradict the prompt.
    - `max_tokens` caps one model turn (`llm.max_output_tokens`, default 2048) so a runaway completion cannot decode until it exhausts the context window and trip the length nudge.
     - Tool results reach the model untruncated: large outputs are captured to files with handles instead, and compaction is the backstop for the rest.
    - Injection note: if the model hits the length limit with no tool call, a "be concise" nudge is appended and the loop continues.
