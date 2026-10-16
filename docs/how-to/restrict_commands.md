@@ -1,6 +1,6 @@
 # Restricting the commands the agent may run
 
-By default, `mph` lets the agent run **any** command inside the VM through `multipass_exec`. If you want the agent sandboxed to a fixed toolset, use `allowed_commands`.
+By default, `mph` lets the agent run **any** command inside the VM through `multipass_exec` (shell binaries such as `bash`/`sh` are always blocked; see [Special cases](#special-cases)). If you want the agent sandboxed to a fixed toolset, use `allowed_commands`.
 
 ```yaml
 allowed_commands:
@@ -13,9 +13,9 @@ allowed_commands:
   - cat
 ```
 
-When the list is present, every command the agent tries to run is parsed and checked through an abstract syntax tree: any command that is not allowed is rejected with an error the agent sees and must report. When the list is empty or omitted, everything is allowed.
+When the list is present, every command the agent tries to run is parsed and checked through an abstract syntax tree: any command that is not allowed is rejected with an error the agent sees and must report. When the list is empty or omitted, everything is allowed **except shell binaries** (`bash`, `sh`, `zsh`, `fish`, `dash`, `ksh`, `csh`, `tcsh`), which are always rejected. Piping like `ps aux | grep nginx` still works without an explicit shell invocation.
 
-The agent is made aware of the allowed commands via the system prompts, so the agent generally will only call allowed commands, unless one is missing that is commonly used or required to complete the task. If the agent cannot complete the task due to a missing tool, it will abort.
+The agent is made aware of the allowed commands via the `Allowed commands:` line in the user prompt, so the agent generally will only call allowed commands, unless one is missing that is commonly used or required to complete the task. If the agent cannot complete the task due to a missing tool, it will abort.
 
 ## How matching works
 
@@ -53,7 +53,8 @@ Because this is grammar-aware, things like command substitution (`$(...)`), back
 ## Special cases
 
 - `true` and `false` are always allowed and ignored by the check (they are noise tokens; `ls \; true` is fine).
-- The allowed list does not grant the agent `sudo` or `env` etc. unless you list those binaries too. To let the agent run `sudo apt update`, you need both `sudo` and `apt` in the list.
+- Shell binaries (`bash`, `sh`, `zsh`, `fish`, `dash`, `ksh`, `csh`, `tcsh`) are always blocked, even with an empty allowlist.
+- Only the **first token** (the binary name) of each command is checked; the arguments are not. Listing `sudo` alone therefore allows `sudo apt update` **and** any other inner command, so list `sudo` only if you accept that. (`env`, `nohup`, and similar wrappers behave the same way.)
 - First-token caveat: `apt` in the list does **not** allow `apt-get` (different binary name). List `apt-get` explicitly if you want it.
 - Untracked non-literal names fail closed (see above).
 

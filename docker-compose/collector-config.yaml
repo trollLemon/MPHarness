@@ -31,7 +31,7 @@ exporters:
     tls:
       insecure: true
 
-  # Optional offline file exporters – uncomment to persist traces/logs to disk.
+  # Optional offline file exporters; uncomment to persist traces/logs to disk.
   # Requires the path's parent dir to exist; pre-create via `mkdir -p` or volume mount.
   # file/traces:
   #   path: /tmp/otel-traces.json

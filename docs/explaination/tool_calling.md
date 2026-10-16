@@ -1,6 +1,6 @@
 # Mph Tool Calling
 
-`mph` has only two tool calls, and there are several reasons for this:
+`mph` exposes a deliberately small toolset: `multipass_exec` and `multipass_info` at its core, plus `output_search` and `output_read` when output capture is enabled (`output.enabled`, which defaults to `true`). There are several reasons for the small core:
 - less tool call specs = more space in context window.
 - The agent doesn't manage the VM's lifecycle at all. The VM is guaranteed to be up and running by the time the agent needs to work, so the agent only ever inspects it and runs commands.
 - Having explicit tool calls for VM lifecycle tend to confuse smaller models (i.e forgetting to check if a VM is running before executing commands) which results in extra computation, which is wasteful.
@@ -8,8 +8,10 @@
 ## The contract
 | Tool | What the model must supply | What it returns |
 |------|----------------------------|-----------------|
-| `multipass_exec` | `command` (string) | combined stdout/stderr |
+| `multipass_exec` | `command` (string), optional `capture` (bool) | combined stdout/stderr, or a capture handle (`output_id`, path, line counts) when `capture: true` |
 | `multipass_info` | n/a | raw JSON from `multipass info --format json` |
+| `output_search` | `output_id`, `pattern` | matching line numbers in a captured output |
+| `output_read` | `output_id`, optional `offset`/`limit` | a slice of a captured output |
 
 For `multipass_exec`, the `command` string can be several commands at once (such as `cat /proc/uptime | grep ...`), the input command is parsed into a shell AST and each command is validated against the allow list.
 
@@ -79,7 +81,7 @@ sequenceDiagram
     end
 ```
 
-The loop restarts only when the model emits a message **without** tool calls; that message is its final summary, and the harness stops and prints the collected command output.
+The loop stops only when the model emits a message **without** tool calls; that message is its final summary, and the harness stops and prints the collected command output.
 
 **Length-limit recovery.** If the model's reply exhausts its token budget without a tool call (finish_reason = "length"), the harness appends a nudge ("Your previous response hit the token limit without making a tool call. Please be concise and try again and run a tool call if necessary") and retries rather than dying.
 

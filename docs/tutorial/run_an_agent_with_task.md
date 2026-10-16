@@ -13,7 +13,7 @@ In this tutorial you will run `mph` for the first time. By the end you will have
 
 - [Multipass](https://multipass.run/) installed and working (`multipass version` runs without error).
 - Enough free disk space (the VM image, the model files, and the llama.cpp runtimes need a few gigabytes).
-- Hardware that can run a small LLM. A CPU-only machine works for a 0.6B–1.7B model; a GPU with a few GB of VRAM makes a bigger model practical.
+- Hardware that can run a small LLM. A CPU-only machine works for a 0.6B to 1.7B model; a GPU with a few GB of VRAM makes a bigger model practical.
 
 ## Step 1: Write a config file
 
@@ -74,8 +74,8 @@ Add `-v` if you want debug-level logging, and `--pretty` for human-readable (ins
 Additional flags:
 
 - `-c`, `--config <file>`: path to YAML config file (positional arg also works)
-- `-i`, `--ignore-existing`: reuse an existing VM with the same name without prompting
-- `-k`, `--keep`: keep the VM after the task completes instead of deleting it
+- `-i`: reuse an existing VM with the same name without prompting
+- `-k`: keep the VM after the task completes instead of deleting it
 - `-v`, `--verbose`: verbose (debug) logging
 - `--pretty`: pretty-print logs (human-readable console) instead of JSON
 - `--version`: print version and exit
@@ -93,7 +93,7 @@ You'll see log lines for each stage:
 ```text
 loaded config                                  # your YAML parsed and validated
 Starting inference                             # the agent loop begins
-agent reasoning                                # the model's chain of thought
+model output                  part=reasoning   # the model's chain of thought
 agent tool call   tool=multipass_info          # "what's the VM state?"
 tool succeeded    tool=multipass_exec          # each command returns its output
 token usage                                    # one log line per LLM response
@@ -103,7 +103,7 @@ The sequence you observe is the agent loop: the LLM reads the task, decides on o
 
 ## Step 4: Read the final output
 
-When the agent stops, the harness prints the output of every command it ran (separated by `---` markers). If the agent produced a final summary instead, that summary is printed on its own.
+When the agent stops, the harness prints the output of every command it ran (separated by `---` markers). The model's final summary appears only in the logs (as a `model output` info line), not in the console output.
 
 The VM's lifecycle is managed by `mph`, outside the agent loop. You can check its state with:
 

@@ -24,15 +24,15 @@ If the `otel` block is absent, `enabled` defaults to `false` and the endpoint an
 ### CLI flags
 
 ```bash
-./bin/mph --otel ./test.yaml        # enable (bool)
-./bin/mph --otel --pretty ./test.yaml  # readable logs alongside the OTLP export
+./bin/mph --otel ./testing/test.yaml        # enable (bool)
+./bin/mph --otel --pretty ./testing/test.yaml  # readable logs alongside the OTLP export
 ```
 
 `--otel` is also usable via env:
 
 ```bash
-MPH_OTEL=true ./bin/mph ./test.yaml
-MPH_OTEL=1 ./bin/mph ./test.yaml
+MPH_OTEL=true ./bin/mph ./testing/test.yaml
+MPH_OTEL=1 ./bin/mph ./testing/test.yaml
 ```
 
 Any of `true`/`1`/`yes` (case-insensitive) counts as enabled.
@@ -41,12 +41,12 @@ Any of `true`/`1`/`yes` (case-insensitive) counts as enabled.
 
 The SDK reads these automatically; `mph` also respects them for precedence:
 
-- `OTEL_EXPORTER_OTLP_ENDPOINT` (e.g. `mycollector:4317` or `https://collector:4317`)
+- `OTEL_EXPORTER_OTLP_ENDPOINT` (e.g. `mycollector:4317`). Use a bare `host:port` with no scheme; the exporter is gRPC/insecure, so a `https://` value fails
 - `OTEL_SERVICE_NAME`
 - `OTEL_RESOURCE_ATTRIBUTES` (e.g. `environment=prod,region=eu`)
 - `OTEL_SDK_DISABLED=true` disables the SDK even if `mph` enabled it
 
-`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` also work per-signal if you need them.
+Per-signal `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` are ignored: `mph` always passes the resolved endpoint explicitly, which overrides them.
 
 ### Precedence (highest first)
 
@@ -71,7 +71,7 @@ make otel-up    # start the stack
 make otel-down  # stop it, keep the data
 ```
 
-`mph` still points at `localhost:4317` — the stack is a backend, not something you configure `mph` to find.
+`mph` still points at `localhost:4317`. The stack is a backend, not something you configure `mph` to find.
 
 ### Topology
 
@@ -136,7 +136,7 @@ cannot be rendered directly by Grafana's `traces` visualization.
 
 ### Searching traces by hand
 
-Tempo's own search API takes `start` and `end` in **seconds**, and only together — passing milliseconds returns `400 invalid start`, and passing one without the other is also a `400`. `tags` and the TraceQL `q` parameter are mutually exclusive.
+Tempo's own search API takes `start` and `end` in **seconds**, and only together. Passing milliseconds returns `400 invalid start`, and passing one without the other is also a `400`. `tags` and the TraceQL `q` parameter are mutually exclusive.
 
 ```bash
 curl -sG http://localhost:3200/api/search \
@@ -150,8 +150,8 @@ TraceQL has to match against **flushed blocks**, not just live data, so `docker-
 
 ### Data retention
 
-The four stateful services use named volumes — `loki-data`, `prometheus-data`,
-`grafana-data`, and `tempo-data` — so `make otel-down` and `make otel-up`
+The four stateful services use named volumes (`loki-data`, `prometheus-data`,
+`grafana-data`, and `tempo-data`), so `make otel-down` and `make otel-up`
 preserve their data, subject to each backend's retention settings.
 
 To wipe only this stack's stored data and start clean:
@@ -163,17 +163,17 @@ make otel-up
 
 ## 3. Smoke test
 
-`testing/test.yaml` is the canonical smoke config: a pinned small instruct model, `llm.temperature: 0.0` (deterministic, so traces are comparable run to run), and `otel.enabled: true` with `service_name: mph-smoke`.
+`testing/test.yaml` is the canonical smoke config: a pinned small instruct model (`unsloth/granite-4.0-350m-IQ4_XS`), `llm.temperature: 0.0` (deterministic, so traces are comparable run to run), and no `otel:` block. OTel is enabled with the `--otel` flag:
 
 ```bash
 make build
 make otel-up                # OTLP receiver must be listening
-./bin/mph ./testing/test.yaml
+./bin/mph --otel ./testing/test.yaml
 ```
 
 Then:
 
-- Grafana on <http://localhost:3000> — the **MPH OTel** dashboard, or Explore → Tempo/Loki
+- Grafana on <http://localhost:3000> provisions the **MPHarness - OTel (Logs / Traces)** dashboard, or use Explore → Tempo/Loki
 - The trace shape to expect is `mph.run` → `mph.vm.create` / `multipass.launch` → `mph.agent.iteration` × N (with `mph.agent.tool_call` / `tool_result` events and a `multipass.exec` child per command) → `mph.vm.delete`
 
 `mph.run.id` identifies the run on spans; in Loki the same `<name>:<uuid>`
@@ -186,15 +186,15 @@ Model replies land in Loki under the body `model output`, split by `part` (`cont
 
 ```bash
 # 1. Disabled by default: with the stack down, nothing should dial :4317
-./bin/mph ./test.yaml       # this config has no otel block
+./bin/mph ./testing/test.yaml       # this config has no otel block
 
 # 2. Env overrides endpoint and service name
 OTEL_EXPORTER_OTLP_ENDPOINT=mycollector:4317 ./bin/mph --otel ./testing/test.yaml
 OTEL_SERVICE_NAME=custom-mph ./bin/mph --otel ./testing/test.yaml
 
 # 3. Flag vs YAML
-./bin/mph --otel ./test.yaml           # no otel block, flag enables via env/defaults
-./bin/mph ./testing/test.yaml          # YAML enabled:true, no flag - also enabled
+./bin/mph --otel ./testing/test.yaml     # no otel block, flag enables via env/defaults
+./bin/mph ./testing/output.yaml          # YAML otel.enabled: true, no flag - also enabled
 ```
 
 Check 1 is the one that matters most: it is what proves the default-off promise, so run it with the collector actually stopped.
@@ -207,13 +207,13 @@ Check 1 is the one that matters most: it is what proves the default-off promise,
 ./bin/mph ./testing/longrun.yaml
 ```
 
-It uses a separate VM name (`mph-longrun`) and `service_name` (`mph-longrun`).
+It uses a separate VM name (`mph-longrun-3`) and `service_name` (`mph-longrun-3`).
 Both land on the same dashboard; use the **Run** selector for details and
 the **All runs** table for comparison.
 
 ### If the trace panel looks empty
 
-Grafana 12.2 runs Tempo's TraceQL search in the browser, through the datasource proxy, and its server-side query endpoint has no implementation: posting a `traceql` search to `/api/ds/query` always fails with `backend TraceQL search queries are not supported`, whatever the query, and no request ever reaches Tempo. That makes the panel impossible to verify by scripting the API — it has to be checked in the browser, or through **Explore → Tempo**, which uses the working path. Tempo's own UI on <http://localhost:3200> is the other fallback.
+Grafana 12.2 runs Tempo's TraceQL search in the browser, through the datasource proxy, and its server-side query endpoint has no implementation: posting a `traceql` search to `/api/ds/query` always fails with `backend TraceQL search queries are not supported`, whatever the query, and no request ever reaches Tempo. That makes the panel impossible to verify by scripting the API. It has to be checked in the browser, or through **Explore → Tempo**, which uses the working path. Tempo's own UI on <http://localhost:3200> is the other fallback.
 
 ## 4. Tuning what gets exported
 
@@ -242,18 +242,18 @@ Any value of `0` or less is replaced by the default in `config.DefaultCommandOut
 
 ## 6. Where it lives in code
 
-- `internal/otel/otel.go` — `Config`, `Setup` (creates the `otlptracegrpc`/`otlploggrpc` exporters, the tracer and logger providers, and `global.SetLoggerProvider`), returns `shutdown`, `Hook` (zerolog → `otellog.Record` with trace correlation via `e.GetCtx()`), and `LogEvent` (structured fields to both zerolog and OTLP).
-- `internal/config/config.go` — `OtelConfig`, `TruncationConfig`, YAML `otel:`/`truncation:` parsing, and the default constants.
-- `cmd/mph/main.go` — `--otel` flag, `MPH_OTEL` env, `resolveOtelConfig` (the precedence merge above), `otel.Setup`, and `log.Logger.Hook(NewHook("mph"))` with a deferred shutdown.
-- `internal/multipass/multipass.go` — a span per command (`multipass.*`); `Exec` takes the cap for its command echo attribute.
-- `internal/harness/harness.go` — the root `mph.run` span plus `mph.vm.create`/`delete`.
-- `internal/agent/agent.go` — `Execute` (ctx threaded from harness), `mph.agent.iteration` spans, span events, the length-limit nudge, and the `token_usage`/`iteration`/tool log events.
-- `internal/agent/compaction.go` — the `mph.context.compaction` span and `context_compaction`/`context_compaction_applied` events.
-- `internal/agent/run_summary.go` — the run outcome and the `run_summary` event.
-- `internal/agent/model.go` — `zerolog.Ctx(ctx)` in `zerologAdapter` for log↔trace linkage, and the `mph.model.init` / `mph.model.load` spans.
+- `internal/otel/otel.go`: `Config`, `Setup` (creates the `otlptracegrpc`/`otlploggrpc` exporters, the tracer and logger providers, and `global.SetLoggerProvider`), returns `shutdown`, `Hook` (zerolog → `otellog.Record` with trace correlation via `e.GetCtx()`), and `LogEvent` (structured fields to both zerolog and OTLP).
+- `internal/config/config.go`: `OtelConfig`, `TruncationConfig`, YAML `otel:`/`truncation:` parsing, and the default constants.
+- `cmd/mph/main.go`: `--otel` flag, `MPH_OTEL` env, `resolveOtelConfig` (the precedence merge above), `otel.Setup`, and `log.Logger.Hook(NewHook("mph"))` with a deferred shutdown.
+- `internal/multipass/multipass.go`: a span per command (`multipass.*`); `Exec` takes the cap for its command echo attribute.
+- `internal/harness/harness.go`: the root `mph.run` span plus `mph.vm.create`/`delete`.
+- `internal/agent/agent.go`: `Execute` (ctx threaded from harness), `mph.agent.iteration` spans, span events, the length-limit nudge, and the `token_usage`/`iteration`/tool log events.
+- `internal/agent/compaction.go`: the `mph.context.compaction` span and `context_compaction`/`context_compaction_applied` events.
+- `internal/agent/run_summary.go`: the run outcome and the `run_summary` event.
+- `internal/agent/model.go`: `zerolog.Ctx(ctx)` in `zerologAdapter` for log↔trace linkage, and the `mph.model.init` / `mph.model.load` spans.
 
 ## Related
 
-- [Software architecture](../reference/arch.md) – package map including `internal/otel`.
-- [Configure the LLM](configure_llm.md) – `temperature: 0.0` for deterministic smoke.
-- [Good models](../reference/good_models.md) – picking small models for the smoke test.
+- [Software architecture](../reference/arch.md): package map including `internal/otel`.
+- [Configure the LLM](configure_llm.md): `temperature: 0.0` for deterministic smoke.
+- [Good models](../reference/good_models.md): picking small models for the smoke test.

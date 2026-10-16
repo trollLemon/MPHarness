@@ -125,7 +125,7 @@ prompt: "Run `uname -r` and confirm the kernel version."
 
 ## Full-Featured
 
-Shows every available option: allowed commands, tuned LLM, generous timeouts, and a multi-step prompt. Uses a larger model (27B) suited for GPU machines.
+Shows a broad mix of options (not exhaustive): allowed commands, tuned LLM, generous timeouts, and a multi-step prompt. Uses a larger model (27B) suited for GPU machines.
 
 ```yaml
 vm:

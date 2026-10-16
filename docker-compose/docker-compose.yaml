@@ -11,7 +11,7 @@ services:
     volumes:
       - ./collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
     ports:
-      - "4317:4317"   # OTLP gRPC – mph default endpoint localhost:4317
+      - "4317:4317"   # OTLP gRPC: mph default endpoint localhost:4317
       - "4318:4318"   # OTLP HTTP
       - "13133:13133" # health_check
       - "8888:8888"   # collector self metrics
