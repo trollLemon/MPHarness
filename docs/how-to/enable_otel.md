@@ -17,7 +17,7 @@ otel:
     environment: dev
 ```
 
-If the `otel` block is absent, `enabled` defaults to `false` and the endpoint and service name are left empty for `cmd/mph.resolveOtelConfig` to fill in. See [precedence](#precedence-highest-first) for why the default-off default lives in one place rather than two.
+If the `otel` block is absent, `enabled` defaults to `false` and the endpoint and service name are left empty for `mph.resolveOtelConfig` to fill in. See [precedence](#precedence-highest-first) for why the default-off default lives in one place rather than two.
 
 `resource_attributes` is free-form `map[string]string`; it is merged with `OTEL_RESOURCE_ATTRIBUTES` from the environment by `resource.WithFromEnv()` in `internal/otel.Setup`.
 
@@ -56,7 +56,7 @@ Per-signal `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_LOGS_ENDPO
 | endpoint | `OTEL_EXPORTER_OTLP_ENDPOINT` | YAML `otel.endpoint` | `localhost:4317` |
 | service name | `OTEL_SERVICE_NAME` | YAML `otel.service_name` | `mph` |
 
-The third column is `mphotel.DefaultEndpoint` / `DefaultServiceName`, applied in `cmd/mph.resolveOtelConfig` for the YAML path and again in `internal/otel.Setup` for programmatic callers that skip the CLI.
+The third column is `mphotel.DefaultEndpoint` / `DefaultServiceName`, applied in `mph.resolveOtelConfig` for the YAML path and again in `internal/otel.Setup` for programmatic callers that skip the CLI.
 
 `resource_attributes` from YAML and `OTEL_RESOURCE_ATTRIBUTES` from the env are **merged** (env via `resource.WithFromEnv()` plus the YAML map in `internal/otel.Setup`).
 
@@ -244,7 +244,7 @@ Any value of `0` or less is replaced by the default in `config.DefaultCommandOut
 
 - `internal/otel/otel.go`: `Config`, `Setup` (creates the `otlptracegrpc`/`otlploggrpc` exporters, the tracer and logger providers, and `global.SetLoggerProvider`), returns `shutdown`, `Hook` (zerolog → `otellog.Record` with trace correlation via `e.GetCtx()`), and `LogEvent` (structured fields to both zerolog and OTLP).
 - `internal/config/config.go`: `OtelConfig`, `TruncationConfig`, YAML `otel:`/`truncation:` parsing, and the default constants.
-- `cmd/mph/main.go`: `--otel` flag, `MPH_OTEL` env, `resolveOtelConfig` (the precedence merge above), `otel.Setup`, and `log.Logger.Hook(NewHook("mph"))` with a deferred shutdown.
+- `mph/main.go`: `--otel` flag, `MPH_OTEL` env, `resolveOtelConfig` (the precedence merge above), `otel.Setup`, and `log.Logger.Hook(NewHook("mph"))` with a deferred shutdown.
 - `internal/multipass/multipass.go`: a span per command (`multipass.*`); `Exec` takes the cap for its command echo attribute.
 - `internal/harness/harness.go`: the root `mph.run` span plus `mph.vm.create`/`delete`.
 - `internal/agent/agent.go`: `Execute` (ctx threaded from harness), `mph.agent.iteration` spans, span events, the length-limit nudge, and the `token_usage`/`iteration`/tool log events.

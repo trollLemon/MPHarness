@@ -1,5 +1,5 @@
 BINARY  := mph
-CMD     := ./cmd/mph
+CMD     := ./mph
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -X main.version=$(VERSION) -s -w
 GOFLAGS ?=
@@ -67,7 +67,7 @@ otel-reload-dashboards:
 help:
 	@echo "Targets:"
 	@echo "  build        - build bin/$(BINARY) with version $(VERSION)"
-	@echo "  install      - go install ./cmd/mph with version $(VERSION) (GOPATH/bin)"
+	@echo "  install      - go install ./mph with version $(VERSION) (GOPATH/bin)"
 	@echo "  vet          - go vet ./..."
 	@echo "  test         - go test -count=1 ./..."
 	@echo "  test-race    - go test -race -count=1 ./... (race detector)"

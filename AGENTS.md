@@ -4,7 +4,7 @@
 Local harness for running tests in a Multipass VM.
 
 ## Structure
-- `cmd/mph/` - Main CLI entry point
+- `mph/` - Main CLI entry point
 - `internal/agent/` - Agent management (lifecycle, spec, model)
 - `internal/config/` - Configuration handling
 - `internal/harness/` - Harness orchestration
@@ -15,7 +15,7 @@ Local harness for running tests in a Multipass VM.
 ## Commands
 ```bash
 # Build
-go build -o bin/mph ./cmd/mph
+go build -o bin/mph ./mph
 
 # Test
 go test ./...

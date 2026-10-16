@@ -1,18 +1,20 @@
 name: Release
 
 on:
-  push:
-    tags: ['v[0-9]*.*.*']
+  release:
+    types: [published]
 
 permissions:
   contents: write
 
 jobs:
   release:
-    name: Build and publish release
+    name: Build and upload release assets
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.27'
@@ -26,25 +28,15 @@ jobs:
           mkdir -p dist
           VERSION="${GITHUB_REF_NAME}"
           for arch in amd64 arm64; do
-            GOOS=linux GOARCH="$arch" go build -trimpath -ldflags "-X main.version=${VERSION} -s -w" -o "dist/mph-${VERSION}-linux-${arch}/mph" ./cmd/mph
+            GOOS=linux GOARCH="$arch" go build -trimpath -ldflags "-X main.version=${VERSION} -s -w" -o "dist/mph-${VERSION}-linux-${arch}/mph" ./mph
             tar -C dist -czf "dist/mph-${VERSION}-linux-${arch}.tar.gz" "mph-${VERSION}-linux-${arch}/mph"
             rm -rf "dist/mph-${VERSION}-linux-${arch}"
           done
           (cd dist && sha256sum *.tar.gz > SHA256SUMS && sha256sum -c SHA256SUMS)
           ls -l dist
-      - name: Create GitHub release
+      - name: Upload assets to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME}"
-          FLAGS="--title ${TAG} --generate-notes"
-          if [[ "${TAG}" == *-* ]]; then
-            FLAGS="${FLAGS} --prerelease"
-          fi
-          # shellcheck disable=SC2086
-          if gh release view "${TAG}" >/dev/null 2>&1; then
-            gh release upload "${TAG}" --clobber dist/*
-          else
-            gh release create "${TAG}" ${FLAGS} dist/*
-          fi
+          gh release upload "${GITHUB_REF_NAME}" --clobber dist/*

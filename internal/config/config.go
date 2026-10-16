@@ -36,7 +36,7 @@ func OutputRunDir(runID string) string {
 	return OutputBaseDir + "/" + runID
 }
 
-// Agent defaults. Named so the help text in cmd/mph cannot drift from the values
+// Agent defaults. Named so the help text in mph cannot drift from the values
 // applyDefaults actually installs.
 const (
 	DefaultMaxIterations = 10
@@ -508,7 +508,7 @@ func Parse(data []byte) (Config, error) {
 	}
 
 	// Otel endpoint and service name are resolved later, in
-	// cmd/mph.resolveOtelConfig, which layers the environment over the YAML.
+	// mph.resolveOtelConfig, which layers the environment over the YAML.
 	// Defaulting them here would make that resolution order impossible to read.
 
 	if cfg.LLM.ToolChoice == "" {
