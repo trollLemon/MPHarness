@@ -24,11 +24,11 @@ Every command the agent tries to run is parsed as shell AST and checked against 
 
 ## Install
 
-Tagged releases cut a GitHub release with `linux-amd64`/`linux-arm64` tarballs
-and make the module installable at that version:
+Releases are cut manually; each GitHub release attaches `linux-amd64`/`linux-arm64`
+tarballs, and its tag makes the module installable at that version:
 
 ```bash
-go install github.com/trollLemon/MPHarness/cmd/mph@v0.1.0
+go install github.com/trollLemon/MPHarness/mph@latest
 ```
 
 ## Quickstart

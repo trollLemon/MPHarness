@@ -31,7 +31,7 @@ type ctxKey string
 
 const skipHookKey ctxKey = "otel-skip-hook"
 
-// Defaults for a Config left partially blank. Exported so cmd/mph can present the
+// Defaults for a Config left partially blank. Exported so mph can present the
 // same values in help text and layer environment variables over the YAML without
 // the two drifting apart.
 const (
