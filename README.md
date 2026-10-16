@@ -105,7 +105,7 @@ agent:                    # optional loop bounds
   chat_timeout: 5m
   total_timeout: 30m
 
-secrets:                  # optional %{NAME} placeholders, never sent to the model
+secrets:                  # optional, specify which backend to use for resolving secrets
   source: env             # env|keyring
 ```
 
