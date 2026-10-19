@@ -2,7 +2,7 @@
 
 Local harness for running agent-driven tasks inside an LXD VM, without the worry of an agent damaging your host.
 
-You describe a task, an LLM, and a VM in a single YAML file. `mph` downloads the model, creates the VM, lets the LLM drive a tool-calling loop to complete the task, then hands the results back and tears the VM down.
+You describe a task, an LLM, and a VM in a single YAML file. `mph` (Multi-Purpose Harness) downloads the model, creates the VM, lets the LLM drive a tool-calling loop to complete the task, then hands the results back and tears the VM down.
 
 ## How it works
 
