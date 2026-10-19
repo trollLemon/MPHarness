@@ -20,7 +20,7 @@ agent:
   chat_timeout: 300s
   total_timeout: 30m
 prompt: |
-  Inside the Multipass VM, verify the kernel installation:
+  Inside the VM, verify the kernel installation:
   1. run `uname -r` and confirm it contains 7.0.0-14-generic
   2. run `ls /lib/modules` and confirm the kernel modules directory exists
   3. run `dpkg -l | grep linux-image-7.0.0-14-generic` to verify the package is installed

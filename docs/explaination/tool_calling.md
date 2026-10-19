@@ -1,6 +1,6 @@
-# Mph Tool Calling
+# MPHarness tool calling
 
-`mph` exposes a deliberately small toolset: `multipass_exec` and `multipass_info` at its core, plus `output_search` and `output_read` when output capture is enabled (`output.enabled`, which defaults to `true`). There are several reasons for the small core:
+`mph` exposes a deliberately small toolset: `vm_exec` and `vm_info` at its core, plus `output_search` and `output_read` when output capture is enabled (`output.enabled`, which defaults to `true`). There are several reasons for the small core:
 - less tool call specs = more space in context window.
 - The agent doesn't manage the VM's lifecycle at all. The VM is guaranteed to be up and running by the time the agent needs to work, so the agent only ever inspects it and runs commands.
 - Having explicit tool calls for VM lifecycle tend to confuse smaller models (i.e forgetting to check if a VM is running before executing commands) which results in extra computation, which is wasteful.
@@ -8,25 +8,25 @@
 ## The contract
 | Tool | What the model must supply | What it returns |
 |------|----------------------------|-----------------|
-| `multipass_exec` | `command` (string), optional `capture` (bool) | combined stdout/stderr, or a capture handle (`output_id`, path, line counts) when `capture: true` |
-| `multipass_info` | n/a | raw JSON from `multipass info --format json` |
+| `vm_exec` | `command` (string), optional `capture` (bool) | combined stdout/stderr, or a capture handle (`output_id`, path, line counts) when `capture: true` |
+| `vm_info` | n/a | raw LXD instance JSON (`GetInstanceFull`) |
 | `output_search` | `output_id`, `pattern` | matching line numbers in a captured output |
 | `output_read` | `output_id`, optional `offset`/`limit` | a slice of a captured output |
 
-For `multipass_exec`, the `command` string can be several commands at once (such as `cat /proc/uptime | grep ...`), the input command is parsed into a shell AST and each command is validated against the allow list.
+For `vm_exec`, the `command` string can be several commands at once (such as `cat /proc/uptime | grep ...`), the input command is parsed into a shell AST and each command is validated against the allow list.
 
-`multipass_info` takes no arguments. It returns the raw JSON output from `multipass info --format json` for the configured VM, which includes: zone, state, release, image_release, cpu_count, load, memory usage, disk usage, ipv4, mounts, and more. Because the harness guarantees the VM is already running, `multipass_info` is for *orientation*, for example, determining correct parameters for some command given the VM specs.
+`vm_info` takes no arguments. It returns the raw JSON instance record from the LXD daemon (`GetInstanceFull`) for the configured VM, which includes the instance state, config limits (CPU and memory), image properties, addresses, memory usage, and disk usage. Because the harness guarantees the VM is already running, `vm_info` is for *orientation*, for example, determining correct parameters for some command given the VM specs.
 
 ### How the tools are described to the model
 
-The model needs a description of each tool's *shape*. `mph` builds an OpenAI-style JSON-schema document for each one: name, description, and parameters, and sends these as the `tools` field of the chat request (`buildToolDocuments` in `internal/agent`). For `multipass_exec` that document looks roughly like:
+The model needs a description of each tool's *shape*. `mph` builds an OpenAI-style JSON-schema document for each one: name, description, and parameters, and sends these as the `tools` field of the chat request (`buildToolDocuments` in `internal/agent`). For `vm_exec` that document looks roughly like:
 
 ```json
 {
   "type": "function",
   "function": {
-    "name": "multipass_exec",
-    "description": "Run a command inside the configured Multipass VM and return combined stdout/stderr...",
+    "name": "vm_exec",
+    "description": "Run a command inside the configured VM and return combined stdout/stderr...",
     "parameters": {
       "type": "object",
       "properties": {
@@ -39,7 +39,7 @@ The model needs a description of each tool's *shape*. `mph` builds an OpenAI-sty
 ```
 
 
-`multipass_info` gets the same shape with no parameters at all (`"parameters": { "type": "object", "properties": {} }`), so the model can call it at any point for a fresh read of the VM state.
+`vm_info` gets the same shape with no parameters at all (`"parameters": { "type": "object", "properties": {} }`), so the model can call it at any point for a fresh read of the VM state.
 
 
 ## The loop
@@ -56,13 +56,13 @@ sequenceDiagram
 
     rect rgb(238, 238, 238)
     Note over Harness,Model: round 1
-    Model->>Harness: assistant: "checking VM state" + tool_call: multipass_info
+    Model->>Harness: assistant: "checking VM state" + tool_call: vm_info
     Harness->>Model: runs tool, appends result as {role:"tool"}
     end
 
     rect rgb(238, 238, 238)
     Note over Harness,Model: round 2
-    Model->>Harness: assistant: "running apt update" + tool_call: multipass_exec
+    Model->>Harness: assistant: "running apt update" + tool_call: vm_exec
     Harness->>Model: runs it, appends result
     end
 
@@ -99,16 +99,16 @@ Two details keep the loop stable:
 
 ## What the model sees when a tool runs
 
-Tool results are returned to the model as JSON and are status-tagged so the model can react. `multipass_exec` returns the combined output:
+Tool results are returned to the model as JSON and are status-tagged so the model can react. `vm_exec` returns the combined output:
 
 ```json
 { "status": "SUCCESS", "data": { "output": "<combined stdout/stderr>" } }
 ```
 
-and `multipass_info` returns the raw multipass JSON:
+and `vm_info` returns the raw LXD instance JSON:
 
 ```json
-{ "status": "SUCCESS", "data": { "result": "<raw multipass info JSON>" } }
+{ "status": "SUCCESS", "data": { "result": "<raw LXD instance JSON>" } }
 ```
 
 or, on a failure (including a denied command):

@@ -7,7 +7,7 @@ vm:
   disk: 10G
   ram: 2G
   cpu: 1
-  image: bionic
+  image: noble
 model: unsloth/Qwen3-0.6B-Q8_0
 llm:
   temperature: 0.0
@@ -24,7 +24,7 @@ compaction:
   min_messages: 6
   max_attempts: 3
 prompt: |
-  Inside the Multipass VM, do the following:
+  Inside the VM, do the following:
   1. Run uname -a and note the kernel release field.
   2. Write that release string into ./tmp/steps.txt.
   3. Append the output of hostname as a second line in ./tmp/steps.txt.

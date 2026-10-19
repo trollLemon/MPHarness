@@ -1,5 +1,5 @@
 #!/bin/sh
-# Integration smoke for captured output + compaction. Needs a Multipass VM and
+# Integration smoke for captured output + compaction. Needs a working LXD daemon and
 # the smoke-test model; run with the OTel stack up (make otel-up).
 set -eu
 

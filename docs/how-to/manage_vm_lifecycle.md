@@ -1,6 +1,6 @@
 # Managing the VM lifecycle
 
-The harness manages the VM lifecycle **outside** the agent loop. The agent's core tools are `multipass_exec` and `multipass_info` (plus `output_search`/`output_read` for captured output; see [How tool calling works](../explaination/tool_calling.md)). It cannot create, start, stop, or delete the VM.
+The harness manages the VM lifecycle **outside** the agent loop. The agent's core tools are `vm_exec` and `vm_info` (plus `output_search`/`output_read` for captured output; see [How tool calling works](../explaination/tool_calling.md)). It cannot create, start, stop, or delete the VM.
 
 ## Harness VM lifecycle
 
@@ -25,18 +25,18 @@ Inside the agent loop, the core tools work together:
 
 ```mermaid
 flowchart LR
-    INFO["multipass_info<br/>Raw JSON from `multipass info --format json`<br/>(zone, state, release, cpu_count, load,<br/>memory, disk, ipv4, mounts, ...)"]
-    EXEC["multipass_exec<br/>run a command; returns combined stdout/stderr"]
+    INFO["vm_info<br/>Raw JSON instance record from LXD<br/>(state, config limits, image,<br/>addresses, memory, disk, ...)"]
+    EXEC["vm_exec<br/>run a command; returns combined stdout/stderr"]
     INFO --> EXEC
     EXEC -->|repeat as needed| INFO
 ```
 
-- `multipass_info` returns the raw JSON output from `multipass info --format json` for the configured VM, wrapped in the standard tool-result envelope (`{"status":"SUCCESS","data":{"result":"<raw JSON>"}}`). Use it for orientation before or between commands.
-- `multipass_exec` runs a command and returns its combined stdout/stderr.
+- `vm_info` returns the raw JSON instance record from the LXD daemon for the configured VM, wrapped in the standard tool-result envelope (`{"status":"SUCCESS","data":{"result":"<raw JSON>"}}`). It carries the instance state, config limits, image properties, addresses, memory, and disk usage. Use it for orientation before or between commands.
+- `vm_exec` runs a command and returns its combined stdout/stderr.
 
 Your prompt only needs to describe the task. There is nothing to write about creating, starting, stopping, or deleting the VM, because the agent cannot do any of those.
 
-The harness will prompt for confirmation to continue if a VM with the same name already exists (unless you pass the `-i` flag to ignore and reuse it). 
+The harness will prompt for confirmation to continue if a VM with the same name already exists (unless you pass the `-i` flag to ignore and reuse it). A stopped instance is started and awaited before the run. An existing instance that is not a virtual machine is rejected with a clear error.
 If you don't pass the `-k` flag, the harness will delete the VM once the task has finished successfully. On a run that fails (timeout, agent error), the harness exits before the delete step, so the VM is left running for inspection.
 
 - [How tool calling works](../explaination/tool_calling.md)

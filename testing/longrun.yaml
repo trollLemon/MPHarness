@@ -5,7 +5,7 @@ vm:
   disk: 10G
   ram: 2G
   cpu: 1
-  image: bionic
+  image: noble
 model: unsloth/granite-4.0-h-1b
 allowed_commands:
   - ls
@@ -47,7 +47,7 @@ output:
   search_max_matches: 200
 
 prompt: |
-  Inside the Multipass VM, please do the following.
+  Inside the VM, please do the following.
   1. Run `uname -a`.
   2. Run `cat /etc/os-release`.
   3. Run `ls /etc`.

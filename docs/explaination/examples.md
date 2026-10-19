@@ -87,7 +87,7 @@ agent:
 
 ## Sandbox
 
-Restricted command set using an older Ubuntu base (bionic). Only `ls` and `cat` are permitted; any other command is rejected.
+Restricted command set using an older Ubuntu base (focal). Only `ls` and `cat` are permitted; any other command is rejected.
 
 ```yaml
 vm:
@@ -95,7 +95,7 @@ vm:
   disk: 10G
   ram: 2G
   cpu: 1
-  image: bionic
+  image: focal
 model: unsloth/Qwen3-0.6B-Q8_0
 allowed_commands:
   - ls
@@ -159,7 +159,7 @@ agent:
   total_timeout: 30m
 
 prompt: |
-  Inside the Multipass VM, do the following:
+  Inside the VM, do the following:
   1. Update apt and install python3, pip, git (this requires sudo)
   2. run ls /etc
   3. Summarise the test results.

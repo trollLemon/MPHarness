@@ -1,6 +1,6 @@
 # Running your first agent-driven task
 
-In this tutorial you will run `mph` for the first time. By the end you will have a small LLM run a couple of commands inside a Multipass VM that the harness brings up for you, all from a single YAML file.
+In this tutorial you will run `mph` for the first time. By the end you will have a small LLM run a couple of commands inside an LXD VM that the harness brings up for you, all from a single YAML file.
 
 ## What you'll learn
 
@@ -11,7 +11,9 @@ In this tutorial you will run `mph` for the first time. By the end you will have
 
 ## Prerequisites
 
-- [Multipass](https://multipass.run/) installed and working (`multipass version` runs without error).
+- [LXD](https://linuxcontainers.org/lxd/) 5.x LTS or newer installed (deb or snap) with a running daemon.
+- Access to the LXD socket, typically by being in the `lxd` group.
+- A working default profile from `lxd init` (a root disk on a storage pool, plus a network).
 - Enough free disk space (the VM image, the model files, and the llama.cpp runtimes need a few gigabytes).
 - Hardware that can run a small LLM. A CPU-only machine works for a 0.6B to 1.7B model; a GPU with a few GB of VRAM makes a bigger model practical.
 
@@ -39,7 +41,7 @@ agent:
   total_timeout: 30m
 
 prompt: |
-  Inside the Multipass VM, do the following:
+  Inside the VM, do the following:
   1. Run ls /etc
   2. Run uname -a
   3. Summarise the test results.
@@ -47,7 +49,7 @@ prompt: |
 
 Two pairs of settings matter most here:
 
-- `vm` describes the VM the harness will bring up for the agent.
+- `vm` describes the VM the harness will bring up for the agent. The name must follow DNS hostname rules, so `mph-tutorial` is valid and underscores are not.
 - `model` names the LLM `mph` will download and run locally.
 - `prompt` is the task you are giving the agent.
 
@@ -94,12 +96,12 @@ You'll see log lines for each stage:
 loaded config                                  # your YAML parsed and validated
 Starting inference                             # the agent loop begins
 model output                  part=reasoning   # the model's chain of thought
-agent tool call   tool=multipass_info          # "what's the VM state?"
-tool succeeded    tool=multipass_exec          # each command returns its output
+agent tool call   tool=vm_info                # "what's the VM state?"
+tool succeeded    tool=vm_exec                # each command returns its output
 token usage                                    # one log line per LLM response
 ```
 
-The sequence you observe is the agent loop: the LLM reads the task, decides on one tool call, runs it, reads the tool result, and repeats until it is done. The VM is already running (the harness brought it up), so the agent starts with a `multipass_info` call to orient itself, then runs a series of `multipass_exec` commands until the task is complete.
+The sequence you observe is the agent loop: the LLM reads the task, decides on one tool call, runs it, reads the tool result, and repeats until it is done. The VM is already running (the harness brought it up), so the agent starts with a `vm_info` call to orient itself, then runs a series of `vm_exec` commands until the task is complete.
 
 ## Step 4: Read the final output
 
@@ -108,12 +110,12 @@ When the agent stops, the harness prints the output of every command it ran (sep
 The VM's lifecycle is managed by `mph`, outside the agent loop. You can check its state with:
 
 ```bash
-multipass list
+lxc list
 ```
 
 ## What could go wrong?
 
-- **`mph` cannot find `multipass`**: the harness shells out to the Multipass CLI. Install it and make sure it's on your `PATH`.
+- **`mph` cannot connect to LXD**: make sure the daemon is running and your user can access its socket (typically by being in the `lxd` group). If there is no default profile, run `lxd init`.
 - **`config file required`**: pass the config file as an argument or with `-c first-task.yaml`.
 - **Timeouts**: on slow hardware a single inference call can exceed `chat_timeout`. Raise it in the `agent` section (the example uses `30m` for exactly this reason).
 - **The model download keeps failing**: check your network, then look up a different [model id](../reference/good_models.md).
