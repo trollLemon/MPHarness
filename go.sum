@@ -76,6 +76,8 @@ github.com/bmatcuk/doublestar/v4 v4.10.2 h1:eF7W7HWKg3z9NrWV9pTLnNeoXaqq3Tq9DNKX
 github.com/bmatcuk/doublestar/v4 v4.10.2/go.mod h1:xBQ8jztBU6kakFMg+8WGxn0c6z1fTSPVIjEY1Wr7jzc=
 github.com/canonical/lxd v0.0.0-20261019185501-aea0e83cf74a h1:FTpeyfqBjOFmMr0v77PaiW5WYbO+KNgK8ZvBRBlMCS4=
 github.com/canonical/lxd v0.0.0-20261019185501-aea0e83cf74a/go.mod h1:JTSgnr/r+lUBYzNejAlXRlExHUkCUYy16AX7hI7KtO0=
+github.com/canonical/lxd v0.0.0-20261019222259-1a5f7ffe081f h1:3H5SwMizgW1Iupbw2HELsVC/Ssr7ZpI2OaOBA8XhWu4=
+github.com/canonical/lxd v0.0.0-20261019222259-1a5f7ffe081f/go.mod h1:JTSgnr/r+lUBYzNejAlXRlExHUkCUYy16AX7hI7KtO0=
 github.com/cenkalti/backoff/v5 v5.0.3 h1:ZN+IMa753KfX5hd8vVaMixjnqRZ3y8CuJKRKj1xcsSM=
 github.com/cenkalti/backoff/v5 v5.0.3/go.mod h1:rkhZdG3JZukswDf7f0cwqPNk4K0sa+F97BxZthm/crw=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=

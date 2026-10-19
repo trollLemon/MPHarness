@@ -1295,7 +1295,7 @@ func TestInstallKernel(t *testing.T) {
 			if reboot == -1 || down == -1 || ready == -1 || uname == -1 {
 				t.Fatalf("events = %v, want reboot, state poll, readiness poll and uname", events)
 			}
-			if !(reboot < down && down < ready && ready < uname) {
+			if reboot >= down || down >= ready || ready >= uname {
 				t.Fatalf("events = %v, want reboot < down wait < readiness < uname", events)
 			}
 			if polls < 2 {

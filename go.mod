@@ -4,7 +4,7 @@ go 1.27.2
 
 require (
 	github.com/ardanlabs/kronk v1.32.6
-	github.com/canonical/lxd v0.0.0-20261019185501-aea0e83cf74a
+	github.com/canonical/lxd v0.0.0-20261019222259-1a5f7ffe081f
 	github.com/rs/zerolog v1.35.1
 	github.com/zalando/go-keyring v0.2.8
 	go.opentelemetry.io/otel v1.47.0

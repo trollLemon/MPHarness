@@ -127,7 +127,7 @@ func Setup(ctx context.Context, cfg Config) (func(context.Context) error, error)
 		)),
 		sdklog.WithResource(res),
 	)
-	global.SetLoggerProvider(lp)
+	otel.SetLoggerProvider(lp)
 
 	shutdown := func(ctx context.Context) error {
 		var errs []error
