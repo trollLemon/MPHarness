@@ -68,9 +68,9 @@ func TestCompactHandover(t *testing.T) {
 				{"role": "system", "content": "SYS-BYTES"},
 				{"role": "user", "content": "Task:\nrun ls"},
 				{"role": "assistant", "content": "doing"},
-				{"role": "tool", "name": "multipass_exec", "content": "out"},
+				{"role": "tool", "name": "vm_exec", "content": "out"},
 				{"role": "assistant", "content": "done"},
-				{"role": "tool", "name": "multipass_exec", "content": "out2"},
+				{"role": "tool", "name": "vm_exec", "content": "out2"},
 			},
 			handles:     []HandleInfo{{ID: "oid-1", TotalLines: 10, TotalBytes: 100, Command: "cat big"}},
 			summary:     "did stuff",
@@ -186,8 +186,8 @@ func TestSummarizerInputFitsWindow(t *testing.T) {
 	for i := 0; i < 4; i++ {
 		conversation = append(conversation,
 			model.D{"role": "assistant", "content": "calling", "tool_calls": []model.D{
-				{"function": model.D{"name": "multipass_exec", "arguments": `{"command":"ls"}`}}}},
-			model.D{"role": "tool", "name": "multipass_exec", "content": longResult},
+				{"function": model.D{"name": "vm_exec", "arguments": `{"command":"ls"}`}}}},
+			model.D{"role": "tool", "name": "vm_exec", "content": longResult},
 		)
 	}
 	est := func(s string) int { return len(s)/4 + 1 }
@@ -228,7 +228,7 @@ func TestSummaryBudgetCappedBySavings(t *testing.T) {
 		{"role": "system", "content": "sys"},
 		{"role": "user", "content": "Task:\nrun ls"},
 		{"role": "assistant", "content": strings.Repeat("a", 2000)},
-		{"role": "tool", "name": "multipass_exec", "content": strings.Repeat("b", 2000)},
+		{"role": "tool", "name": "vm_exec", "content": strings.Repeat("b", 2000)},
 	}
 
 	sum := &countingSummarizer{summary: "Completed: listed files. Remaining: done."}
@@ -260,7 +260,7 @@ func TestRevertedReportsSummaryBytes(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		conversation = append(conversation,
 			model.D{"role": "assistant", "content": strings.Repeat("a", 2000)},
-			model.D{"role": "tool", "name": "multipass_exec", "content": strings.Repeat("b", 2000)},
+			model.D{"role": "tool", "name": "vm_exec", "content": strings.Repeat("b", 2000)},
 		)
 	}
 	sum := &countingSummarizer{summary: strings.Repeat("x", 50000)}
@@ -331,8 +331,8 @@ func TestTruncateHeadKeepsValidUTF8(t *testing.T) {
 func TestRenderHistory(t *testing.T) {
 	longToolResult := []model.D{
 		{"role": "assistant", "content": "calling", "tool_calls": []model.D{
-			{"function": model.D{"name": "multipass_exec", "arguments": `{"command":"ls"}`}}}},
-		{"role": "tool", "name": "multipass_exec", "content": strings.Repeat("z", 5000)},
+			{"function": model.D{"name": "vm_exec", "arguments": `{"command":"ls"}`}}}},
+		{"role": "tool", "name": "vm_exec", "content": strings.Repeat("z", 5000)},
 	}
 	manyTurns := make([]model.D, 0, 800)
 	for i := 0; i < 400; i++ {
@@ -380,7 +380,7 @@ func TestRenderHistory(t *testing.T) {
 			name:         "full text style keeps tool output in the summarizer view",
 			conversation: longToolResult,
 			budget:       100, maxBytes: 1 << 20, style: ToolResultFullText,
-			want: []string{"multipass_exec", "zzz"},
+			want: []string{"vm_exec", "zzz"},
 		},
 		{
 			// The handover replaces the history, so copying the payload forward
@@ -389,12 +389,12 @@ func TestRenderHistory(t *testing.T) {
 			conversation: longToolResult,
 			budget:       100, maxBytes: 1 << 20, style: ToolResultHandleRef,
 			maxRendered: 500,
-			want:        []string{"multipass_exec", "5000 bytes"},
+			want:        []string{"vm_exec", "5000 bytes"},
 			dontWant:    []string{"zzz"},
 		},
 		{
 			name:         "handle ref style keeps a short tool result inline",
-			conversation: []model.D{{"role": "tool", "name": "multipass_exec", "content": "ok"}},
+			conversation: []model.D{{"role": "tool", "name": "vm_exec", "content": "ok"}},
 			budget:       100, maxBytes: 1 << 20, style: ToolResultHandleRef,
 			want: []string{"ok"},
 		},
@@ -423,7 +423,7 @@ func TestEstimateMessageCountsToolCalls(t *testing.T) {
 	m := model.D{
 		"role": "assistant",
 		"tool_calls": []model.D{
-			{"id": "call-1", "function": model.D{"name": "multipass_exec", "arguments": `{"command":"df -h"}`}},
+			{"id": "call-1", "function": model.D{"name": "vm_exec", "arguments": `{"command":"df -h"}`}},
 		},
 	}
 

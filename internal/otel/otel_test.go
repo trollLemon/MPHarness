@@ -242,7 +242,7 @@ func TestLogEventFieldOrder(t *testing.T) {
 		LogEvent(context.Background(), logger, zerolog.InfoLevel, "tool succeeded", map[string]any{
 			"out":   strings.Repeat("x", 5000),
 			"id":    "call-1",
-			"tool":  "multipass_exec",
+			"tool":  "vm_exec",
 			"iter":  2,
 			"event": "tool_succeeded",
 		})
@@ -278,7 +278,7 @@ func TestLogEventPayloadLast(t *testing.T) {
 			"out":  strings.Repeat("x", 100),
 			"args": `{"command":"apt --help"}`,
 			"id":   "call-1",
-			"tool": "multipass_exec",
+			"tool": "vm_exec",
 			"iter": 2,
 		})
 		line := buf.String()

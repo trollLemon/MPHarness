@@ -1,6 +1,6 @@
 # MPHarness
 
-Local harness for running agent-driven tasks inside a Multipass VM, without the worry of an agent damaging your host.
+Local harness for running agent-driven tasks inside an LXD VM, without the worry of an agent damaging your host.
 
 You describe a task, an LLM, and a VM in a single YAML file. `mph` downloads the model, creates the VM, lets the LLM drive a tool-calling loop to complete the task, then hands the results back and tears the VM down.
 
@@ -8,7 +8,7 @@ You describe a task, an LLM, and a VM in a single YAML file. `mph` downloads the
 
 1. **Config load**: YAML is parsed, validated, and defaulted (`mph-vm`, `max_iterations: 10`, timeouts, …).
 2. **Model init**: llama.cpp runtimes + model (e.g. `unsloth/Qwen3-0.6B-Q8_0`) are downloaded once and cached, then loaded locally.
-3. **VM lifecycle**: the named Multipass VM is launched (or reused with `-i`), optional `content_dir` is copied to `/home/ubuntu/content`.
+3. **VM lifecycle**: the named LXD VM is launched (or reused with `-i`), optional `content_dir` is copied to `/home/ubuntu/content`.
 4. **Agent loop**: the LLM reasons, calls tools, reads results, and repeats until it answers with a final summary or hits `max_iterations`.
 5. **Teardown**: combined command output is printed (`---`-separated) and the VM is deleted unless `-k` was passed.
 
@@ -16,8 +16,11 @@ Every command the agent tries to run is parsed as shell AST and checked against 
 
 ## Prerequisites
 
-- [Multipass](https://multipass.run/) installed and on `PATH` (`multipass version` works)
-- Go 1.27+ (only needed to build from source)
+- [LXD](https://linuxcontainers.org/lxd/) 5.x LTS or newer installed (deb or snap) with a running daemon
+- VM images must include the LXD agent (official Ubuntu 20.04+ images do; 18.04 images require a manual agent install)
+- Access to the LXD socket, typically by being in the `lxd` group
+- A working default profile from `lxd init` (a root disk on a storage pool, plus a network)
+- Go 1.27.2+ (only needed to build from source)
 - A few GB free disk (VM image + model + llama.cpp runtimes)
 - Hardware that can run a small LLM (CPU works for 0.6B to 1.7B models; a GPU helps for larger ones)
 
@@ -55,7 +58,7 @@ agent:
   total_timeout: 30m
 
 prompt: |
-  Inside the Multipass VM, do the following:
+  Inside the VM, do the following:
   1. Run ls /etc
   2. Run uname -a
   3. Summarise the results.
@@ -77,11 +80,11 @@ All run config lives in one YAML file. Only `vm.*`, `model`, and `prompt` are re
 
 ```yaml
 vm:
-  name: mph-vm        # optional, default mph-vm
+  name: mph-vm        # optional, default mph-vm; DNS hostname rules, no underscores
   disk: 20G
   ram: 4G
   cpu: 2
-  image: noble       # optional Ubuntu image, default LTS
+  image: noble       # optional Ubuntu image, default ubuntu:24.04
 
 model: unsloth/Qwen3-0.6B-Q8_0
 prompt: "test the build"

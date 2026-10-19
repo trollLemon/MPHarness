@@ -12,7 +12,6 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/trollLemon/MPHarness/internal/config"
-	"github.com/trollLemon/MPHarness/internal/multipass"
 	"github.com/trollLemon/MPHarness/internal/output"
 )
 
@@ -32,8 +31,8 @@ func TestToolSpecs(t *testing.T) {
 		enabled     bool
 		wantPresent bool
 	}{
-		{"multipass_exec always present", "multipass_exec", "command", true, true},
-		{"capture flag on multipass_exec", "multipass_exec", "capture", true, true},
+		{"vm_exec always present", "vm_exec", "command", true, true},
+		{"capture flag on vm_exec", "vm_exec", "capture", true, true},
 		{"output_search when enabled", "output_search", "output_id", true, true},
 		{"output_search pattern when enabled", "output_search", "pattern", true, true},
 		{"output_search omitted when disabled", "output_search", "output_id", false, false},
@@ -72,7 +71,7 @@ func TestToolSpecs(t *testing.T) {
 	}
 }
 
-func TestCallMultipassExecCapture(t *testing.T) {
+func TestCallVMExecCapture(t *testing.T) {
 	tests := []struct {
 		name        string
 		cutoff      int64
@@ -133,7 +132,7 @@ func TestCallMultipassExecCapture(t *testing.T) {
 				}
 			}}
 			store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, tt.cutoff, nil)
-			got, err := Call(context.Background(), nil, cfg, store, "multipass_exec", tt.args)
+			got, err := Call(context.Background(), nil, cfg, store, "vm_exec", tt.args)
 			if err != nil {
 				t.Fatalf("call: %v", err)
 			}
@@ -237,7 +236,7 @@ func TestCaptureSuccessContentHasNoChunkFields(t *testing.T) {
 // the handle envelope, so a test can reuse the registered output_id.
 func captureEnvelope(t *testing.T, cfg config.Config, store *output.Store) string {
 	t.Helper()
-	got, err := Call(context.Background(), nil, cfg, store, "multipass_exec", map[string]any{"command": "echo hi"})
+	got, err := Call(context.Background(), nil, cfg, store, "vm_exec", map[string]any{"command": "echo hi"})
 	if err != nil {
 		t.Fatalf("capture: %v", err)
 	}
@@ -305,7 +304,7 @@ func TestCallOutputReadRoundTrip(t *testing.T) {
 		}
 	}}
 	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10, nil)
-	capGot, err := Call(context.Background(), nil, cfg, store, "multipass_exec", map[string]any{"command": "echo hi"})
+	capGot, err := Call(context.Background(), nil, cfg, store, "vm_exec", map[string]any{"command": "echo hi"})
 	if err != nil {
 		t.Fatalf("capture: %v", err)
 	}
@@ -366,9 +365,9 @@ func TestCaptureLogsAttributionLine(t *testing.T) {
 	})
 	agt.store = store
 	tc := model.ResponseToolCall{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{
-		Name: "multipass_exec", Arguments: model.ToolCallArguments{"command": "echo hi"},
+		Name: "vm_exec", Arguments: model.ToolCallArguments{"command": "echo hi"},
 	}}
-	_, outputs := agt.executeToolCalls(context.Background(), multipass.New(zerolog.Nop(), nil), cfg, []model.ResponseToolCall{tc})
+	_, outputs := agt.executeToolCalls(context.Background(), newTestClient(t), cfg, []model.ResponseToolCall{tc})
 	if len(outputs) != 1 || !strings.HasPrefix(outputs[0], "<captured output_id=") {
 		t.Fatalf("want capture placeholder, got %v", outputs)
 	}
@@ -414,9 +413,9 @@ func TestExecuteToolCallsLogsPerCommandOutput(t *testing.T) {
 	})
 	agt.store = store
 	tc := model.ResponseToolCall{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{
-		Name: "multipass_exec", Arguments: model.ToolCallArguments{"command": "echo hi", "capture": true},
+		Name: "vm_exec", Arguments: model.ToolCallArguments{"command": "echo hi", "capture": true},
 	}}
-	agt.executeToolCalls(context.Background(), multipass.New(zerolog.Nop(), nil), cfg, []model.ResponseToolCall{tc})
+	agt.executeToolCalls(context.Background(), newTestClient(t), cfg, []model.ResponseToolCall{tc})
 
 	found := false
 	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {

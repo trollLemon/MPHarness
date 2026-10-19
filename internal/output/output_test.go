@@ -347,7 +347,7 @@ func TestSearchExitMapping(t *testing.T) {
 			f := &fakeExec{fn: func(name, cmd string) (string, error) {
 				if strings.Contains(cmd, "grep") {
 					if tt.grepErr {
-						return "", fmt.Errorf("multipass exploded")
+						return "", fmt.Errorf("vm exec exploded")
 					}
 					return tt.grepOut, nil
 				}

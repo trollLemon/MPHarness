@@ -14,7 +14,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/trollLemon/MPHarness/internal/config"
-	"github.com/trollLemon/MPHarness/internal/multipass"
+	"github.com/trollLemon/MPHarness/internal/lxd"
 	mphotel "github.com/trollLemon/MPHarness/internal/otel"
 	"github.com/trollLemon/MPHarness/internal/output"
 	"github.com/trollLemon/MPHarness/internal/textutil"
@@ -162,7 +162,7 @@ func NewAgent(log zerolog.Logger, krn Kronk, opts Options) *Agent {
 // maxIterations, and returns the first error that aborts the run. It owns the
 // iteration loop, compacting the context before each round, and prints the
 // final command output or assistant answer when the loop ends.
-func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *multipass.Client) (err error) {
+func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *lxd.Client) (err error) {
 	start := time.Now()
 	defer func() {
 		// The loop below ends either because the agent finished or because it ran
@@ -219,7 +219,7 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *multipass.
 	return nil
 }
 
-func (a *Agent) runIteration(ctx context.Context, cli *multipass.Client, conf config.Config) error {
+func (a *Agent) runIteration(ctx context.Context, cli *lxd.Client, conf config.Config) error {
 	iter := a.iteration
 
 	iterCtx, iterSpan := getAgentTracer().Start(ctx, "mph.agent.iteration",
@@ -479,7 +479,7 @@ func (a *Agent) buildToolCallDocsWithContext(ctx context.Context, toolCalls []mo
 	return docs
 }
 
-func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg config.Config, toolCalls []model.ResponseToolCall) ([]model.D, []string) {
+func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg config.Config, toolCalls []model.ResponseToolCall) ([]model.D, []string) {
 	var toolResponses []model.D
 	var commandOutputs []string
 
@@ -533,7 +533,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *multipass.Client, cfg
 			}
 			content = result
 		default:
-			if tc.Function.Name == "multipass_exec" {
+			if tc.Function.Name == "vm_exec" {
 				commandOutputs = append(commandOutputs, result)
 				mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "command output", map[string]any{
 					"command_output": textutil.Truncate(result, cfg.Truncation.CommandOutput),

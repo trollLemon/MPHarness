@@ -14,14 +14,13 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/trollLemon/MPHarness/internal/config"
-	"github.com/trollLemon/MPHarness/internal/multipass"
 	mphotel "github.com/trollLemon/MPHarness/internal/otel"
 	"github.com/trollLemon/MPHarness/internal/output"
 )
 
 func bigToolStep(content string, total int) model.ChatResponse {
 	return chatResp(content, "", model.FinishReasonTool, []model.ResponseToolCall{
-		{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{Name: "multipass_info", Arguments: model.ToolCallArguments{}}},
+		{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{Name: "vm_info", Arguments: model.ToolCallArguments{}}},
 	}, &model.Usage{TotalTokens: total})
 }
 
@@ -174,7 +173,7 @@ func TestExecuteCompaction(t *testing.T) {
 				Prompt:     "task",
 				Compaction: tt.compaction,
 			}
-			if err := agt.Execute(context.Background(), conf, multipass.New(zerolog.Nop(), nil)); err != nil {
+			if err := agt.Execute(context.Background(), conf, newTestClient(t)); err != nil {
 				t.Fatalf("compaction failure must not end the run: %v", err)
 			}
 			tt.check(t, mock, buf.String())
@@ -206,7 +205,7 @@ func TestCompactionEventReportsContextDrop(t *testing.T) {
 		Prompt:     "task",
 		Compaction: enabledCompaction(),
 	}
-	if err := agt.Execute(context.Background(), conf, multipass.New(zerolog.Nop(), nil)); err != nil {
+	if err := agt.Execute(context.Background(), conf, newTestClient(t)); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	if countHandovers(mock) == 0 {
@@ -343,7 +342,7 @@ func TestPostCompactionContextKeepsToolSchemaOverhead(t *testing.T) {
 			}
 			for i := 0; i < tt.schemas; i++ {
 				agt.toolDocs = append(agt.toolDocs, model.D{"type": "function", "function": model.D{
-					"name": "multipass_tool", "description": strings.Repeat("d", 2000),
+					"name": "vm_tool", "description": strings.Repeat("d", 2000),
 				}})
 			}
 			schemaJSON, err := json.Marshal(agt.toolDocs)
@@ -409,7 +408,7 @@ func TestCompactionSeesToolResultBeforeNextModelCall(t *testing.T) {
 		chatResp("", "", model.FinishReasonTool, []model.ResponseToolCall{{
 			ID: "c1", Type: "function",
 			Function: model.ResponseToolCallFunction{
-				Name: "multipass_exec", Arguments: model.ToolCallArguments{"command": "cat big", "capture": true},
+				Name: "vm_exec", Arguments: model.ToolCallArguments{"command": "cat big", "capture": true},
 			},
 		}}, &model.Usage{TotalTokens: int(reported), PromptTokens: int(reported) - 10, CompletionTokens: 10}),
 	}}
@@ -437,7 +436,7 @@ func TestCompactionSeesToolResultBeforeNextModelCall(t *testing.T) {
 	if reported >= threshold {
 		t.Fatalf("setup: reported %d must sit below the %d threshold, or there is nothing to react to", reported, threshold)
 	}
-	if err := agt.runIteration(context.Background(), multipass.New(zerolog.Nop(), nil), cfg); err != nil {
+	if err := agt.runIteration(context.Background(), newTestClient(t), cfg); err != nil {
 		t.Fatalf("runIteration: %v", err)
 	}
 
@@ -462,7 +461,7 @@ func TestCompactionAppliesBeforeWindowIsExceeded(t *testing.T) {
 	base := config.Config{
 		VM:    config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
 		Model: "m",
-		Prompt: "Inside the Multipass VM:\n" +
+		Prompt: "Inside the VM:\n" +
 			"1. Run uname -a and note the kernel release field.\n" +
 			"2. Write that release string into /tmp/steps.txt.\n" +
 			"3. Append the output of hostname as a second line.\n",
@@ -503,7 +502,7 @@ func TestCompactionAppliesBeforeWindowIsExceeded(t *testing.T) {
 				MaxIterations: tt.steps + 4, ChatTimeout: time.Second, TotalTimeout: 30 * time.Second,
 				LLM: cfg.LLM, RunID: "run-window",
 			})
-			if err := agt.Execute(context.Background(), cfg, multipass.New(zerolog.Nop(), nil)); err != nil {
+			if err := agt.Execute(context.Background(), cfg, newTestClient(t)); err != nil {
 				t.Fatalf("run grew past the window without compacting: %v (handovers=%d)", err, countHandovers(mock.mockKronk))
 			}
 			if agt.compactionsApplied == 0 {
@@ -546,7 +545,7 @@ func TestCompactionDurationIsLoggedInMilliseconds(t *testing.T) {
 		Compaction: enabledCompaction(),
 	}
 	ctx := mphotel.WithRunIdentity(context.Background(), "baseline:run-compact-ms", "baseline")
-	if err := agent.Execute(ctx, conf, multipass.New(zerolog.Nop(), nil)); err != nil {
+	if err := agent.Execute(ctx, conf, newTestClient(t)); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 

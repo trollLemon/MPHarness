@@ -11,7 +11,6 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/trollLemon/MPHarness/internal/config"
-	"github.com/trollLemon/MPHarness/internal/multipass"
 )
 
 func decodeEvents(t *testing.T, buf *bytes.Buffer) []map[string]any {
@@ -64,7 +63,7 @@ func TestExecuteLogsToolEvents(t *testing.T) {
 		LLM: defaultLLMConfig(), RunID: "01J9",
 	})
 	conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
-	if err := a.Execute(t.Context(), conf, multipass.New(zerolog.Nop(), nil)); err != nil {
+	if err := a.Execute(t.Context(), conf, newTestClient(t)); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 

@@ -9,12 +9,17 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
+	lxdclient "github.com/canonical/lxd/client"
 	"github.com/trollLemon/MPHarness/internal/config"
-	"github.com/trollLemon/MPHarness/internal/multipass"
+	"github.com/trollLemon/MPHarness/internal/lxd"
 )
 
+type fakeServer struct {
+	lxdclient.InstanceServer
+}
+
 // startRootSpan creates the root span and returns it. An empty VM name makes
-// client.Info fail before it shells out to multipass, so the run ends right
+// client.Info fail before it contacts the daemon, so the run ends right
 // after the span is recorded: no VM, no agent, no prompt.
 func startRootSpan(t *testing.T, opts Options) sdktrace.ReadOnlySpan {
 	t.Helper()
@@ -26,7 +31,7 @@ func startRootSpan(t *testing.T, opts Options) sdktrace.ReadOnlySpan {
 	t.Cleanup(func() { otel.SetTracerProvider(prev) })
 
 	cfg := config.Config{VM: config.VMConfig{Name: ""}, Prompt: "task"}
-	if err := Start(context.Background(), nil, multipass.New(zerolog.Nop(), nil), cfg, opts); err == nil {
+	if err := Start(context.Background(), nil, lxd.NewWithServer(fakeServer{}, zerolog.Nop(), nil), cfg, opts); err == nil {
 		t.Fatal("Start succeeded with an empty VM name; test setup is wrong")
 	}
 

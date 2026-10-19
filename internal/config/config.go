@@ -3,12 +3,15 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/canonical/lxd/shared/validate"
 	"gopkg.in/yaml.v3"
 )
 
@@ -16,6 +19,7 @@ var (
 	ErrVMDiskRequired = errors.New("vm.disk is required (e.g. \"20G\")")
 	ErrVMRAMRequired  = errors.New("vm.ram is required (e.g. \"4G\")")
 	ErrVMCPURequired  = errors.New("vm.cpu must be > 0")
+	ErrVMNameInvalid  = errors.New("vm.name must be a valid LXD instance name")
 	ErrModelRequired  = errors.New("model is required (LLM, e.g. \"unsloth/Qwen3-0.6B-Q8_0\")")
 	ErrPromptRequired = errors.New("prompt is required")
 
@@ -113,7 +117,89 @@ func (v VMConfig) Validate() error {
 	if v.CPU <= 0 {
 		return ErrVMCPURequired
 	}
+	if err := validate.IsHostname(v.Name); err != nil {
+		return fmt.Errorf("%w: %s", ErrVMNameInvalid, err)
+	}
 	return nil
+}
+
+var imageRemotes = map[string]string{
+	"ubuntu":       "https://cloud-images.ubuntu.com/releases/",
+	"ubuntu-daily": "https://cloud-images.ubuntu.com/daily/",
+	"images":       "https://images.lxd.canonical.com",
+}
+
+var imagePrefixes = map[string]string{
+	"ubuntu":       "ubuntu",
+	"release":      "ubuntu",
+	"ubuntu-daily": "ubuntu-daily",
+	"daily":        "ubuntu-daily",
+	"images":       "images",
+}
+
+// ImageRemote maps a vm.image value onto its simplestreams remote URL and alias.
+func ImageRemote(image string) (remoteURL, alias string, err error) {
+	image = strings.TrimSpace(image)
+	if image == "" {
+		return imageRemotes["ubuntu"], "24.04", nil
+	}
+	prefix, name, ok := strings.Cut(image, ":")
+	if !ok {
+		return imageRemotes["ubuntu"], image, nil
+	}
+	remote, ok := imagePrefixes[prefix]
+	if !ok || strings.TrimSpace(name) == "" {
+		return "", "", fmt.Errorf("unsupported image %q: supported prefixes are release:, daily:, ubuntu:, ubuntu-daily:, images:, or a bare Ubuntu alias such as noble", image)
+	}
+	return imageRemotes[remote], strings.TrimSpace(name), nil
+}
+
+// NormalizeSize converts a human size (20G, 4096M, 1GiB, 1073741824) into the
+// binary-unit form LXD accepts (20GiB, 4GiB, 1GiB).
+func NormalizeSize(size string) (string, error) {
+	s := strings.TrimSpace(size)
+	i := 0
+	for i < len(s) && (s[i] >= '0' && s[i] <= '9' || s[i] == '.') {
+		i++
+	}
+	value, err := strconv.ParseFloat(s[:i], 64)
+	if i == 0 || err != nil || value <= 0 {
+		return "", fmt.Errorf("invalid size %q", size)
+	}
+	var multiplier float64
+	switch strings.ToUpper(strings.TrimSpace(s[i:])) {
+	case "", "B":
+		multiplier = 1
+	case "K", "KB", "KIB":
+		multiplier = 1 << 10
+	case "M", "MB", "MIB":
+		multiplier = 1 << 20
+	case "G", "GB", "GIB":
+		multiplier = 1 << 30
+	case "T", "TB", "TIB":
+		multiplier = 1 << 40
+	default:
+		return "", fmt.Errorf("invalid size %q: supported units are K, M, G, T (optionally B or iB), or bytes", size)
+	}
+	if value > float64(math.MaxInt64)/multiplier {
+		return "", fmt.Errorf("invalid size %q: value overflows", size)
+	}
+	if multiplier == 1 && value != math.Trunc(value) {
+		return "", fmt.Errorf("invalid size %q: bytes must be a whole number", size)
+	}
+	bytes := int64(value * multiplier)
+	if bytes <= 0 {
+		return "", fmt.Errorf("invalid size %q", size)
+	}
+	for _, unit := range []struct {
+		suffix string
+		size   int64
+	}{{"TiB", 1 << 40}, {"GiB", 1 << 30}, {"MiB", 1 << 20}, {"KiB", 1 << 10}} {
+		if bytes%unit.size == 0 {
+			return strconv.FormatInt(bytes/unit.size, 10) + unit.suffix, nil
+		}
+	}
+	return strconv.FormatInt(bytes, 10), nil
 }
 
 type LLMConfig struct {

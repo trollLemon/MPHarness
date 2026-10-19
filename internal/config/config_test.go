@@ -4,6 +4,7 @@ import (
 	"errors"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -20,11 +21,13 @@ func TestVMConfig_Validate(t *testing.T) {
 		{"missing ram", VMConfig{Name: "vm", Disk: "20G", CPU: 2}, ErrVMRAMRequired},
 		{"zero cpu", VMConfig{Name: "vm", Disk: "20G", RAM: "4G", CPU: 0}, ErrVMCPURequired},
 		{"negative cpu", VMConfig{Name: "vm", Disk: "20G", RAM: "4G", CPU: -1}, ErrVMCPURequired},
+		{"underscore name", VMConfig{Name: "my_vm", Disk: "20G", RAM: "4G", CPU: 2}, ErrVMNameInvalid},
+		{"numeric name", VMConfig{Name: "1234", Disk: "20G", RAM: "4G", CPU: 2}, ErrVMNameInvalid},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := tt.vm.Validate()
-			if err != tt.wantErr {
+			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("got %v want %v", err, tt.wantErr)
 			}
 		})
@@ -37,17 +40,18 @@ func TestConfig_Validate(t *testing.T) {
 		cfg     Config
 		wantErr error
 	}{
-		{"valid", Config{VM: VMConfig{Disk: "20G", RAM: "4G", CPU: 2}, Model: "m", Prompt: "p"}, nil},
-		{"vm invalid", Config{VM: VMConfig{Disk: "20G", RAM: "4G", CPU: 0}, Model: "m", Prompt: "p"}, ErrVMCPURequired},
-		{"missing model", Config{VM: VMConfig{Disk: "20G", RAM: "4G", CPU: 2}, Prompt: "p"}, ErrModelRequired},
-		{"blank model", Config{VM: VMConfig{Disk: "20G", RAM: "4G", CPU: 2}, Model: "  ", Prompt: "p"}, ErrModelRequired},
-		{"missing prompt", Config{VM: VMConfig{Disk: "20G", RAM: "4G", CPU: 2}, Model: "m"}, ErrPromptRequired},
-		{"blank prompt", Config{VM: VMConfig{Disk: "20G", RAM: "4G", CPU: 2}, Model: "m", Prompt: " \t"}, ErrPromptRequired},
+		{"valid", Config{VM: VMConfig{Name: "vm", Disk: "20G", RAM: "4G", CPU: 2}, Model: "m", Prompt: "p"}, nil},
+		{"vm invalid", Config{VM: VMConfig{Name: "vm", Disk: "20G", RAM: "4G", CPU: 0}, Model: "m", Prompt: "p"}, ErrVMCPURequired},
+		{"vm name with underscore", Config{VM: VMConfig{Name: "my_vm", Disk: "20G", RAM: "4G", CPU: 2}, Model: "m", Prompt: "p"}, ErrVMNameInvalid},
+		{"missing model", Config{VM: VMConfig{Name: "vm", Disk: "20G", RAM: "4G", CPU: 2}, Prompt: "p"}, ErrModelRequired},
+		{"blank model", Config{VM: VMConfig{Name: "vm", Disk: "20G", RAM: "4G", CPU: 2}, Model: "  ", Prompt: "p"}, ErrModelRequired},
+		{"missing prompt", Config{VM: VMConfig{Name: "vm", Disk: "20G", RAM: "4G", CPU: 2}, Model: "m"}, ErrPromptRequired},
+		{"blank prompt", Config{VM: VMConfig{Name: "vm", Disk: "20G", RAM: "4G", CPU: 2}, Model: "m", Prompt: " \t"}, ErrPromptRequired},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := tt.cfg.Validate()
-			if err != tt.wantErr {
+			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("got %v want %v", err, tt.wantErr)
 			}
 		})
@@ -180,6 +184,11 @@ func TestParse(t *testing.T) {
 		{
 			name:    "missing disk",
 			yaml:    "vm:\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\n",
+			wantErr: true,
+		},
+		{
+			name:    "underscore vm name",
+			yaml:    "vm:\n  name: my_vm\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\n",
 			wantErr: true,
 		},
 		{
@@ -736,6 +745,95 @@ func TestIsSafeValue(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := IsSafeValue(tt.value); got != tt.want {
 				t.Fatalf("IsSafeValue(%q) = %v, want %v", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestImageRemote(t *testing.T) {
+	tests := []struct {
+		name      string
+		image     string
+		wantURL   string
+		wantAlias string
+		wantErr   bool
+	}{
+		{"empty defaults to ubuntu 24.04", "", "https://cloud-images.ubuntu.com/releases/", "24.04", false},
+		{"bare alias noble", "noble", "https://cloud-images.ubuntu.com/releases/", "noble", false},
+		{"bare alias version", "22.04", "https://cloud-images.ubuntu.com/releases/", "22.04", false},
+		{"bare alias resolute", "resolute", "https://cloud-images.ubuntu.com/releases/", "resolute", false},
+		{"release prefix", "release:24.04", "https://cloud-images.ubuntu.com/releases/", "24.04", false},
+		{"daily prefix", "daily:24.04", "https://cloud-images.ubuntu.com/daily/", "24.04", false},
+		{"ubuntu prefix", "ubuntu:24.04", "https://cloud-images.ubuntu.com/releases/", "24.04", false},
+		{"ubuntu prefix trims alias whitespace", "ubuntu: noble ", "https://cloud-images.ubuntu.com/releases/", "noble", false},
+		{"ubuntu-daily prefix", "ubuntu-daily:24.04", "https://cloud-images.ubuntu.com/daily/", "24.04", false},
+		{"images prefix", "images:alpine/3.20", "https://images.lxd.canonical.com", "alpine/3.20", false},
+		{"unknown remote", "fedora:40", "", "", true},
+		{"prefixed but empty alias", "ubuntu:", "", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url, alias, err := ImageRemote(tt.image)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ImageRemote(%q) succeeded, want error", tt.image)
+				}
+				for _, p := range []string{"release:", "daily:", "ubuntu:", "ubuntu-daily:", "images:"} {
+					if !strings.Contains(err.Error(), p) {
+						t.Fatalf("error %q does not name supported prefix %s", err, p)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ImageRemote(%q): %v", tt.image, err)
+			}
+			if url != tt.wantURL || alias != tt.wantAlias {
+				t.Fatalf("ImageRemote(%q) = %q, %q; want %q, %q", tt.image, url, alias, tt.wantURL, tt.wantAlias)
+			}
+		})
+	}
+}
+
+func TestNormalizeSize(t *testing.T) {
+	tests := []struct {
+		name    string
+		size    string
+		want    string
+		wantErr bool
+	}{
+		{"decimal to binary", "20G", "20GiB", false},
+		{"decimal to smaller unit", "4096M", "4GiB", false},
+		{"megabytes stay binary", "512M", "512MiB", false},
+		{"kilobytes become mebibytes", "1024K", "1MiB", false},
+		{"terabytes", "1T", "1TiB", false},
+		{"bare bytes", "1073741824", "1GiB", false},
+		{"binary already", "1GiB", "1GiB", false},
+		{"gb accepted", "20GB", "20GiB", false},
+		{"fractional", "1.5G", "1536MiB", false},
+		{"empty", "", "", true},
+		{"no unit garbage", "abc", "", true},
+		{"unknown unit", "20X", "", true},
+		{"negative", "-5G", "", true},
+		{"zero", "0", "", true},
+		{"fractional bare bytes", "0.5", "", true},
+		{"fractional bare bytes above one", "1.5", "", true},
+		{"overflow", "99999999999999999999T", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NormalizeSize(tt.size)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("NormalizeSize(%q) = %q, want error", tt.size, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NormalizeSize(%q): %v", tt.size, err)
+			}
+			if got != tt.want {
+				t.Fatalf("NormalizeSize(%q) = %q, want %q", tt.size, got, tt.want)
 			}
 		})
 	}

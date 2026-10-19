@@ -18,7 +18,7 @@ import (
 	"github.com/trollLemon/MPHarness/internal/agent"
 	"github.com/trollLemon/MPHarness/internal/config"
 	"github.com/trollLemon/MPHarness/internal/harness"
-	"github.com/trollLemon/MPHarness/internal/multipass"
+	"github.com/trollLemon/MPHarness/internal/lxd"
 	mphotel "github.com/trollLemon/MPHarness/internal/otel"
 	"github.com/trollLemon/MPHarness/internal/secrets"
 )
@@ -68,7 +68,7 @@ func main() {
 }
 
 func printUsage(w io.Writer) {
-	_, _ = fmt.Fprintf(w, "mph - Multipass Harness\n\n")
+	_, _ = fmt.Fprintf(w, "mph - MPHarness\n\n")
 	_, _ = fmt.Fprintf(w, "Usage: %s [flags] <config.yaml>\n\n", os.Args[0])
 	_, _ = fmt.Fprintf(w, "Flags:\n")
 	flag.PrintDefaults()
@@ -80,7 +80,7 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "    disk: 20G\n")
 	_, _ = fmt.Fprintf(w, "    ram: 4G\n")
 	_, _ = fmt.Fprintf(w, "    cpu: 2\n")
-	_, _ = fmt.Fprintf(w, "    image: noble       # optional, Ubuntu image (noble/jammy/focal/bionic or 22.04, release:noble, daily:resolute); default LTS\n")
+	_, _ = fmt.Fprintf(w, "    image: noble       # optional, Ubuntu image (noble/jammy/focal/bionic or 22.04, release:noble, daily:resolute, ubuntu:24.04, ubuntu-daily:resolute, images:ubuntu/24.04); default ubuntu:24.04\n")
 	_, _ = fmt.Fprintf(w, "  model: <id>           # LLM, e.g. unsloth/Qwen3-0.6B-Q8_0 (downloaded on first run)\n")
 	_, _ = fmt.Fprintf(w, "  prompt: \"do stuff in the VM\"\n")
 	_, _ = fmt.Fprintf(w, "  content_dir: ./path   # optional, local dir to copy to %s in VM\n", config.VMContentDir)
@@ -222,6 +222,11 @@ func run() error {
 		log.Info().Str("endpoint", otelCfg.Endpoint).Str("svc", otelCfg.ServiceName).Msg("otel enabled")
 	}
 
+	client, err := lxd.New(log.Logger, resolver)
+	if err != nil {
+		return err
+	}
+
 	log.Info().
 		Str("cfg", configPath).
 		Str("vm", cfg.VM.Name).
@@ -266,8 +271,6 @@ func run() error {
 		LLM:           cfg.LLM,
 		RunID:         ident.ID,
 	})
-
-	client := multipass.New(log.Logger, resolver)
 
 	return harness.Start(ctx, agt, client, cfg, harness.Options{
 		IgnoreExisting: ignoreExisting,
