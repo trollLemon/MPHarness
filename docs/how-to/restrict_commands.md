@@ -1,6 +1,6 @@
 # Restricting the commands the agent may run
 
-By default, `mph` lets the agent run **any** command inside the VM through `multipass_exec` (shell binaries such as `bash`/`sh` are always blocked; see [Special cases](#special-cases)). If you want the agent sandboxed to a fixed toolset, use `allowed_commands`.
+By default, `mph` lets the agent run **any** command inside the VM through `vm_exec` (shell binaries such as `bash`/`sh` are always blocked; see [Special cases](#special-cases)). If you want the agent sandboxed to a fixed toolset, use `allowed_commands`.
 
 ```yaml
 allowed_commands:

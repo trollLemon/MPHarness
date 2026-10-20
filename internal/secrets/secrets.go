@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/zalando/go-keyring"
@@ -109,6 +110,57 @@ func New(cfg config.SecretsConfig) (Resolver, error) {
 	default:
 		return nil, config.ErrInvalidSecretsSource
 	}
+}
+
+// Redactor resolves markers and remembers every value it has substituted.
+type Redactor struct {
+	resolver Resolver
+	used     map[string]string
+}
+
+// NewRedactor returns a Redactor that resolves markers with resolver.
+func NewRedactor(resolver Resolver) *Redactor {
+	return &Redactor{resolver: resolver, used: make(map[string]string)}
+}
+
+// Redact substitutes every marker in input and records the resolved values.
+func (r *Redactor) Redact(input string) (string, error) {
+	resolved, values, err := Redact(input, r.resolver)
+	if err != nil {
+		return "", err
+	}
+	for name, value := range values {
+		r.used[name] = value
+	}
+	return resolved, nil
+}
+
+// Scrub replaces every recorded value with its marker, longest value first so
+// overlapping secrets cannot leave fragments behind.
+func (r *Redactor) Scrub(s string) string {
+	if s == "" || len(r.used) == 0 {
+		return s
+	}
+	type pair struct {
+		name, value string
+	}
+	pairs := make([]pair, 0, len(r.used))
+	for name, value := range r.used {
+		if value == "" {
+			continue
+		}
+		pairs = append(pairs, pair{name: name, value: value})
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if len(pairs[i].value) != len(pairs[j].value) {
+			return len(pairs[i].value) > len(pairs[j].value)
+		}
+		return pairs[i].name < pairs[j].name
+	})
+	for _, p := range pairs {
+		s = strings.ReplaceAll(s, p.value, "%{"+p.name+"}")
+	}
+	return s
 }
 
 type marker struct {

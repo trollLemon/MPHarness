@@ -12,7 +12,6 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/trollLemon/MPHarness/internal/config"
-	"github.com/trollLemon/MPHarness/internal/multipass"
 	mphotel "github.com/trollLemon/MPHarness/internal/otel"
 )
 
@@ -90,7 +89,7 @@ func TestLogRunSummaryWithoutIterations(t *testing.T) {
 // accumulated shows up as a correct-looking zero.
 func TestExecuteAccumulatesRunTotals(t *testing.T) {
 	toolCall := []model.ResponseToolCall{
-		{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{Name: "multipass_info", Arguments: model.ToolCallArguments{}}},
+		{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{Name: "vm_info", Arguments: model.ToolCallArguments{}}},
 	}
 	tests := []struct {
 		name           string
@@ -128,7 +127,7 @@ func TestExecuteAccumulatesRunTotals(t *testing.T) {
 			})
 			conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
 			ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
-			if err := a.Execute(ctx, conf, multipass.New(zerolog.Nop(), nil)); err != nil {
+			if err := a.Execute(ctx, conf, newTestClient(t)); err != nil {
 				t.Fatalf("Execute: %v", err)
 			}
 
@@ -163,7 +162,7 @@ func TestExecuteAccumulatesReclaimedTokens(t *testing.T) {
 		Compaction: enabledCompaction(),
 	}
 	ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
-	if err := a.Execute(ctx, conf, multipass.New(zerolog.Nop(), nil)); err != nil {
+	if err := a.Execute(ctx, conf, newTestClient(t)); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 
@@ -197,7 +196,7 @@ func TestExecuteCountsAbortedIteration(t *testing.T) {
 	conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
 	ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
 
-	if err := a.Execute(ctx, conf, multipass.New(zerolog.Nop(), nil)); err == nil {
+	if err := a.Execute(ctx, conf, newTestClient(t)); err == nil {
 		t.Fatal("Execute succeeded against a failing backend; test setup is wrong")
 	}
 

@@ -17,7 +17,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/trollLemon/MPHarness/internal/config"
-	"github.com/trollLemon/MPHarness/internal/multipass"
 	mphotel "github.com/trollLemon/MPHarness/internal/otel"
 	"github.com/trollLemon/MPHarness/internal/output"
 	"github.com/trollLemon/MPHarness/internal/textutil"
@@ -245,8 +244,8 @@ func TestBuildToolDocuments(t *testing.T) {
 		want       []string
 		wantAbsent []string
 	}{
-		{"base tools", config.Config{}, []string{"multipass_exec", "multipass_info"}, []string{"output_search", "output_read"}},
-		{"output tools when enabled", config.Config{Output: config.OutputConfig{Enabled: true}}, []string{"multipass_exec", "multipass_info", "output_search", "output_read"}, nil},
+		{"base tools", config.Config{}, []string{"vm_exec", "vm_info"}, []string{"output_search", "output_read"}},
+		{"output tools when enabled", config.Config{Output: config.OutputConfig{Enabled: true}}, []string{"vm_exec", "vm_info", "output_search", "output_read"}, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -376,7 +375,7 @@ func TestShouldTerminateWithoutToolCalls(t *testing.T) {
 		reason string
 		want   bool
 	}{
-		{"with tool calls", []model.ResponseToolCall{{ID: "1", Function: model.ResponseToolCallFunction{Name: "multipass_exec"}}}, model.FinishReasonTool, false},
+		{"with tool calls", []model.ResponseToolCall{{ID: "1", Function: model.ResponseToolCallFunction{Name: "vm_exec"}}}, model.FinishReasonTool, false},
 		{"stop without tools", nil, model.FinishReasonStop, true},
 		{"length without tools", nil, model.FinishReasonLength, true},
 		{"empty finish", nil, "", true},
@@ -407,18 +406,18 @@ func TestBuildToolCallDocs(t *testing.T) {
 	}{
 		{
 			name:      "single exec",
-			calls:     []model.ResponseToolCall{{ID: "call-1", Type: "function", Function: model.ResponseToolCallFunction{Name: "multipass_exec", Arguments: model.ToolCallArguments{"command": "ls"}}}},
+			calls:     []model.ResponseToolCall{{ID: "call-1", Type: "function", Function: model.ResponseToolCallFunction{Name: "vm_exec", Arguments: model.ToolCallArguments{"command": "ls"}}}},
 			wantIDs:   []string{"call-1"},
-			wantNames: []string{"multipass_exec"},
+			wantNames: []string{"vm_exec"},
 		},
 		{
 			name: "batched calls keep order",
 			calls: []model.ResponseToolCall{
-				{ID: "call-1", Type: "function", Function: model.ResponseToolCallFunction{Name: "multipass_exec", Arguments: model.ToolCallArguments{"command": "ls"}}},
-				{ID: "call-2", Type: "function", Function: model.ResponseToolCallFunction{Name: "multipass_info", Arguments: model.ToolCallArguments{}}},
+				{ID: "call-1", Type: "function", Function: model.ResponseToolCallFunction{Name: "vm_exec", Arguments: model.ToolCallArguments{"command": "ls"}}},
+				{ID: "call-2", Type: "function", Function: model.ResponseToolCallFunction{Name: "vm_info", Arguments: model.ToolCallArguments{}}},
 			},
 			wantIDs:   []string{"call-1", "call-2"},
-			wantNames: []string{"multipass_exec", "multipass_info"},
+			wantNames: []string{"vm_exec", "vm_info"},
 		},
 	}
 	for _, tt := range tests {
@@ -488,7 +487,7 @@ func TestBuildToolResponseMessage(t *testing.T) {
 		toolName string
 		content  string
 	}{
-		{"exec result", "call-1", "multipass_exec", "out"},
+		{"exec result", "call-1", "vm_exec", "out"},
 		{"search result", "call-2", "output_search", "{}"},
 	}
 	for _, tt := range tests {
@@ -745,7 +744,7 @@ func TestAssistantMessageShapeLogged(t *testing.T) {
 		Model:  "m",
 		Prompt: "task",
 	}
-	if err := agt.Execute(context.Background(), conf, multipass.New(zerolog.Nop(), nil)); err != nil {
+	if err := agt.Execute(context.Background(), conf, newTestClient(t)); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	found := false
@@ -787,7 +786,7 @@ func TestExecuteReportsNoOutputWithoutError(t *testing.T) {
 		Prompt: "task",
 	}
 
-	if err := agt.Execute(context.Background(), conf, multipass.New(zerolog.Nop(), nil)); err != nil {
+	if err := agt.Execute(context.Background(), conf, newTestClient(t)); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 }
@@ -850,7 +849,7 @@ func TestExecute(t *testing.T) {
 		{
 			name: "respects maxIterations",
 			mock: func() *mockKronk {
-				tc := []model.ResponseToolCall{{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{Name: "multipass_info", Arguments: model.ToolCallArguments{}}}}
+				tc := []model.ResponseToolCall{{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{Name: "vm_info", Arguments: model.ToolCallArguments{}}}}
 				resp := chatResp("", "", model.FinishReasonTool, tc, nil)
 				return &mockKronk{responses: []model.ChatResponse{resp, resp, resp, resp, resp}}
 			}(),
@@ -886,7 +885,7 @@ func TestExecute(t *testing.T) {
 				prompt = tt.prompt
 			}
 			conf := config.Config{VM: vm, Prompt: prompt}
-			cli := multipass.New(zerolog.Nop(), nil)
+			cli := newTestClient(t)
 			err := agent.Execute(context.Background(), conf, cli)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err %v wantErr %v", err, tt.wantErr)
@@ -945,7 +944,7 @@ func TestExecuteLogsTokenUsageAndIterationEvents(t *testing.T) {
 	})
 	conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
 	ctx := mphotel.WithRunIdentity(context.Background(), "baseline:0198f0c1-2a3b-7c4d-8e5f-60718293a4b5", "baseline")
-	if err := agent.Execute(ctx, conf, multipass.New(zerolog.Nop(), nil)); err != nil {
+	if err := agent.Execute(ctx, conf, newTestClient(t)); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 
@@ -1031,7 +1030,7 @@ func TestRunIterationCountsToolResultsInContext(t *testing.T) {
 		chatResp("", "", model.FinishReasonTool, []model.ResponseToolCall{{
 			ID: "c1", Type: "function",
 			Function: model.ResponseToolCallFunction{
-				Name: "multipass_exec", Arguments: model.ToolCallArguments{"command": "cat big", "capture": true},
+				Name: "vm_exec", Arguments: model.ToolCallArguments{"command": "cat big", "capture": true},
 			},
 		}}, &model.Usage{TotalTokens: usageTotal, PromptTokens: 90, CompletionTokens: 10}),
 	}}
@@ -1068,7 +1067,7 @@ func TestRunIterationCountsToolResultsInContext(t *testing.T) {
 	agt.toolDocs = buildToolDocuments(cfg)
 	agt.store = store
 
-	if err := agt.runIteration(context.Background(), multipass.New(zerolog.Nop(), nil), cfg); err != nil {
+	if err := agt.runIteration(context.Background(), newTestClient(t), cfg); err != nil {
 		t.Fatalf("runIteration: %v", err)
 	}
 	if agt.contextTokens <= usageTotal {
@@ -1106,7 +1105,7 @@ func TestRunIterationUsageSupersedesEarlierToolResults(t *testing.T) {
 	agt.toolDocs = buildToolDocuments(cfg)
 	agt.contextTokens = 12345
 
-	if err := agt.runIteration(context.Background(), multipass.New(zerolog.Nop(), nil), cfg); err != nil {
+	if err := agt.runIteration(context.Background(), newTestClient(t), cfg); err != nil {
 		t.Fatalf("runIteration: %v", err)
 	}
 	if agt.contextTokens != 5000 {
@@ -1158,7 +1157,7 @@ func TestEventAttrsAddsIteration(t *testing.T) {
 	ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
 	ctx = withIteration(ctx, 6) // zero-based; label must be 7
 
-	got := eventAttrs(ctx, attribute.String("mph.tool.name", "multipass_exec"))
+	got := eventAttrs(ctx, attribute.String("mph.tool.name", "vm_exec"))
 
 	var iteration string
 	var hasRun bool
@@ -1245,7 +1244,7 @@ func TestRunOutcomeDistinguishesCleanFinishFromExhaustion(t *testing.T) {
 		{"clean finish below the cap", 5, model.FinishReasonStop, nil, outcomeOK},
 		{"clean finish on the last permitted iteration", 1, model.FinishReasonStop, nil, outcomeOK},
 		{"cap reached while still calling tools", 1, model.FinishReasonTool, []model.ResponseToolCall{
-			{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{Name: "multipass_info", Arguments: model.ToolCallArguments{}}},
+			{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{Name: "vm_info", Arguments: model.ToolCallArguments{}}},
 		}, outcomeBudgetExhausted},
 	}
 
@@ -1264,7 +1263,7 @@ func TestRunOutcomeDistinguishesCleanFinishFromExhaustion(t *testing.T) {
 			})
 			conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
 			ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
-			if err := a.Execute(ctx, conf, multipass.New(zerolog.Nop(), nil)); err != nil {
+			if err := a.Execute(ctx, conf, newTestClient(t)); err != nil {
 				t.Fatalf("Execute: %v", err)
 			}
 

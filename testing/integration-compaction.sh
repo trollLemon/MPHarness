@@ -1,6 +1,6 @@
 #!/bin/sh
 # Integration smoke for conversation compaction on a tiny deterministic model.
-# Needs a Multipass VM and the 14B reasoning model; run with the OTel stack up
+# Needs a working LXD daemon and the 14B reasoning model; run with the OTel stack up
 # (make otel-up).
 set -eu
 

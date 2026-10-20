@@ -1,6 +1,6 @@
 # Passing secrets to the agent
 
-Tasks like "attach this Pro account and run the healthcheck" need a secret, but the prompt, the tool calls, the traces, and the logs are all visible to the model and to Loki, leaving nowhere safe to write one. Placeholders solve this: you write `%{PRO_TOKEN}` in your prompt, the agent copies it into its `multipass_exec` calls, and `mph` swaps in the real value at the last moment before the command reaches the VM. Neither the model, nor the trace, nor the log ever sees the value.
+Tasks like "attach this Pro account and run the healthcheck" need a secret, but the prompt, the tool calls, the traces, and the logs are all visible to the model and to Loki, leaving nowhere safe to write one. Placeholders solve this: you write `%{PRO_TOKEN}` in your prompt, the agent copies it into its `vm_exec` calls, and `mph` swaps in the real value at the last moment before the command reaches the VM. Neither the model, nor the trace, nor the log ever sees the value.
 
 ```yaml
 prompt: "run sudo pro attach %{PRO_TOKEN} and report the status"
@@ -61,7 +61,7 @@ This matters most for captured output: `capture: true` redirects stdout to a raw
 
 ## Scope and limitations
 
-- Substitution happens only inside commands run in the VM (`multipass_exec` and the harness's own VM commands). `prompt`, `model`, `content_dir`, `otel.*`, `allowed_commands`, and the VM resource fields (`vm.name`, `vm.disk`, `vm.ram`, `vm.cpu`, `vm.image`) are never substituted. (`vm.kernel` is the exception: the harness installs it via a command run in the VM, so a marker there would be substituted.)
+- Substitution happens only inside commands run in the VM (`vm_exec` and the harness's own VM commands). `prompt`, `model`, `content_dir`, `otel.*`, `allowed_commands`, and the VM resource fields (`vm.name`, `vm.disk`, `vm.ram`, `vm.cpu`, `vm.image`) are never substituted. (`vm.kernel` is the exception: the harness installs it via a command run in the VM, so a marker there would be substituted.)
 - One source per run; there is no per-marker override.
 - The VM-side raw capture file still holds the secret on disk. Redaction stops it coming back through `mph`, not `mph` un-writing it: any command the agent runs in the VM (`cat`, `env`) can still read what was printed there.
 

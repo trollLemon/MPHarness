@@ -10,7 +10,6 @@ import (
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel"
 	otellog "go.opentelemetry.io/otel/log"
-	"go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
@@ -52,11 +51,11 @@ func TestSetup(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			origTP := otel.GetTracerProvider()
 			origMP := otel.GetMeterProvider()
-			origLP := global.GetLoggerProvider()
+			origLP := otel.GetLoggerProvider()
 			defer func() {
 				otel.SetTracerProvider(origTP)
 				otel.SetMeterProvider(origMP)
-				global.SetLoggerProvider(origLP)
+				otel.SetLoggerProvider(origLP)
 			}()
 			for k, v := range tt.env {
 				t.Setenv(k, v)
@@ -79,7 +78,7 @@ func TestSetup(t *testing.T) {
 				if got := otel.GetMeterProvider(); got != origMP {
 					t.Fatalf("meter provider changed when nothing should install")
 				}
-				if got := global.GetLoggerProvider(); got != origLP {
+				if got := otel.GetLoggerProvider(); got != origLP {
 					t.Fatalf("logger provider changed when nothing should install")
 				}
 				return
@@ -93,16 +92,16 @@ func TestSetup(t *testing.T) {
 			if got := otel.GetMeterProvider(); got != origMP {
 				t.Fatalf("meter provider installed; mph exports no metrics")
 			}
-			if _, ok := global.GetLoggerProvider().(*sdklog.LoggerProvider); !ok {
-				t.Fatalf("unexpected logger provider type %T", global.GetLoggerProvider())
+			if _, ok := otel.GetLoggerProvider().(*sdklog.LoggerProvider); !ok {
+				t.Fatalf("unexpected logger provider type %T", otel.GetLoggerProvider())
 			}
 		})
 	}
 }
 
 func TestHookRun(t *testing.T) {
-	origLP := global.GetLoggerProvider()
-	defer global.SetLoggerProvider(origLP)
+	origLP := otel.GetLoggerProvider()
+	defer otel.SetLoggerProvider(origLP)
 
 	// The hook only needs a real LoggerProvider, which Setup installs offline, so
 	// the returned shutdown is never called and no socket is opened. See
@@ -242,7 +241,7 @@ func TestLogEventFieldOrder(t *testing.T) {
 		LogEvent(context.Background(), logger, zerolog.InfoLevel, "tool succeeded", map[string]any{
 			"out":   strings.Repeat("x", 5000),
 			"id":    "call-1",
-			"tool":  "multipass_exec",
+			"tool":  "vm_exec",
 			"iter":  2,
 			"event": "tool_succeeded",
 		})
@@ -278,7 +277,7 @@ func TestLogEventPayloadLast(t *testing.T) {
 			"out":  strings.Repeat("x", 100),
 			"args": `{"command":"apt --help"}`,
 			"id":   "call-1",
-			"tool": "multipass_exec",
+			"tool": "vm_exec",
 			"iter": 2,
 		})
 		line := buf.String()

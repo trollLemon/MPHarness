@@ -379,7 +379,7 @@ func (s *Store) lookup(outputID string) (Handle, error) {
 		return h, nil
 	}
 	if len(s.handles) == 0 {
-		return Handle{}, fmt.Errorf("unknown output_id %q (no active handles; use multipass_exec for new commands, not output_search/output_read)", outputID)
+		return Handle{}, fmt.Errorf("unknown output_id %q (no active handles; use vm_exec for new commands, not output_search/output_read)", outputID)
 	}
 	ids := make([]string, 0, len(s.handles))
 	for k := range s.handles {

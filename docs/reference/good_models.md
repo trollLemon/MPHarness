@@ -6,7 +6,7 @@
 
 | Property | Importance |
 |----------|----------------|
-| **Tool-calling ability** | The agent's whole workflow relies on reliable function/tool calling (`multipass_*`). Choose a model that is explicitly trained for it (for example the Qwen3 generation). |
+| **Tool-calling ability** | The agent's whole workflow relies on reliable function/tool calling (`vm_exec`/`vm_info`). Choose a model that is explicitly trained for it (for example the Qwen3 generation). |
 | **Quantisation** | Q8_0 weights give near precision at a fraction of the size; a good default. Smaller quantisations (Q4, Q6) squeeze onto less RAM/VRAM at some quality cost. |
 | **Context window** | Enough context to hold the conversation + tool results. If you don't tune it, `mph` auto-tunes from the model metadata; set `llm.context_window` for control. |
 | **Speed** | CPU-only machines can run larger models, but make sure to set a high `agent.chat_timeout`.|

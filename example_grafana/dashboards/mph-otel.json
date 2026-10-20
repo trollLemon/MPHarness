@@ -808,7 +808,7 @@
    "id": 213,
    "type": "table",
    "title": "Run traces",
-   "description": "One row per span for the selected run, so nested spans such as multipass.exec appear next to their parent. Select a row to open its trace in Explore. TraceQL search only covers flushed blocks, so a run becomes searchable about a minute after it finishes.",
+   "description": "One row per span for the selected run, so nested spans such as vm.exec appear next to their parent. Select a row to open its trace in Explore. TraceQL search only covers flushed blocks, so a run becomes searchable about a minute after it finishes.",
    "datasource": {
     "type": "tempo",
     "uid": "mph-tempo"

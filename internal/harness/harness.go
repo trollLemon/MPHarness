@@ -16,7 +16,7 @@ import (
 
 	"github.com/trollLemon/MPHarness/internal/agent"
 	"github.com/trollLemon/MPHarness/internal/config"
-	"github.com/trollLemon/MPHarness/internal/multipass"
+	"github.com/trollLemon/MPHarness/internal/lxd"
 	mphotel "github.com/trollLemon/MPHarness/internal/otel"
 	"github.com/trollLemon/MPHarness/internal/textutil"
 	"github.com/trollLemon/MPHarness/internal/validation"
@@ -68,7 +68,7 @@ type Options struct {
 	RunName        string
 }
 
-func Start(ctx context.Context, agt *agent.Agent, client *multipass.Client, cfg config.Config, opts Options) error {
+func Start(ctx context.Context, agt *agent.Agent, client *lxd.Client, cfg config.Config, opts Options) error {
 	tracer := otel.Tracer("mph")
 	// Injected before the root span so mph.run and every span beneath it carry
 	// the run identity, not just the agent's own spans.
@@ -87,8 +87,9 @@ func Start(ctx context.Context, agt *agent.Agent, client *multipass.Client, cfg 
 	defer span.End()
 
 	_, infoErr := client.Info(ctx, cfg.VM.Name)
+	existing := infoErr == nil
 	switch {
-	case errors.Is(infoErr, multipass.ErrInstanceNotFound):
+	case errors.Is(infoErr, lxd.ErrInstanceNotFound):
 		cCtx, cSpan := tracer.Start(ctx, "mph.vm.create", trace.WithAttributes(
 			attribute.String("mph.vm.name", cfg.VM.Name),
 			attribute.Int("mph.vm.cpu", cfg.VM.CPU),
@@ -137,6 +138,13 @@ func Start(ctx context.Context, agt *agent.Agent, client *multipass.Client, cfg 
 				continue
 			}
 
+			mphotel.FailSpan(span, err)
+			return err
+		}
+	}
+
+	if existing {
+		if err := client.EnsureRunning(ctx, cfg.VM.Name); err != nil {
 			mphotel.FailSpan(span, err)
 			return err
 		}

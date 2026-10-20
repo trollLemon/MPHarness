@@ -24,7 +24,7 @@ rather than the panel editor: the file is the source of truth and the UI is only
 ever a viewer. Tempo traces are reachable through Grafana Explore.
 
 The dashboard's **Run traces** table lists one row per span for the selected run,
-so nested spans such as `multipass.exec` appear alongside their parent; each row
+so nested spans such as `vm.exec` appear alongside their parent; each row
 links to its waterfall in Explore. TraceQL search only sees flushed blocks, so a
 run becomes searchable roughly a minute after it finishes. Every other run panel
 is LogQL over the structured `event=` log lines (see
@@ -57,5 +57,5 @@ The YAML files in `testing/` are `mph` run inputs for e2e testing:
 `test.yaml` is a short smoke run, `longrun.yaml` is a long checklist run, and
 `compaction.yaml` is tuned to trigger compaction. The integration scripts also
 live in `testing/`. From the repository root, run `make test-integration`
-or `make test-integration-compaction`; both require Multipass and the
+or `make test-integration-compaction`; both require LXD and the
 configured model.

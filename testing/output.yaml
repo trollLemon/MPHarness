@@ -6,7 +6,7 @@ vm:
   disk: 10G
   ram: 2G
   cpu: 1
-  image: bionic
+  image: noble
 model: unsloth/Qwen3.8-27B-UD-Q8_K_XL
 allowed_commands:
   - coreUtils
@@ -35,7 +35,7 @@ compaction:
   min_messages: 6
   max_attempts: 3
 prompt: |
-  Inside the Multipass VM, do the following:
+  Inside the VM, do the following:
   1. Seed a large log: seq 1 2000000 | sed 's/^/log line /' > /tmp/big.log && echo 'needle-7x9 TREASURE-LINE' >> /tmp/big.log && wc -l /tmp/big.log
   2. The log is far too large to print or read in full (about 2,000,000 lines). Find the line number containing 'needle-7x9 TREASURE-LINE' and report it.
   3. Report the total line count of /tmp/big.log.
