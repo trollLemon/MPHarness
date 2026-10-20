@@ -622,12 +622,17 @@ func (c *Client) Transfer(ctx context.Context, vmName, hostPath, vmDest string) 
 			})
 		}
 
-		if !strings.HasPrefix(p, root) {
-			c.log.Warn().Str("path", p).Msg("path outside walk root")
+		resolvedP, resolveErr := filepath.EvalSymlinks(p)
+		if resolveErr != nil {
+			c.log.Warn().Str("path", p).Msg("failed to resolve path symlinks")
+			return resolveErr
+		}
+		if !strings.HasPrefix(resolvedP, root) {
+			c.log.Warn().Str("path", p).Msg("path outside walk root after symlink resolution")
 			return nil
 		}
 
-		file, err := os.Open(p) //#nosec G304
+		file, err := os.Open(resolvedP) //#nosec G304
 		if err != nil {
 			return err
 		}
