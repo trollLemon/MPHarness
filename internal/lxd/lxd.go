@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/canonical/lxd/client"
+	lxd "github.com/canonical/lxd/client"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel"
@@ -85,10 +85,10 @@ func getTracer() trace.Tracer {
 func New(log zerolog.Logger, resolver secrets.Resolver) (*Client, error) {
 	server, err := lxd.ConnectLXDUnix("", nil)
 	if err != nil {
-		return nil, fmt.Errorf("connect to LXD: %w (is LXD installed (deb or snap) and does the current user have access to its socket, typically via the lxd group?)", err)
+		return nil, fmt.Errorf("connect to LXD: %w (is LXD installed (deb,snap, other package) and does the current user have access to its socket, typically via the lxd group?)", err)
 	}
 	if _, _, err := server.GetServer(); err != nil {
-		return nil, fmt.Errorf("verify LXD server: %w (is LXD installed (deb or snap) and does the current user have access to its socket, typically via the lxd group?)", err)
+		return nil, fmt.Errorf("verify LXD server: %w (is LXD installed (deb,snap, other package) and does the current user have access to its socket, typically via the lxd group?)", err)
 	}
 	return NewWithServer(server, log, resolver), nil
 }
@@ -143,7 +143,7 @@ func (c *Client) Info(ctx context.Context, name string) (string, error) {
 		return "", fmt.Errorf("instance name is required")
 	}
 
-	ctx, span := getTracer().Start(ctx, "vm.info", trace.WithAttributes( //nolint:ineffassign
+	_, span := getTracer().Start(ctx, "vm.info", trace.WithAttributes(
 		attribute.String("mph.vm.name", name),
 	))
 	defer span.End()
@@ -203,7 +203,6 @@ func (c *Client) EnsureRunning(ctx context.Context, name string) error {
 	return nil
 }
 
-// LXD 6.7 renamed security.secureboot to boot.mode.
 func (c *Client) secureBootConfig() (string, string) {
 	if c.server.HasExtension("instance_boot_mode") {
 		return "boot.mode", "uefi-nosecureboot"
