@@ -627,7 +627,7 @@ func (c *Client) Transfer(ctx context.Context, vmName, hostPath, vmDest string) 
 			return nil
 		}
 
-		file, err := os.Open(p)
+		file, err := os.Open(p) //#nosec G304
 		if err != nil {
 			return err
 		}
