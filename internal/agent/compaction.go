@@ -3,7 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"time"
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
@@ -43,20 +43,17 @@ func (s *agentSummarizer) Summarize(ctx context.Context, systemPrompt, renderedH
 		return "", err
 	}
 	if len(resp.Choices) == 0 {
-		return "", nil
+		return "", fmt.Errorf("%w (no choices)", compact.ErrEmptySummary)
 	}
-	msg := resp.Choices[0].Message
+	choice := resp.Choices[0]
+	msg := choice.Message
 	if msg == nil {
-		msg = resp.Choices[0].Delta
+		msg = choice.Delta
 	}
-	if msg == nil {
-		return "", nil
-	}
-	if msg.Content != "" {
+	if msg != nil && msg.Content != "" {
 		return msg.Content, nil
 	}
-
-	return "", errors.New("summary response contained no `content` tokens")
+	return "", fmt.Errorf("%w (finish_reason=%s)", compact.ErrEmptySummary, choice.FinishReason())
 }
 
 func (a *Agent) estimateTokens(ctx context.Context, text string) int {
@@ -137,7 +134,7 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) string {
 	overhead := a.schemaOverheadTokens(compCtx)
 	before := a.contextTokens
 	win := compact.Window{Size: window, FixedOverhead: int(overhead)}
-	newConv, outcome, summaryLen := compact.Compact(compCtx, a.conversation, infos, cc.MaxSummaryTokens, a.toolResultBudget, win, summarizer, estimate, a.compactionsApplied)
+	newConv, outcome, summaryLen, compactErr := compact.Compact(compCtx, a.conversation, infos, cc.MaxSummaryTokens, a.toolResultBudget, win, summarizer, estimate, a.compactionsApplied)
 	duration := time.Since(start)
 
 	after := before
@@ -160,14 +157,21 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) string {
 		attribute.Int("mph.context.compaction.handles", len(infos)),
 		attribute.Int("mph.context.compactions_applied", a.compactionsApplied),
 	)
+	if compactErr != nil {
+		compSpan.SetAttributes(attribute.String("mph.context.compaction.error", compactErr.Error()))
+	}
 	compLog := a.log.With().Ctx(compCtx).Logger()
-	mphotel.LogEvent(compCtx, compLog, zerolog.WarnLevel, "context compaction", map[string]any{
+	fields := map[string]any{
 		"event": eventContextCompaction,
 		"iter":  a.iteration + 1, "outcome": outcome, "tok_before": before, "tok_after": after,
 		"reclaimed": before - after, "thr": cc.Threshold, "summary": summaryBytes, "handles": len(infos),
 		"compacted": a.compactionsApplied,
 		"try":       a.compactionAttempts + 1, "dur_ms": duration.Milliseconds(),
-	})
+	}
+	if compactErr != nil {
+		fields["error"] = compactErr
+	}
+	mphotel.LogEvent(compCtx, compLog, zerolog.WarnLevel, "context compaction", fields)
 
 	switch outcome {
 	case "applied":

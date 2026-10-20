@@ -56,7 +56,7 @@ make otel-up                       # Compose stack under docker-compose/, OTLP o
 ./bin/mph --otel ./testing/test.yaml
 ```
 The smoke test runs a real LXD VM, so the host needs a working LXD daemon and default profile.
-Traces: `mph.run` → `mph.vm.create`/`vm.launch` → `mph.agent.iteration`×N (with `mph.agent.tool_call`/`tool_result` events and `vm.exec` children) → `mph.vm.delete`; logs mirror console lines with `trace_id`; dashboard data comes from log lines tagged `event=` (`token_usage`, `iteration`, `agent_tool_call`, `tool_succeeded`, `tool_failed`, `context_compaction`, `context_compaction_applied`, `run_summary`).
+Traces: `mph.run` → `mph.vm.create`/`vm.launch` → `mph.agent.iteration`×N (with `mph.agent.tool_call`/`tool_result` events and `vm.exec` children) → `mph.vm.delete`; logs mirror console lines with `trace_id`; dashboard data comes from log lines tagged `event=` (`token_usage`, `iteration`, `agent_tool_call`, `tool_succeeded`, `tool_failed`, `tool_output_too_large`, `context_overflow`, `context_compaction`, `context_compaction_applied`, `run_summary`).
 
 ### Negative checks
 - Run `./bin/mph ./testing/test.yaml` with collector down. It must complete with no `:4317` dials. This proves default-off.

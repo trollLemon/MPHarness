@@ -36,6 +36,7 @@ func countHandovers(mock *mockKronk) int {
 
 type windowEnforcingKronk struct {
 	*mockKronk
+	overWindow int
 }
 
 func promptTokens(req model.D) int {
@@ -59,7 +60,10 @@ func promptTokens(req model.D) int {
 func (w *windowEnforcingKronk) Chat(ctx context.Context, req model.D) (model.ChatResponse, error) {
 	n := promptTokens(req)
 	if n > w.contextWidth {
-		return model.ChatResponse{}, fmt.Errorf("input tokens [%d] exceed context window [%d]", n, w.contextWidth)
+		if !isCompactionRequest(req) {
+			w.overWindow++
+		}
+		return model.ChatResponse{}, fmt.Errorf("%w: input tokens [%d] exceed context window [%d]", model.ErrInvalidRequest, n, w.contextWidth)
 	}
 	resp, err := w.mockKronk.Chat(ctx, req)
 	if err == nil && len(resp.Choices) > 0 {
@@ -129,9 +133,12 @@ func TestExecuteCompaction(t *testing.T) {
 			failHandover: true,
 			compaction:   enabledCompaction(),
 			maxIter:      7,
-			check: func(t *testing.T, mock *mockKronk, _ string) {
+			check: func(t *testing.T, mock *mockKronk, logs string) {
 				if got := countHandovers(mock); got != 3 {
 					t.Fatalf("want exactly maxAttempts handover calls, got %d", got)
+				}
+				if !strings.Contains(logs, "context deadline exceeded") {
+					t.Fatal("failed compaction must log its reason")
 				}
 			},
 		},
@@ -497,7 +504,7 @@ func TestCompactionAppliesBeforeWindowIsExceeded(t *testing.T) {
 			}
 			responses = append(responses, chatResp("done", "", model.FinishReasonStop, nil, &model.Usage{TotalTokens: 400}))
 
-			mock := &windowEnforcingKronk{&mockKronk{contextWidth: tt.window, responses: responses}}
+			mock := &windowEnforcingKronk{mockKronk: &mockKronk{contextWidth: tt.window, responses: responses}}
 			agt := NewAgent(zerolog.Nop(), mock, Options{
 				MaxIterations: tt.steps + 4, ChatTimeout: time.Second, TotalTimeout: 30 * time.Second,
 				LLM: cfg.LLM, RunID: "run-window",
@@ -507,6 +514,9 @@ func TestCompactionAppliesBeforeWindowIsExceeded(t *testing.T) {
 			}
 			if agt.compactionsApplied == 0 {
 				t.Fatalf("no compaction applied; handovers=%d", countHandovers(mock.mockKronk))
+			}
+			if mock.overWindow != 0 {
+				t.Fatalf("%d chat requests exceeded the %d-token window before compaction; recovery masked it", mock.overWindow, tt.window)
 			}
 		})
 	}

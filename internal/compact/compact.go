@@ -2,6 +2,7 @@ package compact
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -358,14 +359,20 @@ func renderBudgetBytes(win Window, budget int, estimate func(string) int) int {
 	return avail * bytesPerToken
 }
 
+// ErrEmptySummary marks a summarizer reply that carried no content, so
+// compaction can retry it with a corrective prompt instead of treating it like
+// a transport failure.
+var ErrEmptySummary = errors.New("summary response contained no content")
+
 // Compact rewrites the conversation into a system message plus a summary, or
 // returns the original with skipped, reverted, failed, or applied. The third
-// return is the summary length in bytes (0 when no summary was produced).
+// return is the summary length in bytes (0 when no summary was produced). The
+// error explains a failed outcome and is nil otherwise.
 // A revert never counts against retry budgets: it means "not worth it yet",
 // and the next attempt with a longer history may win.
-func Compact(ctx context.Context, conversation []model.D, handles []HandleInfo, maxSummaryTokens, budget int, win Window, s Summarizer, estimate func(string) int, compactionsApplied int) ([]model.D, string, int) {
+func Compact(ctx context.Context, conversation []model.D, handles []HandleInfo, maxSummaryTokens, budget int, win Window, s Summarizer, estimate func(string) int, compactionsApplied int) ([]model.D, string, int, error) {
 	if len(conversation) == 0 {
-		return conversation, "skipped", 0
+		return conversation, "skipped", 0, nil
 	}
 	system := conversation[0]
 	task := taskText(conversation)
@@ -379,30 +386,65 @@ func Compact(ctx context.Context, conversation []model.D, handles []HandleInfo, 
 		before := EstimateConversation(conversation, estimate)
 		afterMin := EstimateMessage(system, estimate) + estimate(buildUserMessage(task, "", recent, handles, compactionsApplied))
 		if afterMin >= before {
-			return conversation, "reverted", 0
+			return conversation, "reverted", 0, nil
 		}
 		if savings := before - afterMin; savings*9/10 < minSummaryBudgetTokens {
-			return conversation, "reverted", 0
+			return conversation, "reverted", 0, nil
 		} else if maxSummaryTokens > savings*9/10 {
 			maxSummaryTokens = savings * 9 / 10
 		}
 	}
+	worthIt := func(summary string) bool {
+		if estimate == nil {
+			return true
+		}
+		before := EstimateConversation(conversation, estimate)
+		after := EstimateMessage(system, estimate) + estimate(buildUserMessage(task, summary, recent, handles, compactionsApplied))
+		return after*10 < before*9
+	}
+
 	rendered := RenderHistory(conversation, budget, maxBytes, ToolResultFullText)
 	summary, err := s.Summarize(ctx, CompactionSystemPrompt, rendered, maxSummaryTokens)
-	if err != nil || strings.TrimSpace(summary) == "" {
-		return conversation, "failed", 0
+	if err != nil && !errors.Is(err, ErrEmptySummary) {
+		return conversation, "failed", 0, fmt.Errorf("summarize: %w", err)
 	}
-	userMsg := model.D{"role": "user", "content": buildUserMessage(task, summary, recent, handles, compactionsApplied)}
-	compacted := []model.D{system, userMsg}
-	if estimate != nil {
-		before := EstimateConversation(conversation, estimate)
-		after := EstimateMessage(system, estimate) + EstimateMessage(userMsg, estimate)
-		if after*10 >= before*9 {
-			return conversation, "reverted", len(summary)
+	if !worthIt(summary) {
+		return conversation, "reverted", len(summary), nil
+	}
+	if reason := summaryRejection(err, summary); reason != nil {
+		summary, err = repairSummary(ctx, s, conversation, budget, maxBytes, maxSummaryTokens, summary, reason)
+		if err != nil {
+			return conversation, "failed", 0, fmt.Errorf("summary repair: %w", err)
+		}
+		if reason := summaryRejection(nil, summary); reason != nil {
+			return conversation, "failed", 0, fmt.Errorf("summary rejected after repair: %w", reason)
+		}
+		if !worthIt(summary) {
+			return conversation, "reverted", len(summary), nil
 		}
 	}
-	if err := validateSummary(summary); err != nil {
-		return conversation, "failed", 0
+	userMsg := model.D{"role": "user", "content": buildUserMessage(task, summary, recent, handles, compactionsApplied)}
+	return []model.D{system, userMsg}, "applied", len(summary), nil
+}
+
+func summaryRejection(err error, summary string) error {
+	if err != nil {
+		return err
 	}
-	return compacted, "applied", len(summary)
+	if strings.TrimSpace(summary) == "" {
+		return errors.New("summary is empty")
+	}
+	return validateSummary(summary)
+}
+
+func repairSummary(ctx context.Context, s Summarizer, conversation []model.D, budget, maxBytes, maxTokens int, previous string, reason error) (string, error) {
+	system := CompactionSystemPrompt + "\n\nYour previous handover was rejected: " + reason.Error() + " Return a corrected handover with all three headings."
+	history := RenderHistory(conversation, budget, maxBytes, ToolResultFullText)
+	if previous = strings.TrimSpace(previous); previous != "" {
+		block := "\n\n## Previous rejected handover\n" + previous
+		if maxBytes > len(block) {
+			history = RenderHistory(conversation, budget, maxBytes-len(block), ToolResultFullText) + block
+		}
+	}
+	return s.Summarize(ctx, system, history, maxTokens)
 }
