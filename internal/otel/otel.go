@@ -19,7 +19,6 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	otellog "go.opentelemetry.io/otel/log"
-	"go.opentelemetry.io/otel/log/global"
 	"go.opentelemetry.io/otel/propagation"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -149,7 +148,7 @@ type Hook struct {
 
 func NewHook(name string) *Hook {
 	return &Hook{
-		logger: global.Logger(name),
+		logger: otel.Logger(name),
 	}
 }
 
@@ -243,7 +242,7 @@ func LogEvent(ctx context.Context, logger zerolog.Logger, level zerolog.Level, m
 // runLogger is resolved once. go.opentelemetry.io/otel/log/global hands back a
 // delegating logger, so this is safe to take before Setup installs the real
 // provider, and it avoids rebuilding a logger for every log line.
-var runLogger = global.Logger("mph")
+var runLogger = otel.Logger("mph")
 
 // payloadKeyOrder lists the blob fields that must close a log line, in the
 // order they should appear. Every entry is a key the codebase actually emits;
