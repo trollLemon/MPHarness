@@ -294,7 +294,7 @@ func TestAppliedCompactionResetsAttempts(t *testing.T) {
 		{"role": "user", "content": big},
 		{"role": "assistant", "content": big},
 	}
-	mock.responses = []model.ChatResponse{chatResp("a faithful summary of the work so far", "", model.FinishReasonStop, nil, nil)}
+	mock.responses = []model.ChatResponse{chatResp(validHandoverSummary, "", model.FinishReasonStop, nil, nil)}
 
 	agt.conversation, agt.contextTokens, agt.toolResultBudget = conv, 7500, 4096
 	agt.compactionAttempts = 2
@@ -331,7 +331,7 @@ func TestPostCompactionContextKeepsToolSchemaOverhead(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mock := &mockKronk{contextWidth: 8192, responses: []model.ChatResponse{
-				chatResp("a faithful summary of the work so far", "", model.FinishReasonStop, nil, nil)}}
+				chatResp(validHandoverSummary, "", model.FinishReasonStop, nil, nil)}}
 			agt := NewAgent(zerolog.Nop(), mock, Options{
 				MaxIterations: 5, ChatTimeout: time.Second, TotalTimeout: 30 * time.Second,
 				LLM: defaultLLMConfig(), RunID: "run-overhead",
@@ -522,7 +522,7 @@ type slowSummarizerKronk struct {
 func (s *slowSummarizerKronk) Chat(ctx context.Context, req model.D) (model.ChatResponse, error) {
 	if isCompactionRequest(req) {
 		time.Sleep(50 * time.Millisecond)
-		return chatResp("work summary", "", model.FinishReasonStop, nil, nil), nil
+		return chatResp(validHandoverSummary, "", model.FinishReasonStop, nil, nil), nil
 	}
 	return s.mockKronk.Chat(ctx, req)
 }

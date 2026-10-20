@@ -51,6 +51,10 @@ func TestShouldCompact(t *testing.T) {
 	}
 }
 
+func summaryWith(text string) string {
+	return "## Done\n- " + text + "\n\n## In progress\n- None.\n\n## Not started\n- None."
+}
+
 func TestCompactHandover(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -73,7 +77,7 @@ func TestCompactHandover(t *testing.T) {
 				{"role": "tool", "name": "vm_exec", "content": "out2"},
 			},
 			handles:     []HandleInfo{{ID: "oid-1", TotalLines: 10, TotalBytes: 100, Command: "cat big"}},
-			summary:     "did stuff",
+			summary:     summaryWith("did stuff"),
 			wantOutcome: "applied",
 			wantSystem:  "SYS-BYTES",
 			wantSubs:    []string{"## Task", "run ls", "did stuff", "oid-1", "after 0 compactions", "never invent one"},
@@ -82,14 +86,14 @@ func TestCompactHandover(t *testing.T) {
 			name:         "handles survive when the model omits them",
 			conversation: conv(8),
 			handles:      []HandleInfo{{ID: "must-survive", TotalLines: 5, TotalBytes: 50, Command: "ls"}},
-			summary:      "no handles mentioned",
+			summary:      summaryWith("no handles mentioned"),
 			wantOutcome:  "applied",
 			wantSubs:     []string{"must-survive"},
 		},
 		{
 			name:         "handover carries the compaction count",
 			conversation: conv(8),
-			summary:      "did stuff",
+			summary:      summaryWith("did stuff"),
 			applied:      3,
 			wantOutcome:  "applied",
 			wantSubs:     []string{"after 3 compactions", "do not call output_search or output_read"},
@@ -231,7 +235,8 @@ func TestSummaryBudgetCappedBySavings(t *testing.T) {
 		{"role": "tool", "name": "vm_exec", "content": strings.Repeat("b", 2000)},
 	}
 
-	sum := &countingSummarizer{summary: "Completed: listed files. Remaining: done."}
+	summary := summaryWith("Completed: listed files. Remaining: done.")
+	sum := &countingSummarizer{summary: summary}
 	est := func(s string) int { return len(s)/4 + 1 }
 	got, outcome, summaryLen := Compact(context.Background(), conversation, nil, 2048, 4000, Window{Size: 1 << 20}, sum, est, 2)
 	if outcome != "applied" {
@@ -243,7 +248,7 @@ func TestSummaryBudgetCappedBySavings(t *testing.T) {
 	if sum.maxTokens[0] >= 2048 {
 		t.Fatalf("budget must be capped below maxSummaryTokens 2048, got %d", sum.maxTokens[0])
 	}
-	if summaryLen != len("Completed: listed files. Remaining: done.") {
+	if summaryLen != len(summary) {
 		t.Fatalf("want summary bytes logged, got %d", summaryLen)
 	}
 	body, _ := got[1]["content"].(string)
@@ -452,5 +457,119 @@ func TestBuildUserMessageCarriesNoVerbatimTail(t *testing.T) {
 	got := BuildUserMessage("do things", "Done: x", nil, 1)
 	if strings.Contains(got, "## Recent activity") {
 		t.Fatalf("handover still carries a verbatim recent block: %q", got)
+	}
+}
+
+const validSummary = `## Done
+- Ran curl --version; observed curl 8.5.0 (x86_64-pc-linux-gnu).
+- GET https://example.com returned HTTP/2 200 with "Example Domain" in the body.
+
+## In progress
+- None.
+
+## Not started
+- None.`
+
+func TestCompactRejectsDegenerateSummary(t *testing.T) {
+	conversation := conv(8)
+	got, outcome, summaryLen := Compact(context.Background(), conversation, nil, 2048, 4000,
+		Window{Size: 1 << 20}, &fakeSummarizer{summary: "Done"}, nil, 0)
+	if outcome != "failed" {
+		t.Fatalf("want failed for a one-word summary, got %q", outcome)
+	}
+	if len(got) != len(conversation) {
+		t.Fatalf("degenerate summary must keep the original history, got %d messages", len(got))
+	}
+	if summaryLen != 0 {
+		t.Fatalf("rejected summary must not report bytes, got %d", summaryLen)
+	}
+}
+
+func TestCompactRejectsSummaryMissingSections(t *testing.T) {
+	tests := []struct {
+		name    string
+		summary string
+	}{
+		{"missing in progress and not started", "## Done\n- Ran curl --version and observed curl 8.5.0 with a long enough sentence."},
+		{"missing not started", "## Done\n- Ran curl --version and observed curl 8.5.0 with a long enough sentence.\n\n## In progress\n- None."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conversation := conv(8)
+			got, outcome, _ := Compact(context.Background(), conversation, nil, 2048, 4000,
+				Window{Size: 1 << 20}, &fakeSummarizer{summary: tt.summary}, nil, 0)
+			if outcome != "failed" {
+				t.Fatalf("want failed for an incomplete handover, got %q", outcome)
+			}
+			if len(got) != len(conversation) {
+				t.Fatalf("incomplete summary must keep the original history, got %d messages", len(got))
+			}
+		})
+	}
+}
+
+func TestCompactHandoverCarriesRecentCommandResults(t *testing.T) {
+	conversation := []model.D{
+		{"role": "system", "content": "sys"},
+		{"role": "user", "content": "Task:\nrun curl tests"},
+		{"role": "assistant", "content": "", "tool_calls": []model.D{{
+			"id": "c1",
+			"function": model.D{
+				"name": "vm_exec", "arguments": `{"command":"curl -sS -I https://example.com"}`,
+			},
+		}}},
+		{"role": "tool", "name": "vm_exec", "tool_call_id": "c1", "content": "HTTP/2 200"},
+	}
+	got, outcome, _ := Compact(context.Background(), conversation, nil, 2048, 4000,
+		Window{Size: 1 << 20}, &fakeSummarizer{summary: validSummary}, nil, 0)
+	if outcome != "applied" {
+		t.Fatalf("want applied, got %q", outcome)
+	}
+	body, _ := got[1]["content"].(string)
+	for _, want := range []string{"## Recent command results", "curl -sS -I https://example.com", "HTTP/2 200"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("handover missing %q in %q", want, body)
+		}
+	}
+}
+
+func TestCompactHandoverRecentResultsAreBounded(t *testing.T) {
+	big := strings.Repeat("z", 10000)
+	conversation := []model.D{
+		{"role": "system", "content": "sys"},
+		{"role": "user", "content": "Task:\nrun curl tests"},
+		{"role": "assistant", "content": "", "tool_calls": []model.D{{
+			"id": "c1",
+			"function": model.D{
+				"name": "vm_exec", "arguments": `{"command":"cat huge"}`,
+			},
+		}}},
+		{"role": "tool", "name": "vm_exec", "tool_call_id": "c1", "content": big},
+	}
+	got, outcome, _ := Compact(context.Background(), conversation, nil, 2048, 4000,
+		Window{Size: 1 << 20}, &fakeSummarizer{summary: validSummary}, nil, 0)
+	if outcome != "applied" {
+		t.Fatalf("want applied, got %q", outcome)
+	}
+	body, _ := got[1]["content"].(string)
+	if strings.Contains(body, big) {
+		t.Fatal("handover copied the entire tool result instead of a bounded excerpt")
+	}
+	if !strings.Contains(body, "…(truncated)") {
+		t.Fatalf("handover must show that the result was truncated: %q", body)
+	}
+	if len(body) > 4096 {
+		t.Fatalf("handover is %d bytes, want evidence and summary bounded", len(body))
+	}
+}
+
+func TestCompactionSystemPromptRequiresConcreteSections(t *testing.T) {
+	for _, want := range []string{
+		"## Done", "## In progress", "## Not started",
+		"observed result", "only a heading",
+	} {
+		if !strings.Contains(CompactionSystemPrompt, want) {
+			t.Errorf("CompactionSystemPrompt missing %q", want)
+		}
 	}
 }
