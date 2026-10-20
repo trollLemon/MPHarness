@@ -143,7 +143,7 @@ func (c *Client) Info(ctx context.Context, name string) (string, error) {
 		return "", fmt.Errorf("instance name is required")
 	}
 
-	ctx, span := getTracer().Start(ctx, "vm.info", trace.WithAttributes(
+	ctx, span := getTracer().Start(ctx, "vm.info", trace.WithAttributes( //nolint:ineffassign
 		attribute.String("mph.vm.name", name),
 	))
 	defer span.End()
@@ -621,6 +621,11 @@ func (c *Client) Transfer(ctx context.Context, vmName, hostPath, vmDest string) 
 				UID:  int64(identity.uid),
 				GID:  int64(identity.gid),
 			})
+		}
+
+		if !strings.HasPrefix(p, root) {
+			c.log.Warn().Str("path", p).Msg("path outside walk root")
+			return nil
 		}
 
 		file, err := os.Open(p)
