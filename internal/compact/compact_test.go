@@ -206,7 +206,7 @@ func TestPreCheckSkipsSummarizerWhenNothingToSave(t *testing.T) {
 }
 
 func TestCompactRepairsRejectedSummary(t *testing.T) {
-	sum := &sequenceSummarizer{summaries: []string{"Done", validSummary}}
+	sum := &sequenceSummarizer{summaries: []string{"too short", validSummary}}
 	_, outcome, _, err := Compact(context.Background(), conv(8), nil, 2048, 4000,
 		Window{Size: 1 << 20}, sum, nil, 0)
 	if err != nil {
@@ -221,7 +221,7 @@ func TestCompactRepairsRejectedSummary(t *testing.T) {
 	if !strings.Contains(sum.systems[1], "rejected") {
 		t.Errorf("repair system prompt must name the rejection: %q", sum.systems[1])
 	}
-	if !strings.Contains(sum.rendered[1], "Previous rejected handover") || !strings.Contains(sum.rendered[1], "Done") {
+	if !strings.Contains(sum.rendered[1], "Previous rejected handover") || !strings.Contains(sum.rendered[1], "too short") {
 		t.Errorf("repair history must carry the rejected summary: %q", sum.rendered[1])
 	}
 }
@@ -254,8 +254,8 @@ func TestCompactReportsFailureReason(t *testing.T) {
 		want string
 	}{
 		{
-			name: "invalid twice",
-			sum:  &sequenceSummarizer{summaries: []string{"Done", "Done"}},
+			name: "short twice",
+			sum:  &sequenceSummarizer{summaries: []string{"too short", "too short"}},
 			want: "summary rejected after repair",
 		},
 		{
@@ -535,9 +535,9 @@ func TestEstimateMessageCountsToolCalls(t *testing.T) {
 }
 
 func TestCompactionSystemPromptAsksForResumableState(t *testing.T) {
-	for _, want := range []string{"Done", "In progress", "Not started"} {
+	for _, want := range []string{"## Done", "## In progress", "## Not started", "even when a section is empty", "None.", "Before replying"} {
 		if !strings.Contains(CompactionSystemPrompt, want) {
-			t.Errorf("CompactionSystemPrompt missing %q section", want)
+			t.Errorf("CompactionSystemPrompt missing %q", want)
 		}
 	}
 }
@@ -570,9 +570,9 @@ const validSummary = `## Done
 func TestCompactRejectsDegenerateSummary(t *testing.T) {
 	conversation := conv(8)
 	got, outcome, summaryLen, _ := Compact(context.Background(), conversation, nil, 2048, 4000,
-		Window{Size: 1 << 20}, &fakeSummarizer{summary: "Done"}, nil, 0)
+		Window{Size: 1 << 20}, &fakeSummarizer{summary: "too short"}, nil, 0)
 	if outcome != "failed" {
-		t.Fatalf("want failed for a one-word summary, got %q", outcome)
+		t.Fatalf("want failed for a short summary, got %q", outcome)
 	}
 	if len(got) != len(conversation) {
 		t.Fatalf("degenerate summary must keep the original history, got %d messages", len(got))
@@ -582,26 +582,17 @@ func TestCompactRejectsDegenerateSummary(t *testing.T) {
 	}
 }
 
-func TestCompactRejectsSummaryMissingSections(t *testing.T) {
-	tests := []struct {
-		name    string
-		summary string
-	}{
-		{"missing in progress and not started", "## Done\n- Ran curl --version and observed curl 8.5.0 with a long enough sentence."},
-		{"missing not started", "## Done\n- Ran curl --version and observed curl 8.5.0 with a long enough sentence.\n\n## In progress\n- None."},
+func TestCompactAcceptsSummaryWithoutHeadings(t *testing.T) {
+	const summary = "Ran curl --version and observed curl 8.5.0. The download finished, but verification is still pending."
+	conversation := conv(8)
+	got, outcome, _, _ := Compact(context.Background(), conversation, nil, 2048, 4000,
+		Window{Size: 1 << 20}, &fakeSummarizer{summary: summary}, nil, 0)
+	if outcome != "applied" {
+		t.Fatalf("outcome %q, want applied", outcome)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			conversation := conv(8)
-			got, outcome, _, _ := Compact(context.Background(), conversation, nil, 2048, 4000,
-				Window{Size: 1 << 20}, &fakeSummarizer{summary: tt.summary}, nil, 0)
-			if outcome != "failed" {
-				t.Fatalf("want failed for an incomplete handover, got %q", outcome)
-			}
-			if len(got) != len(conversation) {
-				t.Fatalf("incomplete summary must keep the original history, got %d messages", len(got))
-			}
-		})
+	body, _ := got[1]["content"].(string)
+	if !strings.Contains(body, summary) {
+		t.Fatalf("handover lost the summary: %q", body)
 	}
 }
 

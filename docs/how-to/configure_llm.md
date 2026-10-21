@@ -105,7 +105,7 @@ compaction:
   max_attempts: 3
 ```
 
-Compaction retries an empty or malformed handover once with a corrective prompt. If it still fails, the conversation is left intact and the reason is logged on the `context_compaction` event.
+Compaction retries an empty or too-short handover once with a corrective prompt. If it still fails, the conversation is left intact and the reason is logged on the `context_compaction` event.
 
 ## Related
 

@@ -12,7 +12,7 @@ import (
 
 const CompactionSystemPrompt = `You are summarising an autonomous VM-operator agent's conversation so it can continue with a smaller context.
 
-Return a handover in exactly this structure, with all three headings present:
+Return a handover using exactly these three headings, in this order:
 
 ## Done
 - Every task or step attempted, whether it passed or failed.
@@ -20,14 +20,17 @@ Return a handover in exactly this structure, with all three headings present:
 - Keep any other facts the next turn needs, such as decisions made, assumptions, and blockers.
 
 ## In progress
-- Work that was started but not finished, and the exact point it stopped at. Write "None." if there is none.
+- Work that was started but not finished, and the exact point it stopped at.
 
 ## Not started
-- Work from the original task that has not been attempted yet. Write "None." if there is none.
+- Work from the original task that has not been attempted yet.
 
 Rules:
+- Every handover must include all three headings, even when a section is empty. Under an empty heading write "- None." instead of omitting the heading.
+- Never rename, merge, or reorder the headings. Use the exact text "## Done", "## In progress", and "## Not started".
+- Before replying, check that all three headings are present.
 - This summary is the only record of prior work. Anything you leave out cannot be recovered.
-- Do not reply with only a heading, a single word, or an empty section. A handover that says only "Done" is invalid.
+- Do not reply with only a heading, a single word, or an empty section.
 - Captured output handles are referenced by their output_id. Copy every output_id verbatim, character for character, and say what each one contains. Never invent, shorten, or reformat an id.
 - Do not invent results, and do not claim work succeeded that the log shows failing.
 - Summarize inlined command outputs so their result is articulated without including the whole payload.
@@ -322,12 +325,6 @@ func validateSummary(summary string) error {
 	if len(trimmed) < minSummaryBytes {
 		return fmt.Errorf("summary is %d bytes, want at least %d", len(trimmed), minSummaryBytes)
 	}
-	lower := strings.ToLower(trimmed)
-	for _, section := range []string{"done", "in progress", "not started"} {
-		if !strings.Contains(lower, section) {
-			return fmt.Errorf("summary is missing the %q section", section)
-		}
-	}
 	return nil
 }
 
@@ -438,7 +435,7 @@ func summaryRejection(err error, summary string) error {
 }
 
 func repairSummary(ctx context.Context, s Summarizer, conversation []model.D, budget, maxBytes, maxTokens int, previous string, reason error) (string, error) {
-	system := CompactionSystemPrompt + "\n\nYour previous handover was rejected: " + reason.Error() + " Return a corrected handover with all three headings."
+	system := CompactionSystemPrompt + "\n\nYour previous handover was rejected: " + reason.Error() + " Return a corrected handover with all three headings, using \"- None.\" under any empty section."
 	history := RenderHistory(conversation, budget, maxBytes, ToolResultFullText)
 	if previous = strings.TrimSpace(previous); previous != "" {
 		block := "\n\n## Previous rejected handover\n" + previous
