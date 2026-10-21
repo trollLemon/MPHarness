@@ -1,4 +1,4 @@
-package compact
+package agent
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"github.com/trollLemon/MPHarness/internal/textutil"
 )
 
-const CompactionSystemPrompt = `You are summarising an autonomous VM-operator agent's conversation so it can continue with a smaller context.
+const compactionSystemPrompt = `You are summarising an autonomous VM-operator agent's conversation so it can continue with a smaller context.
 
 Return a handover using exactly these three headings, in this order:
 
@@ -40,34 +40,30 @@ Rules:
 Make sure the handover is formatted clearly so an agent can continue without confusion.
 `
 
-const StandingInstructions = `Operate asynchronously without user interaction. Prior messages are your own execution logs. Stop immediately on any permission or policy denial without workarounds. Inspect every result's status field. Always finish with a tool-call-free completion summary.`
+const standingInstructions = `Operate asynchronously without user interaction. Prior messages are your own execution logs. Stop immediately on any permission or policy denial without workarounds. Inspect every result's status field. Always finish with a tool-call-free completion summary.`
 
-type Summarizer interface {
+type summarizer interface {
 	Summarize(ctx context.Context, systemPrompt, renderedHistory string, maxTokens int) (string, error)
 }
 
-type HandleInfo struct {
+type handleInfo struct {
 	ID         string
 	TotalLines int
 	TotalBytes int64
 	Command    string
 }
 
-// Window describes the context budget one compaction decision has to respect:
-// the live window, and the per-request cost outside the messages themselves
-// (tool schemas and template framing). FixedOverhead is measured, not derived,
-// so the guards and the reported figures share the basis kronk charged for.
-type Window struct {
+// compactionWindow describes the context budget one compaction decision has to
+// respect: the live window, and the per-request cost outside the messages
+// themselves (tool schemas and template framing).
+type compactionWindow struct {
 	Size          int
 	FixedOverhead int
 }
 
-// ShouldCompact reports whether token usage has reached threshold of the window.
-func ShouldCompact(contextTokens, window int64, threshold float64, numMessages, minMessages int) bool {
+// shouldCompact reports whether token usage has reached threshold of the window.
+func shouldCompact(contextTokens, window int64, threshold float64) bool {
 	if window <= 0 || contextTokens <= 0 {
-		return false
-	}
-	if numMessages < minMessages {
 		return false
 	}
 	return float64(contextTokens) >= threshold*float64(window)
@@ -78,20 +74,16 @@ func ShouldCompact(contextTokens, window int64, threshold float64, numMessages, 
 // len(messages)*budget and the summarizer prompt grows without limit.
 const totalBudgetFactor = 8
 
-// bytesPerToken inverts the estimator's tokens-per-byte assumption so a token
-// budget can be expressed as the byte allowance RenderHistory works in.
-const bytesPerToken = 4
-
 // summarizerHeadroomTokens covers what neither side of the window bound accounts
-// for: kronk's chat framing for the summarizer request, and the estimator's own
-// error. The summarizer prompt has to land inside the window, not on its edge.
+// for: kronk's chat framing for the summarizer request. The summarizer prompt
+// has to land inside the window, not on its edge.
 const summarizerHeadroomTokens = 64
 
-// RenderHistory creates a string containing the message history up to this point.
+// renderHistory creates a string containing the message history up to this point.
 // NOTE: messages are truncated to budget each, except tool results, which the
 // output store is responsible for keeping out of the conversation. The total is
 // capped at maxBytes so the render cannot outgrow the summarizer's window.
-func RenderHistory(conversation []model.D, budget, maxBytes int) string {
+func renderHistory(conversation []model.D, budget, maxBytes int) string {
 	var b strings.Builder
 	remaining := maxBytes
 	write := func(s string) {
@@ -147,54 +139,10 @@ func truncateHead(s string, n int) string {
 	return textutil.CutPrefix(s, n) + "…(truncated)"
 }
 
-// minSummaryBudgetTokens floors the adaptive summary budget.
-const minSummaryBudgetTokens = 64
-
-// estimateMessage approximates one message's token cost, including the
-// tool-call documents and reasoning replayed on later turns.
-func EstimateMessage(m model.D, estimate func(string) int) int {
-	n := 0
-	if c, _ := m["content"].(string); c != "" {
-		n += estimate(c)
-	}
-	if r, _ := m["reasoning_content"].(string); r != "" {
-		n += estimate(r)
-	}
-	tcs, _ := m["tool_calls"].([]model.D)
-	for _, tc := range tcs {
-		n += estimateToolCall(tc, estimate)
-	}
-	return n
-}
-
-func estimateToolCall(tc map[string]any, estimate func(string) int) int {
-	n := 0
-	if fn, ok := tc["function"].(model.D); ok {
-		if name, _ := fn["name"].(string); name != "" {
-			n += estimate(name)
-		}
-		if args, _ := fn["arguments"].(string); args != "" {
-			n += estimate(args)
-		}
-	}
-	if id, _ := tc["id"].(string); id != "" {
-		n += estimate(id)
-	}
-	return n
-}
-
-func EstimateConversation(conversation []model.D, estimate func(string) int) int {
-	n := 0
-	for _, m := range conversation {
-		n += EstimateMessage(m, estimate)
-	}
-	return n
-}
-
-func buildUserMessage(task, summary, recentResults string, handles []HandleInfo, compactionsApplied int) string {
+func buildUserMessage(task, summary, recentResults string, handles []handleInfo, compactionsApplied int) string {
 	var b strings.Builder
 	b.WriteString("## Task\n" + strings.TrimSpace(task) + "\n\n")
-	b.WriteString("## Standing instructions\n" + StandingInstructions + "\n\n")
+	b.WriteString("## Standing instructions\n" + standingInstructions + "\n\n")
 	if compactionsApplied == 1 {
 		b.WriteString("## Work completed so far (after 1 compaction)\n")
 	} else {
@@ -312,68 +260,43 @@ func taskText(conversation []model.D) string {
 // renderBudgetBytes derives the whole-render allowance from the same window the
 // agent runs in, so the summarizer request cannot overrun the context on its
 // own. Without a known window it falls back to the per-message budget.
-func renderBudgetBytes(win Window, budget int, estimate func(string) int) int {
-	if win.Size <= 0 || estimate == nil {
+func renderBudgetBytes(win compactionWindow, budget int) int {
+	if win.Size <= 0 {
 		return budget * totalBudgetFactor
 	}
-	avail := win.Size - win.FixedOverhead - estimate(CompactionSystemPrompt) - summarizerHeadroomTokens
+	avail := win.Size - win.FixedOverhead - len(compactionSystemPrompt)/bytesPerToken - summarizerHeadroomTokens
 	if avail <= 0 {
 		return 0
 	}
 	return avail * bytesPerToken
 }
 
-// ErrEmptySummary marks a summarizer reply that carried no content, so
+// errEmptySummary marks a summarizer reply that carried no content, so
 // compaction can retry it with a corrective prompt instead of treating it like
 // a transport failure.
-var ErrEmptySummary = errors.New("summary response contained no content")
+var errEmptySummary = errors.New("summary response contained no content")
 
-// Compact rewrites the conversation into a system message plus a summary, or
-// returns the original with skipped, reverted, failed, or applied. The third
-// return is the summary length in bytes (0 when no summary was produced). The
-// error explains a failed outcome and is nil otherwise.
-// A revert never counts against retry budgets: it means "not worth it yet",
-// and the next attempt with a longer history may win.
-func Compact(ctx context.Context, conversation []model.D, handles []HandleInfo, maxSummaryTokens, budget int, win Window, s Summarizer, estimate func(string) int, compactionsApplied int) ([]model.D, string, int, error) {
+// compactConversation rewrites the conversation into a system message plus a
+// summary, or returns the original with skipped or failed. The third return is
+// the summary length in bytes (0 when no summary was produced). The error
+// explains a failed outcome and is nil otherwise.
+func compactConversation(ctx context.Context, conversation []model.D, handles []handleInfo, maxSummaryTokens, budget int, win compactionWindow, s summarizer, compactionsApplied int) ([]model.D, string, int, error) {
 	if len(conversation) == 0 {
 		return conversation, "skipped", 0, nil
 	}
 	system := conversation[0]
 	task := taskText(conversation)
-	maxBytes := renderBudgetBytes(win, budget, estimate)
+	maxBytes := renderBudgetBytes(win, budget)
 	recentBudget := maxBytes / 4
 	if recentBudget > recentResultsMaxBytes {
 		recentBudget = recentResultsMaxBytes
 	}
 	recent := recentResults(conversation, recentBudget)
-	if estimate != nil {
-		before := EstimateConversation(conversation, estimate)
-		afterMin := EstimateMessage(system, estimate) + estimate(buildUserMessage(task, "", recent, handles, compactionsApplied))
-		if afterMin >= before {
-			return conversation, "reverted", 0, nil
-		}
-		if savings := before - afterMin; savings*9/10 < minSummaryBudgetTokens {
-			return conversation, "reverted", 0, nil
-		} else if maxSummaryTokens > savings*9/10 {
-			maxSummaryTokens = savings * 9 / 10
-		}
-	}
-	worthIt := func(summary string) bool {
-		if estimate == nil {
-			return true
-		}
-		before := EstimateConversation(conversation, estimate)
-		after := EstimateMessage(system, estimate) + estimate(buildUserMessage(task, summary, recent, handles, compactionsApplied))
-		return after*10 < before*9
-	}
 
-	rendered := RenderHistory(conversation, budget, maxBytes)
-	summary, err := s.Summarize(ctx, CompactionSystemPrompt, rendered, maxSummaryTokens)
-	if err != nil && !errors.Is(err, ErrEmptySummary) {
+	rendered := renderHistory(conversation, budget, maxBytes)
+	summary, err := s.Summarize(ctx, compactionSystemPrompt, rendered, maxSummaryTokens)
+	if err != nil && !errors.Is(err, errEmptySummary) {
 		return conversation, "failed", 0, fmt.Errorf("summarize: %w", err)
-	}
-	if !worthIt(summary) {
-		return conversation, "reverted", len(summary), nil
 	}
 	if reason := summaryRejection(err, summary); reason != nil {
 		summary, err = repairSummary(ctx, s, conversation, budget, maxBytes, maxSummaryTokens, summary, reason)
@@ -382,9 +305,6 @@ func Compact(ctx context.Context, conversation []model.D, handles []HandleInfo, 
 		}
 		if reason := summaryRejection(nil, summary); reason != nil {
 			return conversation, "failed", 0, fmt.Errorf("summary rejected after repair: %w", reason)
-		}
-		if !worthIt(summary) {
-			return conversation, "reverted", len(summary), nil
 		}
 	}
 	userMsg := model.D{"role": "user", "content": buildUserMessage(task, summary, recent, handles, compactionsApplied)}
@@ -401,13 +321,13 @@ func summaryRejection(err error, summary string) error {
 	return validateSummary(summary)
 }
 
-func repairSummary(ctx context.Context, s Summarizer, conversation []model.D, budget, maxBytes, maxTokens int, previous string, reason error) (string, error) {
-	system := CompactionSystemPrompt + "\n\nYour previous handover was rejected: " + reason.Error() + " Return a corrected handover with all three headings, using \"- None.\" under any empty section."
-	history := RenderHistory(conversation, budget, maxBytes)
+func repairSummary(ctx context.Context, s summarizer, conversation []model.D, budget, maxBytes, maxTokens int, previous string, reason error) (string, error) {
+	system := compactionSystemPrompt + "\n\nYour previous handover was rejected: " + reason.Error() + " Return a corrected handover with all three headings, using \"- None.\" under any empty section."
+	history := renderHistory(conversation, budget, maxBytes)
 	if previous = strings.TrimSpace(previous); previous != "" {
 		block := "\n\n## Previous rejected handover\n" + previous
 		if maxBytes > len(block) {
-			history = RenderHistory(conversation, budget, maxBytes-len(block)) + block
+			history = renderHistory(conversation, budget, maxBytes-len(block)) + block
 		}
 	}
 	return s.Summarize(ctx, system, history, maxTokens)

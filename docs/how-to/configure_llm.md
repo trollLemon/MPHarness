@@ -101,11 +101,10 @@ compaction:
   enabled: true
   threshold: 0.8           # fraction of the context window; validated to (0.5, 0.95]
   max_summary_tokens: 2048
-  min_messages: 6
   max_attempts: 3
 ```
 
-Compaction retries an empty or too-short handover once with a corrective prompt. If it still fails, the conversation is left intact and the reason is logged on the `context_compaction` event.
+Compaction runs when token usage reaches `threshold` of the context window. It retries an empty or too-short handover once with a corrective prompt. If it still fails, the conversation is left intact and the reason is logged on the `context_compaction` event.
 
 ## Related
 

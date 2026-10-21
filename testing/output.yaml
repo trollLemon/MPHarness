@@ -32,7 +32,6 @@ compaction:
   enabled: true
   threshold: 0.91
   max_summary_tokens: 2048
-  min_messages: 6
   max_attempts: 3
 prompt: |
   Inside the VM, do the following:

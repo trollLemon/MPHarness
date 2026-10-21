@@ -754,7 +754,7 @@ func TestParseOutputCompaction(t *testing.T) {
 				if !cfg.Compaction.Enabled || cfg.Compaction.Threshold != 0.8 || cfg.Compaction.MaxSummaryTokens != 2048 {
 					t.Errorf("compaction defaults: %+v", cfg.Compaction)
 				}
-				if cfg.Compaction.MinMessages != 6 || cfg.Compaction.MaxAttempts != 3 {
+				if cfg.Compaction.MaxAttempts != 3 {
 					t.Errorf("compaction defaults: %+v", cfg.Compaction)
 				}
 			},

@@ -123,7 +123,6 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "    enabled: true\n")
 	_, _ = fmt.Fprintf(w, "    threshold: 0.8      # fraction of context window, (0.5, 0.95]\n")
 	_, _ = fmt.Fprintf(w, "    max_summary_tokens: %d\n", config.DefaultCompactionMaxTokens)
-	_, _ = fmt.Fprintf(w, "    min_messages: %d\n", config.DefaultCompactionMinMessages)
 	_, _ = fmt.Fprintf(w, "    max_attempts: %d\n", config.DefaultCompactionMaxAttempts)
 	_, _ = fmt.Fprintf(w, "  secrets:              # optional, %%{NAME} placeholders in commands\n")
 	_, _ = fmt.Fprintf(w, "    source: env         # env|keyring\n")
