@@ -267,7 +267,7 @@ func (a *Agent) runIteration(ctx context.Context, cli *lxd.Client, conf config.C
 
 	heartbeatLog := iterLog.With().Str("run", a.runID).Int("iter", iter+1).Logger()
 	resp, chatDur, err := func() (model.ChatResponse, time.Duration, error) {
-		cancel := heartbeatWithCancel(heartbeatLog, "waiting for model response")
+		cancel := heartbeatWithCancel(heartbeatLog, "still generating")
 		defer cancel()
 		return a.chatWithOverflowRecovery(iterCtx, iter, iterLog)
 	}()
@@ -715,7 +715,7 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
 
 	heartbeatLog := a.log.With().Ctx(compCtx).Str("run", a.runID).Int("iter", a.iteration+1).Str("phase", "compaction").Logger()
 	newConv, outcome, summaryLen, compactErr := func() ([]model.D, string, int, error) {
-		cancel := heartbeatWithCancel(heartbeatLog, "compacting context")
+		cancel := heartbeatWithCancel(heartbeatLog, "still compacting")
 		defer cancel()
 		return compact.Compact(compCtx, a.conversation, infos, cc.MaxSummaryTokens, a.toolResultBudget, win, summarizer, estimate, a.compactionsApplied)
 	}()
