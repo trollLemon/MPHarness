@@ -35,7 +35,7 @@ func NewEnvResolver() *EnvResolver {
 	return &EnvResolver{cache: make(map[string]string)}
 }
 
-func (e *EnvResolver) Resolve(name string) (string, error) {
+func (e *EnvResolver) Lookup(name string) (string, error) {
 	if secret, ok := e.cache[name]; ok {
 		return secret, nil
 	}
@@ -45,10 +45,6 @@ func (e *EnvResolver) Resolve(name string) (string, error) {
 	}
 	e.cache[name] = secret
 	return secret, nil
-}
-
-func (e *EnvResolver) Lookup(name string) (string, error) {
-	return e.Resolve(name)
 }
 
 type KeyringResolver struct {
@@ -66,7 +62,7 @@ func NewKeyringResolver(service string) *KeyringResolver {
 	}
 }
 
-func (k *KeyringResolver) Resolve(name string) (string, error) {
+func (k *KeyringResolver) Lookup(name string) (string, error) {
 	if secret, ok := k.cache[name]; ok {
 		return secret, nil
 	}
@@ -82,10 +78,6 @@ func (k *KeyringResolver) Resolve(name string) (string, error) {
 	}
 	k.cache[name] = secret
 	return secret, nil
-}
-
-func (k *KeyringResolver) Lookup(name string) (string, error) {
-	return k.Resolve(name)
 }
 
 // Source identifies the secret source type.

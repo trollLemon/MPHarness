@@ -28,12 +28,10 @@ var (
 	errPromptRead        = errors.New("could not read answer")
 )
 
-func outputRunDirCommands(runID string) []string {
+func outputRunDirCommand(runID string) string {
 	// mkdir only: wiping the base dir here would delete live captures of
 	// concurrent runs sharing one VM.
-	return []string{
-		fmt.Sprintf("mkdir -p %q", config.OutputRunDir(runID)),
-	}
+	return fmt.Sprintf("mkdir -p %q", config.OutputRunDir(runID))
 }
 
 func promptExistingVM(r *bufio.Reader, w io.Writer, name string) error {
@@ -151,12 +149,10 @@ func Start(ctx context.Context, agt *agent.Agent, client *lxd.Client, cfg config
 	}
 
 	if rid := strings.TrimSpace(opts.RunID); rid != "" {
-		for _, cmd := range outputRunDirCommands(rid) {
-			if _, err := client.Exec(ctx, cfg.VM.Name, cmd, cfg.Truncation.ToolResult); err != nil {
-				err = fmt.Errorf("output run dir setup failed: %w", err)
-				mphotel.FailSpan(span, err)
-				return err
-			}
+		if _, err := client.Exec(ctx, cfg.VM.Name, outputRunDirCommand(rid), cfg.Truncation.ToolResult); err != nil {
+			err = fmt.Errorf("output run dir setup failed: %w", err)
+			mphotel.FailSpan(span, err)
+			return err
 		}
 		span.SetAttributes(attribute.String("mph.output.dir", config.OutputRunDir(rid)))
 	}

@@ -438,7 +438,7 @@ func TestBuildToolCallDocs(t *testing.T) {
 				LLM:           defaultLLMConfig(),
 				RunID:         "",
 			})
-			docs := a.buildToolCallDocsWithContext(context.Background(), tt.calls, 0)
+			docs := a.buildToolCallDocsWithContext(context.Background(), tt.calls, marshalToolCallArgs(tt.calls), 0)
 			if len(docs) != len(tt.wantIDs) {
 				t.Fatalf("docs len %d want %d", len(docs), len(tt.wantIDs))
 			}
@@ -1064,7 +1064,7 @@ func TestRunIterationCountsToolResultsInContext(t *testing.T) {
 		}
 		return "", nil
 	}}
-	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 1<<20, nil)
+	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 1<<20)
 	agt := NewAgent(zerolog.Nop(), mock, Options{
 		MaxIterations: 3,
 		ChatTimeout:   time.Second,

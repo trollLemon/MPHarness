@@ -2,17 +2,26 @@ package config
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/canonical/lxd/shared/validate"
-	"gopkg.in/yaml.v3"
+	"github.com/go-viper/mapstructure/v2"
+	"github.com/knadh/koanf/parsers/yaml"
+	"github.com/knadh/koanf/providers/basicflag"
+	koanfenv "github.com/knadh/koanf/providers/env/v2"
+	"github.com/knadh/koanf/providers/rawbytes"
+	"github.com/knadh/koanf/v2"
+
+	mphvalidation "github.com/trollLemon/MPHarness/internal/validation"
 )
 
 var (
@@ -157,14 +166,34 @@ func ImageRemote(image string) (remoteURL, alias string, err error) {
 // NormalizeSize converts a human size (20G, 4096M, 1GiB, 1073741824) into the
 // binary-unit form LXD accepts (20GiB, 4GiB, 1GiB).
 func NormalizeSize(size string) (string, error) {
+	bytes, err := parseSizeBytes(size, false)
+	if err != nil {
+		return "", err
+	}
+	for _, unit := range []struct {
+		suffix string
+		size   int64
+	}{{"TiB", 1 << 40}, {"GiB", 1 << 30}, {"MiB", 1 << 20}, {"KiB", 1 << 10}} {
+		if bytes%unit.size == 0 {
+			return strconv.FormatInt(bytes/unit.size, 10) + unit.suffix, nil
+		}
+	}
+	return strconv.FormatInt(bytes, 10), nil
+}
+
+// parseSizeBytes parses the one size syntax shared by VM sizing and output
+// caps. Units are binary: K and KB both mean 1024, matching the suffix LXD
+// expects. allowZero keeps an explicit 0 meaningful for caps that use it to
+// disable a limit.
+func parseSizeBytes(size string, allowZero bool) (int64, error) {
 	s := strings.TrimSpace(size)
 	i := 0
 	for i < len(s) && (s[i] >= '0' && s[i] <= '9' || s[i] == '.') {
 		i++
 	}
 	value, err := strconv.ParseFloat(s[:i], 64)
-	if i == 0 || err != nil || value <= 0 {
-		return "", fmt.Errorf("invalid size %q", size)
+	if i == 0 || err != nil || value < 0 || (!allowZero && value == 0) {
+		return 0, fmt.Errorf("invalid size %q", size)
 	}
 	var multiplier float64
 	switch strings.ToUpper(strings.TrimSpace(s[i:])) {
@@ -179,27 +208,19 @@ func NormalizeSize(size string) (string, error) {
 	case "T", "TB", "TIB":
 		multiplier = 1 << 40
 	default:
-		return "", fmt.Errorf("invalid size %q: supported units are K, M, G, T (optionally B or iB), or bytes", size)
+		return 0, fmt.Errorf("invalid size %q: supported units are K, M, G, T (optionally B or iB), or bytes", size)
 	}
 	if value > float64(math.MaxInt64)/multiplier {
-		return "", fmt.Errorf("invalid size %q: value overflows", size)
+		return 0, fmt.Errorf("invalid size %q: value overflows", size)
 	}
 	if multiplier == 1 && value != math.Trunc(value) {
-		return "", fmt.Errorf("invalid size %q: bytes must be a whole number", size)
+		return 0, fmt.Errorf("invalid size %q: bytes must be a whole number", size)
 	}
 	bytes := int64(value * multiplier)
-	if bytes <= 0 {
-		return "", fmt.Errorf("invalid size %q", size)
+	if bytes < 0 || (!allowZero && bytes == 0) {
+		return 0, fmt.Errorf("invalid size %q", size)
 	}
-	for _, unit := range []struct {
-		suffix string
-		size   int64
-	}{{"TiB", 1 << 40}, {"GiB", 1 << 30}, {"MiB", 1 << 20}, {"KiB", 1 << 10}} {
-		if bytes%unit.size == 0 {
-			return strconv.FormatInt(bytes/unit.size, 10) + unit.suffix, nil
-		}
-	}
-	return strconv.FormatInt(bytes, 10), nil
+	return bytes, nil
 }
 
 type LLMConfig struct {
@@ -209,6 +230,18 @@ type LLMConfig struct {
 	ToolChoice      string  `yaml:"tool_choice"`
 	ContextWindow   int     `yaml:"context_window"`
 	MaxOutputTokens int     `yaml:"max_output_tokens"`
+}
+
+// WithDefaults fills the LLM settings that have a fixed fallback. It is
+// idempotent, so each layer can apply it without duplicating the literals.
+func (l LLMConfig) WithDefaults() LLMConfig {
+	if l.ToolChoice == "" {
+		l.ToolChoice = "auto"
+	}
+	if l.MaxOutputTokens == 0 {
+		l.MaxOutputTokens = DefaultLLMMaxOutputTokens
+	}
+	return l
 }
 
 type AgentConfig struct {
@@ -243,29 +276,75 @@ type TruncationConfig struct {
 // Duration wraps time.Duration to support YAML string parsing like "60s", "10m".
 type Duration time.Duration
 
-func (d Duration) MarshalYAML() (any, error) { return time.Duration(d).String(), nil }
+var (
+	durationType = reflect.TypeOf(Duration(0))
+	sizeType     = reflect.TypeOf(Size(0))
+)
 
-func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
-	var i int64
-	if err := node.Decode(&i); err == nil {
-		*d = Duration(time.Duration(i) * time.Second)
-		return nil
+const (
+	maxDurationSeconds = int64(math.MaxInt64) / int64(time.Second)
+	minDurationSeconds = int64(math.MinInt64) / int64(time.Second)
+)
+
+func durationDecodeHook(_, to reflect.Type, data any) (any, error) {
+	if to != durationType {
+		return data, nil
 	}
-	var s string
-	if err := node.Decode(&s); err == nil {
-		dur, err := time.ParseDuration(s)
+	switch value := data.(type) {
+	case nil:
+		return Duration(0), nil
+	case string:
+		d, err := time.ParseDuration(value)
 		if err != nil {
-			return err
+			return nil, fmt.Errorf("invalid duration %q: %w", value, err)
 		}
-		*d = Duration(dur)
-		return nil
+		return Duration(d), nil
+	case int:
+		return durationFromSeconds(int64(value))
+	case int64:
+		return durationFromSeconds(value)
+	case uint64:
+		if value > uint64(maxDurationSeconds) {
+			return nil, fmt.Errorf("invalid duration %d seconds: out of range", value)
+		}
+		return Duration(time.Duration(value) * time.Second), nil
+	case float64:
+		if math.IsNaN(value) || math.IsInf(value, 0) || value < float64(minDurationSeconds) || value > float64(maxDurationSeconds) {
+			return nil, fmt.Errorf("invalid duration %v seconds", value)
+		}
+		return durationFromSeconds(int64(value))
+	default:
+		return nil, fmt.Errorf("invalid duration %v", data)
 	}
-	var td time.Duration
-	if err := node.Decode(&td); err == nil {
-		*d = Duration(td)
-		return nil
+}
+
+func durationFromSeconds(seconds int64) (Duration, error) {
+	if seconds < minDurationSeconds || seconds > maxDurationSeconds {
+		return 0, fmt.Errorf("invalid duration %d seconds: out of range", seconds)
 	}
-	return fmt.Errorf("invalid duration %q", node.Value)
+	return Duration(time.Duration(seconds) * time.Second), nil
+}
+
+func scalarDecodeHook(_, to reflect.Type, data any) (any, error) {
+	switch to.Kind() {
+	case reflect.String:
+		switch value := data.(type) {
+		case string:
+			return value, nil
+		case bool, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
+			return fmt.Sprint(value), nil
+		}
+	case reflect.Bool:
+		if value, ok := data.(string); ok {
+			switch strings.ToLower(strings.TrimSpace(value)) {
+			case "y", "yes", "on":
+				return true, nil
+			case "n", "no", "off":
+				return false, nil
+			}
+		}
+	}
+	return data, nil
 }
 
 type OtelConfig struct {
@@ -275,91 +354,31 @@ type OtelConfig struct {
 	ResourceAttributes map[string]string `yaml:"resource_attributes"`
 }
 
-// Size is a byte count that reads as "64MiB" in YAML, following the Duration
-// precedent. It accepts "64MiB", "512MiB", "1GiB", a bare integer as bytes,
-// and the empty string as zero. 0 means "derive" for inline_max_size and
-// "disabled" for the caps.
+// Size is a byte count written as a string in YAML. It accepts "64MiB",
+// "512MiB", "1GiB", a bare byte count such as "1024", and the empty string
+// as zero. 0 means "derive" for inline_max_size and "disabled" for the caps.
 type Size int64
 
-func (s Size) MarshalYAML() (any, error) { return int64(s), nil }
-
-func (s *Size) UnmarshalYAML(node *yaml.Node) error {
-	var i int64
-	if err := node.Decode(&i); err == nil {
-		if i < 0 {
-			return fmt.Errorf("invalid size %d: must be >= 0", i)
-		}
-		*s = Size(i)
-		return nil
+func sizeDecodeHook(_, to reflect.Type, data any) (any, error) {
+	if to != sizeType {
+		return data, nil
 	}
-	var str string
-	if err := node.Decode(&str); err != nil {
-		return fmt.Errorf("invalid size %q", node.Value)
+	value, ok := data.(string)
+	if !ok {
+		return nil, fmt.Errorf("size must be a string like %q or %q, got %T", "64MiB", "1024", data)
 	}
-	str = strings.TrimSpace(str)
-	if str == "" {
-		*s = 0
-		return nil
+	n, err := parseSize(value)
+	if err != nil {
+		return nil, err
 	}
-	if v, err := parseSize(str); err == nil {
-		*s = Size(v)
-		return nil
-	} else {
-		return err
-	}
+	return Size(n), nil
 }
 
 func parseSize(s string) (int64, error) {
-	t := strings.TrimSpace(s)
-	if t == "" {
+	if strings.TrimSpace(s) == "" {
 		return 0, nil
 	}
-	i := 0
-	for i < len(t) && ((t[i] >= '0' && t[i] <= '9') || t[i] == '.') {
-		i++
-	}
-	if i == 0 {
-		return 0, fmt.Errorf("invalid size %q", s)
-	}
-	numStr := t[:i]
-	sufStr := strings.ToUpper(strings.TrimSpace(t[i:]))
-	var mult int64
-	switch sufStr {
-	case "", "B":
-		mult = 1
-	case "K", "KIB":
-		mult = 1024
-	case "KB":
-		mult = 1000
-	case "M", "MIB":
-		mult = 1024 * 1024
-	case "MB":
-		mult = 1000 * 1000
-	case "G", "GIB":
-		mult = 1024 * 1024 * 1024
-	case "GB":
-		mult = 1000 * 1000 * 1000
-	default:
-		return 0, fmt.Errorf("invalid size %q", s)
-	}
-	if strings.Contains(numStr, ".") {
-		var f float64
-		if _, err := fmt.Sscanf(numStr, "%f", &f); err != nil {
-			return 0, fmt.Errorf("invalid size %q", s)
-		}
-		if f < 0 {
-			return 0, fmt.Errorf("invalid size %q: must be >= 0", s)
-		}
-		return int64(f * float64(mult)), nil
-	}
-	var n int64
-	if _, err := fmt.Sscanf(numStr, "%d", &n); err != nil {
-		return 0, fmt.Errorf("invalid size %q", s)
-	}
-	if n < 0 {
-		return 0, fmt.Errorf("invalid size %q: must be >= 0", s)
-	}
-	return n * mult, nil
+	return parseSizeBytes(s, true)
 }
 
 type OutputConfig struct {
@@ -381,7 +400,7 @@ func (o OutputConfig) Validate() error {
 	if o.SearchMaxMatches < 0 {
 		return fmt.Errorf("output.search_max_matches must be >= 0, got %d", o.SearchMaxMatches)
 	}
-	if int64(o.InlineMaxSize) < 0 || int64(o.MaxCommandSize) < 0 || int64(o.MaxTotalSize) < 0 {
+	if o.InlineMaxSize < 0 || o.MaxCommandSize < 0 || o.MaxTotalSize < 0 {
 		return fmt.Errorf("output sizes must be >= 0")
 	}
 	return nil
@@ -497,36 +516,10 @@ func (c Config) Validate() error {
 		return err
 	}
 	if strings.TrimSpace(c.ContentDir) != "" {
-		cleaned := filepath.Clean(strings.TrimSpace(c.ContentDir))
-		info, err := os.Stat(cleaned)
-		if err != nil {
-			return fmt.Errorf("content_dir %q: %w", cleaned, err)
-		}
-		if !info.IsDir() {
-			return fmt.Errorf("content_dir %q is not a directory", cleaned)
+		if _, err := mphvalidation.ContentDirPath(c.ContentDir); err != nil {
+			return err
 		}
 	}
-	return nil
-}
-
-// plainConfig strips Config's methods so decoding into it does not re-enter
-// Config.UnmarshalYAML. Config.AllowedCommands is tagged `yaml:"-"`, so
-// inlining this does not collide with configRaw's own allowed_commands field.
-type plainConfig Config
-
-type configRaw struct {
-	plainConfig     `yaml:",inline"`
-	AllowedCommands []string `yaml:"allowed_commands"`
-}
-
-func (c *Config) UnmarshalYAML(node *yaml.Node) error {
-	var raw configRaw
-	if err := node.Decode(&raw); err != nil {
-		return err
-	}
-	*c = Config(raw.plainConfig)
-	c.AllowedCommands = normalizeAllowedCommands(raw.AllowedCommands)
-	c.ContentDir = strings.TrimSpace(c.ContentDir)
 	return nil
 }
 
@@ -567,39 +560,157 @@ func normalizeAllowedCommands(cmds []string) map[string]bool {
 	return set
 }
 
-func LoadFile(path string) (Config, error) {
+// Sources are the non-file configuration layers applied after YAML.
+type Sources struct {
+	Environ []string
+	Flags   *flag.FlagSet
+}
+
+func LoadFileWithSources(path string, sources Sources) (Config, error) {
 	cleanPath := filepath.Clean(path)
 	data, err := os.ReadFile(cleanPath)
 	if err != nil {
-		return Config{}, fmt.Errorf("read config %q: %w", cleanPath, err)
+		return Config{}, fmt.Errorf("could not read config %q: %w", cleanPath, err)
 	}
-	return Parse(data)
+	return load(data, sources)
+}
+
+func LoadFile(path string) (Config, error) {
+	return LoadFileWithSources(path, Sources{})
 }
 
 func Parse(data []byte) (Config, error) {
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return Config{}, fmt.Errorf("parse yaml: %w", err)
-	}
-	var probe struct {
-		Output     map[string]yaml.Node `yaml:"output"`
-		Compaction map[string]yaml.Node `yaml:"compaction"`
-	}
-	_ = yaml.Unmarshal(data, &probe)
-	hasOutput := probe.Output != nil
-	hasCompaction := probe.Compaction != nil
+	return load(data, Sources{})
+}
 
+func load(data []byte, sources Sources) (Config, error) {
+	k := koanf.New(".")
+	if err := k.Load(rawbytes.Provider(data), yaml.Parser()); err != nil {
+		return Config{}, fmt.Errorf("could not parse config YAML: %w", err)
+	}
+	if len(sources.Environ) > 0 {
+		if err := validateEnv(sources.Environ); err != nil {
+			return Config{}, fmt.Errorf("invalid environment configuration: %w", err)
+		}
+		err := k.Load(koanfenv.Provider(".", koanfenv.Opt{
+			EnvironFunc:   func() []string { return sources.Environ },
+			TransformFunc: transformEnv,
+		}), nil)
+		if err != nil {
+			return Config{}, fmt.Errorf("could not apply environment overrides: %w", err)
+		}
+	}
+	if sources.Flags != nil {
+		provider := basicflag.ProviderWithValue(sources.Flags, ".", transformFlag, k)
+		if err := k.Load(provider, nil); err != nil {
+			return Config{}, fmt.Errorf("could not apply command-line overrides: %w", err)
+		}
+	}
+
+	var cfg Config
+	if err := k.UnmarshalWithConf("", &cfg, unmarshalConf()); err != nil {
+		return Config{}, fmt.Errorf("could not decode configuration: %w", err)
+	}
+	var allowed []string
+	if k.Exists("allowed_commands") {
+		if err := k.UnmarshalWithConf("allowed_commands", &allowed, unmarshalConf()); err != nil {
+			return Config{}, fmt.Errorf("could not decode allowed_commands: %w", err)
+		}
+	}
+	cfg.AllowedCommands = normalizeAllowedCommands(allowed)
+	cfg.ContentDir = strings.TrimSpace(cfg.ContentDir)
+
+	applyDefaults(k, &cfg)
+
+	if err := cfg.Validate(); err != nil {
+		return Config{}, fmt.Errorf("invalid configuration: %w", err)
+	}
+	if cfg.ContentDir != "" {
+		cfg.ContentDir = filepath.Clean(cfg.ContentDir)
+	}
+
+	return cfg, nil
+}
+
+func unmarshalConf() koanf.UnmarshalConf {
+	return koanf.UnmarshalConf{
+		Tag: "yaml",
+		DecoderConfig: &mapstructure.DecoderConfig{
+			DecodeHook: mapstructure.ComposeDecodeHookFunc(durationDecodeHook, sizeDecodeHook, scalarDecodeHook),
+		},
+	}
+}
+
+func transformEnv(key, value string) (string, any) {
+	switch key {
+	case "MPH_RUN_NAME":
+		if value = strings.TrimSpace(value); value != "" {
+			return "run.name", value
+		}
+	case "MPH_OTEL":
+		if enabled, err := parseEnvBool(value); err == nil {
+			return "otel.enabled", enabled
+		}
+	case "OTEL_EXPORTER_OTLP_ENDPOINT":
+		if value = strings.TrimSpace(value); value != "" {
+			return "otel.endpoint", value
+		}
+	case "OTEL_SERVICE_NAME":
+		if value = strings.TrimSpace(value); value != "" {
+			return "otel.service_name", value
+		}
+	}
+	return "", nil
+}
+
+func validateEnv(environ []string) error {
+	for _, entry := range environ {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || key != "MPH_OTEL" {
+			continue
+		}
+		if _, err := parseEnvBool(value); err != nil {
+			return fmt.Errorf("MPH_OTEL: %w", err)
+		}
+	}
+	return nil
+}
+
+func parseEnvBool(value string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("must be \"true\" or \"false\", got %q", value)
+	}
+}
+
+func transformFlag(key, value string) (string, any) {
+	if key != "otel" {
+		return "", nil
+	}
+	if value == "" {
+		// basicflag probes explicitly set flags with an empty value.
+		return "otel.enabled", nil
+	}
+	enabled, err := strconv.ParseBool(value)
+	if err != nil {
+		return "", nil
+	}
+	return "otel.enabled", enabled
+}
+
+func applyDefaults(k *koanf.Koanf, cfg *Config) {
 	if cfg.VM.Name == "" {
 		cfg.VM.Name = "mph-vm"
 	}
 
-	// Otel endpoint and service name are resolved later, in
-	// mph.resolveOtelConfig, which layers the environment over the YAML.
-	// Defaulting them here would make that resolution order impossible to read.
+	// Otel endpoint and service name are defaulted later, in
+	// mph.resolveOtelConfig.
 
-	if cfg.LLM.ToolChoice == "" {
-		cfg.LLM.ToolChoice = "auto"
-	}
+	cfg.LLM = cfg.LLM.WithDefaults()
 	if cfg.Agent.MaxIterations == 0 {
 		cfg.Agent.MaxIterations = DefaultMaxIterations
 	}
@@ -608,9 +719,6 @@ func Parse(data []byte) (Config, error) {
 	}
 	if time.Duration(cfg.Agent.TotalTimeout) == 0 {
 		cfg.Agent.TotalTimeout = Duration(DefaultTotalTimeout)
-	}
-	if cfg.LLM.MaxOutputTokens == 0 {
-		cfg.LLM.MaxOutputTokens = DefaultLLMMaxOutputTokens
 	}
 	// Agent.MaxOutputBytes is deliberately left at 0 when unset. The agent reads
 	// that as "derive a cap from the live context window"; defaulting it here
@@ -630,7 +738,7 @@ func Parse(data []byte) (Config, error) {
 		cfg.Truncation.Nudge = DefaultNudgeBytes
 	}
 
-	if !hasOutput {
+	if !k.Exists("output") {
 		cfg.Output = OutputConfig{
 			Enabled: true, Mode: "auto",
 			MaxCommandSize: DefaultOutputMaxCommandBytes, MaxTotalSize: DefaultOutputMaxTotalBytes,
@@ -639,38 +747,32 @@ func Parse(data []byte) (Config, error) {
 	} else {
 		// A present block without `enabled:` opts in; only an explicit
 		// `enabled: false` opts out.
-		if _, ok := probe.Output["enabled"]; !ok {
+		if !k.Exists("output.enabled") {
 			cfg.Output.Enabled = true
 		}
 		if cfg.Output.Mode == "" {
 			cfg.Output.Mode = "auto"
 		}
-		if int64(cfg.Output.MaxCommandSize) == 0 {
-			if _, ok := probe.Output["max_command_size"]; !ok {
-				cfg.Output.MaxCommandSize = DefaultOutputMaxCommandBytes
-			}
+		if cfg.Output.MaxCommandSize == 0 && !k.Exists("output.max_command_size") {
+			cfg.Output.MaxCommandSize = DefaultOutputMaxCommandBytes
 		}
-		if int64(cfg.Output.MaxTotalSize) == 0 {
-			if _, ok := probe.Output["max_total_size"]; !ok {
-				cfg.Output.MaxTotalSize = DefaultOutputMaxTotalBytes
-			}
+		if cfg.Output.MaxTotalSize == 0 && !k.Exists("output.max_total_size") {
+			cfg.Output.MaxTotalSize = DefaultOutputMaxTotalBytes
 		}
 		// An explicit 0 disables the cap, so only default an absent key.
-		if cfg.Output.SearchMaxMatches == 0 {
-			if _, ok := probe.Output["search_max_matches"]; !ok {
-				cfg.Output.SearchMaxMatches = DefaultOutputSearchMatches
-			}
+		if cfg.Output.SearchMaxMatches == 0 && !k.Exists("output.search_max_matches") {
+			cfg.Output.SearchMaxMatches = DefaultOutputSearchMatches
 		}
 	}
 
-	if !hasCompaction {
+	if !k.Exists("compaction") {
 		cfg.Compaction = CompactionConfig{
 			Enabled: true, Threshold: DefaultCompactionThreshold,
 			MaxSummaryTokens: DefaultCompactionMaxTokens,
 			MinMessages:      DefaultCompactionMinMessages, MaxAttempts: DefaultCompactionMaxAttempts,
 		}
 	} else {
-		if _, ok := probe.Compaction["enabled"]; !ok {
+		if !k.Exists("compaction.enabled") {
 			cfg.Compaction.Enabled = true
 		}
 		if cfg.Compaction.Threshold == 0 {
@@ -686,14 +788,4 @@ func Parse(data []byte) (Config, error) {
 			cfg.Compaction.MaxAttempts = DefaultCompactionMaxAttempts
 		}
 	}
-
-	if strings.TrimSpace(cfg.ContentDir) != "" {
-		cfg.ContentDir = filepath.Clean(strings.TrimSpace(cfg.ContentDir))
-	}
-
-	if err := cfg.Validate(); err != nil {
-		return Config{}, fmt.Errorf("validate: %w", err)
-	}
-
-	return cfg, nil
 }

@@ -14,7 +14,19 @@ func Truncate(s string, n int) string {
 	if n <= 0 || len(s) <= n {
 		return s
 	}
-	return fmt.Sprintf("%s…(truncated, %d of %d bytes)", trimPartialRuneTail(s[:n]), n, len(s))
+	return fmt.Sprintf("%s…(truncated, %d of %d bytes)", CutPrefix(s, n), n, len(s))
+}
+
+// CutPrefix returns the first n bytes of s, backed off to the nearest rune
+// boundary so the result is always valid UTF-8.
+func CutPrefix(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if n >= len(s) {
+		return s
+	}
+	return trimPartialRuneTail(s[:n])
 }
 
 func trimPartialRuneTail(s string) string {

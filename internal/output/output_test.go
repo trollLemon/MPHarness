@@ -73,7 +73,7 @@ func TestSearchFixedStringSkipsValidation(t *testing.T) {
 		}
 		return "", nil
 	}}
-	s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096, nil)
+	s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096)
 	s.handles["abc"] = Handle{ID: "abc", Path: "/tmp/x/output.txt", TotalLines: 10}
 
 	tests := []struct {
@@ -252,7 +252,7 @@ func TestCapture(t *testing.T) {
 			}
 			s := NewStore(&fakeExec{fn: func(name, cmd string) (string, error) {
 				return tt.respond(cmd)
-			}}, "vm", "/tmp/mph-output/run1", cfg, 4096, nil)
+			}}, "vm", "/tmp/mph-output/run1", cfg, 4096)
 
 			res, err := s.Capture(ctx, tt.command, tt.force)
 			if tt.wantErrSub != "" {
@@ -353,7 +353,7 @@ func TestSearchExitMapping(t *testing.T) {
 				}
 				return "", nil
 			}}
-			s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096, nil)
+			s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096)
 			s.handles["abc"] = Handle{ID: "abc", Path: "/tmp/x/output.txt", TotalLines: 2000000}
 
 			res, err := s.Search(context.Background(), SearchArgs{OutputID: tt.outputID, Pattern: "hit"})
@@ -376,40 +376,6 @@ func TestSearchExitMapping(t *testing.T) {
 	}
 }
 
-func TestCaptureTrimsAndRejectsBlankCommand(t *testing.T) {
-	t.Run("trims", func(t *testing.T) {
-		var gotCmd string
-		f := &fakeExec{fn: func(name, cmd string) (string, error) {
-			gotCmd = cmd
-			return "hi", nil
-		}}
-		s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096, nil)
-
-		res, err := s.Capture(context.Background(), "  echo hi  ", false)
-		if err != nil {
-			t.Fatalf("Capture: %v", err)
-		}
-		if res.Inline != "hi" {
-			t.Fatalf("inline %q want %q", res.Inline, "hi")
-		}
-		if gotCmd != "echo hi" {
-			t.Fatalf("command must be trimmed before exec, got %q", gotCmd)
-		}
-	})
-
-	t.Run("blank is an error", func(t *testing.T) {
-		f := &fakeExec{fn: func(name, cmd string) (string, error) {
-			t.Fatalf("a blank command must not reach the VM: %q", cmd)
-			return "", nil
-		}}
-		s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096, nil)
-
-		if _, err := s.Capture(context.Background(), "   ", true); err == nil {
-			t.Fatal("blank command must be rejected")
-		}
-	})
-}
-
 func TestCapturePaths(t *testing.T) {
 	subdir, raw := capturePaths("/tmp/mph-output/run1", "oid")
 	if subdir != "/tmp/mph-output/run1/raw-oid" || raw != "/tmp/mph-output/run1/raw-oid/output.txt" {
@@ -430,7 +396,7 @@ func TestRunRedirectMissingMarkerIsAnError(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := &fakeExec{fn: func(name, cmd string) (string, error) { return tt.execOut, tt.execErr }}
-			s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096, nil)
+			s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096)
 			_, err := s.runRedirect(context.Background(), "echo hi", "/tmp/raw/output.txt", "__MPH_EXIT_abc:")
 			if err == nil {
 				t.Fatal("a missing marker must not report success")
@@ -446,7 +412,7 @@ func TestRunRedirectMarkerWinsOverExecError(t *testing.T) {
 	f := &fakeExec{fn: func(name, cmd string) (string, error) {
 		return echoMarker(cmd, "7"), errors.New("wrapper complained")
 	}}
-	s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096, nil)
+	s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096)
 	exit, err := s.runRedirect(context.Background(), "echo hi", "/tmp/raw/output.txt", "__MPH_EXIT_abc:")
 	if err != nil {
 		t.Fatalf("the marker is authoritative: %v", err)
@@ -475,7 +441,7 @@ func TestCaptureFailsWhenLineCountUnparseable(t *testing.T) {
 	}}
 	cfg := testCfg()
 	cfg.Mode = "always"
-	s := NewStore(f, "vm", "/tmp/mph-output/run1", cfg, 4096, nil)
+	s := NewStore(f, "vm", "/tmp/mph-output/run1", cfg, 4096)
 
 	res, err := s.Capture(context.Background(), "echo hi", false)
 	if err == nil {
@@ -523,7 +489,7 @@ func TestCaptureTimeoutKeepsPartialOutput(t *testing.T) {
 		}
 		return "", nil
 	}}
-	s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096, nil)
+	s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096)
 	res, err := s.Capture(ctx, "sleep 99", true)
 	if err != nil {
 		t.Fatalf("a timed-out command must still return its partial capture: %v", err)
@@ -560,7 +526,7 @@ func TestCaptureBoundsTheWrite(t *testing.T) {
 	}}
 	cfg := testCfg()
 	cfg.MaxCommandSize = 4096
-	s := NewStore(f, "vm", "/tmp/mph-output/run1", cfg, 4096, nil)
+	s := NewStore(f, "vm", "/tmp/mph-output/run1", cfg, 4096)
 	if _, err := s.Capture(context.Background(), "yes RUNAWAY", true); err != nil {
 		t.Fatalf("capture: %v", err)
 	}
@@ -596,7 +562,7 @@ func TestSearchTotalMatchesIsARealCount(t *testing.T) {
 				}
 				return tt.execOut, nil
 			}}
-			s := NewStore(f, "vm", "/tmp/mph-output/run1", cfg, 4096, nil)
+			s := NewStore(f, "vm", "/tmp/mph-output/run1", cfg, 4096)
 			s.handles["abc"] = Handle{ID: "abc", Path: "/tmp/raw/output.txt", TotalLines: 10}
 			res, err := s.Search(context.Background(), SearchArgs{OutputID: "abc", Pattern: "a"})
 			if err != nil {
@@ -654,7 +620,7 @@ func TestSearchGrepsTheRawCaptureFile(t *testing.T) {
 		gotCmd = cmd
 		return "7:hit\n__MPH_GREP_EXIT_abc:0", nil
 	}}
-	s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096, nil)
+	s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096)
 	s.handles["abc"] = Handle{ID: "abc", Path: "/tmp/mph-output/run1/raw-abc/output.txt", TotalLines: 7}
 
 	res, err := s.Search(context.Background(), SearchArgs{OutputID: "abc", Pattern: "hit"})
@@ -708,7 +674,7 @@ func TestSearchEmptyCapture(t *testing.T) {
 				}
 				return "", nil
 			}}
-			s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096, nil)
+			s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096)
 			s.handles[tt.handle.ID] = tt.handle
 
 			res, err := s.Search(context.Background(), SearchArgs{OutputID: "abc", Pattern: "hit"})
@@ -739,7 +705,7 @@ func TestSearchTruncatesAtTheHeadBound(t *testing.T) {
 		}
 		return b.String(), nil
 	}}
-	s := NewStore(f, "vm", "/tmp/mph-output/run1", cfg, 4096, nil)
+	s := NewStore(f, "vm", "/tmp/mph-output/run1", cfg, 4096)
 	s.handles["abc"] = Handle{ID: "abc", Path: "/tmp/x/output.txt", TotalLines: 5}
 
 	res, err := s.Search(context.Background(), SearchArgs{OutputID: "abc", Pattern: "hit"})
@@ -1027,7 +993,7 @@ func TestStoreRead(t *testing.T) {
 				}
 				return tt.execOut, nil
 			}}
-			s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096, nil)
+			s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096)
 			for id, h := range tt.seed {
 				s.handles[id] = h
 			}

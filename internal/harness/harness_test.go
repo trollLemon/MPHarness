@@ -8,18 +8,13 @@ import (
 	"testing"
 )
 
-func TestOutputRunDirCommands(t *testing.T) {
-	cmds := outputRunDirCommands("run-123")
-	if len(cmds) != 1 {
-		t.Fatalf("want 1 cmd, got %v", cmds)
+func TestOutputRunDirCommand(t *testing.T) {
+	cmd := outputRunDirCommand("run-123")
+	if strings.Contains(cmd, "rm ") {
+		t.Fatalf("setup must not delete other runs' captures: %q", cmd)
 	}
-	for _, c := range cmds {
-		if strings.Contains(c, "rm ") {
-			t.Fatalf("setup must not delete other runs' captures: %q", c)
-		}
-		if !strings.Contains(c, "run-123") {
-			t.Fatalf("setup must target this run, got %q", c)
-		}
+	if !strings.Contains(cmd, "run-123") {
+		t.Fatalf("setup must target this run, got %q", cmd)
 	}
 }
 

@@ -52,7 +52,7 @@ func (a *Agent) logRunSummary(ctx context.Context, outcome runOutcome, elapsed t
 	}
 	fields := map[string]any{
 		"event":             eventRunSummary,
-		"outcome":           string(outcome),
+		"outcome":           outcome,
 		"iterations":        a.totals.Iterations,
 		"compactions":       a.compactionsApplied,
 		"dur_ms":            elapsed.Milliseconds(),

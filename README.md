@@ -6,7 +6,7 @@ You describe a task, an LLM, and a VM in a single YAML file. `mph` (Multi-Purpos
 
 ## How it works
 
-1. **Config load**: YAML is parsed, validated, and defaulted (`mph-vm`, `max_iterations: 10`, timeouts, …).
+1. **Config load**: YAML, environment, and flags are merged, validated, and defaulted (`mph-vm`, `max_iterations: 10`, timeouts, …).
 2. **Model init**: llama.cpp runtimes + model (e.g. `unsloth/Qwen3-0.6B-Q8_0`) are downloaded once and cached, then loaded locally.
 3. **VM lifecycle**: the named LXD VM is launched (or reused with `-i`), optional `content_dir` is copied to `/home/ubuntu/content`.
 4. **Agent loop**: the LLM reasons, calls tools, reads results, and repeats until it answers with a final summary or hits `max_iterations`.
@@ -128,7 +128,7 @@ mph [flags] <config.yaml>
   -k                    keep the VM after the task instead of deleting it
   -v, --verbose         debug logging
   --pretty              human-readable console logs instead of JSON
-  --otel                enable OpenTelemetry tracing (also MPH_OTEL=true)
+  --otel                enable OpenTelemetry tracing; --otel=false disables (also MPH_OTEL, YAML otel.enabled)
   --version             print version and exit
   -h, --help            show help
 ```

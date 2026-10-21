@@ -375,7 +375,7 @@ func TestExecuteToolCallsRejectsOversizedVMCExecOutput(t *testing.T) {
 				}
 			})
 			if tt.captures {
-				agt.store = output.NewStore(cli, cfg.VM.Name, "/tmp/mph-output/run-reject", cfg.Output, int64(agt.toolResultBudget), nil)
+				agt.store = output.NewStore(cli, cfg.VM.Name, "/tmp/mph-output/run-reject", cfg.Output, int64(agt.toolResultBudget))
 			}
 
 			calls := []model.ResponseToolCall{{

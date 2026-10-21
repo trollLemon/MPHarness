@@ -190,10 +190,9 @@ func (c *Client) EnsureRunning(ctx context.Context, name string) error {
 	if err != nil {
 		return fmt.Errorf("start VM %q: %w", name, err)
 	}
-	if err := op.WaitContext(ctx); err != nil {
+	if err := waitOperationContext(ctx, op); err != nil {
 		if ctx.Err() != nil {
-			_ = op.Cancel()
-			return ctx.Err()
+			return err
 		}
 		return fmt.Errorf("start VM %q: %w", name, err)
 	}
@@ -325,13 +324,11 @@ func (c *Client) Delete(ctx context.Context, name string, purge bool) error {
 		mphotel.FailSpan(span, err)
 		return fmt.Errorf("vm delete %q failed: %w", name, err)
 	}
-	if err := op.WaitContext(ctx); err != nil {
-		if ctx.Err() != nil {
-			_ = op.Cancel()
-			mphotel.FailSpan(span, err)
-			return ctx.Err()
-		}
+	if err := waitOperationContext(ctx, op); err != nil {
 		mphotel.FailSpan(span, err)
+		if ctx.Err() != nil {
+			return err
+		}
 		return fmt.Errorf("vm delete %q failed: %w", name, err)
 	}
 
@@ -415,10 +412,9 @@ func (c *Client) run(ctx context.Context, name, command string, identity vmIdent
 	if err != nil {
 		return "", 0, fmt.Errorf("%w: %s", errExecTransport, c.redactor.Scrub(err.Error()))
 	}
-	if err := op.WaitContext(ctx); err != nil {
+	if err := waitOperationContext(ctx, op); err != nil {
 		if ctx.Err() != nil {
-			_ = op.Cancel()
-			return "", 0, ctx.Err()
+			return "", 0, err
 		}
 		return "", 0, fmt.Errorf("%w: %s", errExecTransport, c.redactor.Scrub(err.Error()))
 	}
@@ -739,12 +735,8 @@ func (c *Client) waitForVMDown(ctx context.Context, name string) error {
 			return fmt.Errorf("timeout waiting for VM %s to leave the running state", name)
 		}
 
-		timer := time.NewTimer(rebootPollInterval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
+		if err := sleepContext(ctx, rebootPollInterval); err != nil {
+			return err
 		}
 	}
 }
@@ -778,14 +770,32 @@ func (c *Client) waitForVMReady(ctx context.Context, name string) error {
 		}
 		c.log.Debug().Str("vm", name).Err(lastErr).Msg("waiting for VM to be ready")
 
-		timer := time.NewTimer(readyPollInterval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
+		if err := sleepContext(ctx, readyPollInterval); err != nil {
+			return err
 		}
 	}
+}
+
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func waitOperationContext(ctx context.Context, op lxd.Operation) error {
+	if err := op.WaitContext(ctx); err != nil {
+		if ctx.Err() != nil {
+			_ = op.Cancel()
+			return ctx.Err()
+		}
+		return err
+	}
+	return nil
 }
 
 func waitRemote(ctx context.Context, op lxd.RemoteOperation) error {

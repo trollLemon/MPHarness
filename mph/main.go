@@ -74,7 +74,7 @@ func printUsage(w io.Writer) {
 	flag.PrintDefaults()
 	_, _ = fmt.Fprintf(w, "\nConfig YAML keys:\n")
 	_, _ = fmt.Fprintf(w, "  run:\n")
-	_, _ = fmt.Fprintf(w, "    name: my-run        # optional, label for this run in logs/traces; default MPH_RUN_NAME, vm.name, or mph\n")
+	_, _ = fmt.Fprintf(w, "    name: my-run        # optional; MPH_RUN_NAME overrides; default vm.name or mph\n")
 	_, _ = fmt.Fprintf(w, "  vm:\n")
 	_, _ = fmt.Fprintf(w, "    name: mph-vm        # optional, default mph-vm\n")
 	_, _ = fmt.Fprintf(w, "    disk: 20G\n")
@@ -115,9 +115,9 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "  output:               # optional, captured command output\n")
 	_, _ = fmt.Fprintf(w, "    enabled: true\n")
 	_, _ = fmt.Fprintf(w, "    mode: auto          # auto|always\n")
-	_, _ = fmt.Fprintf(w, "    inline_max_size: 0   # 0 = derive from tool-result budget\n")
-	_, _ = fmt.Fprintf(w, "    max_command_size: 64MiB\n")
-	_, _ = fmt.Fprintf(w, "    max_total_size: 512MiB\n")
+	_, _ = fmt.Fprintf(w, "    inline_max_size: \"0\"   # 0 = derive from tool-result budget\n")
+	_, _ = fmt.Fprintf(w, "    max_command_size: \"%dMiB\"\n", config.DefaultOutputMaxCommandBytes/(1<<20))
+	_, _ = fmt.Fprintf(w, "    max_total_size: \"%dMiB\"\n", config.DefaultOutputMaxTotalBytes/(1<<20))
 	_, _ = fmt.Fprintf(w, "    search_max_matches: %d\n", config.DefaultOutputSearchMatches)
 	_, _ = fmt.Fprintf(w, "  compaction:           # optional, conversation compaction\n")
 	_, _ = fmt.Fprintf(w, "    enabled: true\n")
@@ -142,7 +142,6 @@ func run() error {
 		needHelp       bool
 		ignoreExisting bool
 		keep           bool
-		otelEnabled    bool
 	)
 
 	flag.StringVar(&configPath, "config", "", "path to yaml config file (or positional arg)")
@@ -155,7 +154,7 @@ func run() error {
 	flag.BoolVar(&needHelp, "h", false, "show help (shorthand)")
 	flag.BoolVar(&ignoreExisting, "i", false, "ignore that a VM with the given name exists already and run against that VM")
 	flag.BoolVar(&keep, "k", false, "keep the VM after execution rather than deleting it")
-	flag.BoolVar(&otelEnabled, "otel", false, "enable OpenTelemetry tracing (also via MPH_OTEL=true)")
+	flag.Bool("otel", false, "enable or disable OpenTelemetry tracing (default: YAML otel.enabled or MPH_OTEL)")
 
 	flag.Usage = func() { printUsage(os.Stderr) }
 
@@ -181,7 +180,10 @@ func run() error {
 		return errors.New("config file required")
 	}
 
-	cfg, err := config.LoadFile(configPath)
+	cfg, err := config.LoadFileWithSources(configPath, config.Sources{
+		Environ: os.Environ(),
+		Flags:   flag.CommandLine,
+	})
 	if err != nil {
 		return err
 	}
@@ -202,7 +204,7 @@ func run() error {
 	ctx := context.Background()
 
 	ident := newRunIdentity(cfg.Run, cfg.VM.Name)
-	otelCfg := resolveOtelConfig(cfg.Otel, otelEnabled, ident.Label, ident.Name)
+	otelCfg := resolveOtelConfig(cfg.Otel, ident.Label, ident.Name)
 
 	if otelCfg.Enabled {
 		shutdown, err := mphotel.Setup(ctx, otelCfg)
@@ -287,7 +289,7 @@ func setupLogger(verbose, pretty bool) {
 		if i := strings.LastIndexByte(file, '/'); i >= 0 {
 			file = file[i+1:]
 		}
-		return file + ":" + strings.TrimSpace(fmt.Sprint(line))
+		return file + ":" + fmt.Sprint(line)
 	}
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	if verbose {
@@ -315,8 +317,8 @@ type runIdentity struct {
 	Name  string
 }
 
-func resolveRunName(yamlName, envName, vmName string) string {
-	for _, candidate := range []string{yamlName, envName, vmName} {
+func resolveRunName(runName, vmName string) string {
+	for _, candidate := range []string{runName, vmName} {
 		if name := strings.TrimSpace(candidate); name != "" {
 			return name
 		}
@@ -324,45 +326,19 @@ func resolveRunName(yamlName, envName, vmName string) string {
 	return "mph"
 }
 
-func newRunIdentity(yamlCfg config.RunConfig, vmName string) runIdentity {
-	name := resolveRunName(yamlCfg.Name, os.Getenv("MPH_RUN_NAME"), vmName)
+func newRunIdentity(runCfg config.RunConfig, vmName string) runIdentity {
+	name := resolveRunName(runCfg.Name, vmName)
 	id := uuid.NewV7().String()
 	return runIdentity{ID: id, Label: name + ":" + id, Name: name}
 }
 
-func resolveOtelConfig(yamlCfg config.OtelConfig, flagEnabled bool, runID, runName string) mphotel.Config {
-	enabled := yamlCfg.Enabled
-	if flagEnabled || isEnvTrue(os.Getenv("MPH_OTEL")) {
-		enabled = true
-	}
-
-	endpoint := yamlCfg.Endpoint
-	if v := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")); v != "" {
-		endpoint = v
-	}
-	if endpoint == "" {
-		endpoint = mphotel.DefaultEndpoint
-	}
-
-	serviceName := yamlCfg.ServiceName
-	if v := strings.TrimSpace(os.Getenv("OTEL_SERVICE_NAME")); v != "" {
-		serviceName = v
-	}
-	if serviceName == "" {
-		serviceName = mphotel.DefaultServiceName
-	}
-
+func resolveOtelConfig(otelCfg config.OtelConfig, runID, runName string) mphotel.Config {
 	return mphotel.Config{
-		Enabled:            enabled,
-		Endpoint:           endpoint,
-		ServiceName:        serviceName,
-		ResourceAttributes: yamlCfg.ResourceAttributes,
+		Enabled:            otelCfg.Enabled,
+		Endpoint:           otelCfg.Endpoint,
+		ServiceName:        otelCfg.ServiceName,
+		ResourceAttributes: otelCfg.ResourceAttributes,
 		RunID:              runID,
 		RunName:            runName,
-	}
-}
-
-func isEnvTrue(v string) bool {
-	v = strings.ToLower(strings.TrimSpace(v))
-	return v == "true" || v == "1" || v == "yes"
+	}.WithDefaults()
 }

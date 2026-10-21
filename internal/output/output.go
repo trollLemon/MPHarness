@@ -12,7 +12,6 @@ import (
 	"uuid"
 
 	"github.com/trollLemon/MPHarness/internal/config"
-	"github.com/trollLemon/MPHarness/internal/validation"
 )
 
 type Handle struct {
@@ -54,6 +53,8 @@ type ReadResult struct {
 }
 
 const (
+	NoOutput = "(no output)"
+
 	defaultReadLimit = 50
 	maxReadLines     = 200
 	maxLineWidth     = 2000
@@ -70,17 +71,16 @@ type Store struct {
 	runDir       string
 	cfg          config.OutputConfig
 	inlineCutoff int64
-	allowed      map[string]bool
 	handles      map[string]Handle
 	totalBytes   int64
 }
 
 // NewStore returns a new Store instance.
-func NewStore(client ExecClient, vm, runDir string, cfg config.OutputConfig, inlineCutoff int64, allowed map[string]bool) *Store {
+func NewStore(client ExecClient, vm, runDir string, cfg config.OutputConfig, inlineCutoff int64) *Store {
 	return &Store{
 		client: client, vm: vm, runDir: runDir, cfg: cfg,
-		inlineCutoff: inlineCutoff, allowed: allowed,
-		handles: map[string]Handle{},
+		inlineCutoff: inlineCutoff,
+		handles:      map[string]Handle{},
 	}
 }
 
@@ -112,7 +112,7 @@ func decideInline(mode string, size, cutoff int64) bool {
 // and the given configuration. It prefers cfg.InlineMaxSize; if that is 0 it
 // returns derivedBudget.
 func effectiveCutoff(cfg config.OutputConfig, derivedBudget int64) int64 {
-	if int64(cfg.InlineMaxSize) > 0 {
+	if cfg.InlineMaxSize > 0 {
 		return int64(cfg.InlineMaxSize)
 	}
 	return derivedBudget
@@ -151,7 +151,7 @@ func (s *Store) directExec(ctx context.Context, cmd string) (Result, error) {
 		return Result{}, err
 	}
 	if out == "" {
-		return Result{Inline: "(no output)"}, nil
+		return Result{Inline: NoOutput}, nil
 	}
 	return Result{Inline: out}, nil
 }
@@ -189,12 +189,19 @@ func (s *Store) removeSubdir(ctx context.Context, subdir string) {
 	_, _ = s.client.Exec(ctx, s.vm, fmt.Sprintf("rm -rf %s", shellQuote(subdir)), 0)
 }
 
+func parseMarkerLine(line, marker string) (exit int, found, valid bool) {
+	v, found := strings.CutPrefix(strings.TrimSpace(line), marker)
+	if !found {
+		return 0, false, false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	return n, true, err == nil
+}
+
 func parseExitMarker(out, marker string) (int, bool) {
 	for _, line := range strings.Split(out, "\n") {
-		if v, ok := strings.CutPrefix(strings.TrimSpace(line), marker); ok {
-			if n, perr := strconv.Atoi(strings.TrimSpace(v)); perr == nil {
-				return n, true
-			}
+		if n, found, valid := parseMarkerLine(line, marker); found && valid {
+			return n, true
 		}
 	}
 	return 0, false
@@ -285,7 +292,7 @@ func (s *Store) materializeInline(ctx context.Context, subdir, raw string, size 
 	}
 	s.removeSubdir(ctx, subdir)
 	if inline == "" {
-		inline = "(no output)"
+		inline = NoOutput
 	}
 	return Result{Inline: inline, ExitCode: exit}, nil
 }
@@ -312,16 +319,9 @@ func (s *Store) materializeHandle(ctx context.Context, cmd, oid, raw string, siz
 }
 
 func (s *Store) Capture(ctx context.Context, command string, force bool) (Result, error) {
-	cmd := strings.TrimSpace(command)
-	if cmd == "" {
-		return Result{}, fmt.Errorf("command is required")
-	}
-	if err := validation.ValidateShellCommand(s.allowed, cmd); err != nil {
-		return Result{}, err
-	}
 	mode := s.mode()
 	if mode == "auto" && !force {
-		return s.directExec(ctx, cmd)
+		return s.directExec(ctx, command)
 	}
 	oid := uuid.NewV7().String()
 	subdir, raw := capturePaths(s.runDir, oid)
@@ -333,7 +333,7 @@ func (s *Store) Capture(ctx context.Context, command string, force bool) (Result
 	}
 	cleanup := func() { s.removeSubdir(ctx, subdir) }
 	marker := "__MPH_EXIT_" + strings.ReplaceAll(oid, "-", "") + ":"
-	exit, err := s.runRedirect(ctx, cmd, raw, marker)
+	exit, err := s.runRedirect(ctx, command, raw, marker)
 	// Once the command's context is done, follow-up work must not reuse it or
 	// the stat below fails on a cancelled context and the partial output that
 	// was already written gets thrown away.
@@ -365,7 +365,7 @@ func (s *Store) Capture(ctx context.Context, command string, force bool) (Result
 		}
 		return res, nil
 	}
-	res, err := s.materializeHandle(workCtx, cmd, oid, raw, size, exit)
+	res, err := s.materializeHandle(workCtx, command, oid, raw, size, exit)
 	if err != nil {
 		cleanup()
 		return Result{}, err
@@ -389,9 +389,7 @@ func (s *Store) lookup(outputID string) (Handle, error) {
 	return Handle{}, fmt.Errorf("unknown output_id %q (active handles: %s; never invent an output_id)", outputID, strings.Join(ids, ", "))
 }
 
-func buildGrepCmd(rawPath, pattern string, fixed, ignoreCase bool, maxM int, marker string) string {
-	var b strings.Builder
-	b.WriteString("{ grep -a -n ")
+func writeGrepPattern(b *strings.Builder, rawPath, pattern string, fixed, ignoreCase bool) {
 	if fixed {
 		b.WriteString("-F ")
 	} else {
@@ -405,6 +403,12 @@ func buildGrepCmd(rawPath, pattern string, fixed, ignoreCase bool, maxM int, mar
 	b.WriteString(shellQuote(pattern))
 	b.WriteString(" ")
 	b.WriteString(shellQuote(rawPath))
+}
+
+func buildGrepCmd(rawPath, pattern string, fixed, ignoreCase bool, maxM int, marker string) string {
+	var b strings.Builder
+	b.WriteString("{ grep -a -n ")
+	writeGrepPattern(&b, rawPath, pattern, fixed, ignoreCase)
 	b.WriteString("; echo " + marker + "$?; }")
 	// head is the only bound. It trims the stream to maxM+1 lines, so the exit
 	// marker surviving the trim is how Search tells "exactly maxM" from "more".
@@ -422,18 +426,7 @@ func buildGrepCmd(rawPath, pattern string, fixed, ignoreCase bool, maxM int, mar
 func buildGrepCountCmd(rawPath, pattern string, fixed, ignoreCase bool) string {
 	var b strings.Builder
 	b.WriteString("grep -a -c ")
-	if fixed {
-		b.WriteString("-F ")
-	} else {
-		b.WriteString("-E ")
-	}
-	if ignoreCase {
-		b.WriteString("-i ")
-	}
-	b.WriteString("-e ")
-	b.WriteString(shellQuote(pattern))
-	b.WriteString(" ")
-	b.WriteString(shellQuote(rawPath))
+	writeGrepPattern(&b, rawPath, pattern, fixed, ignoreCase)
 	return b.String()
 }
 
@@ -447,9 +440,9 @@ func parseGrepOutput(out, marker string) (lines []string, exit int, hasMarker bo
 		if line == "" {
 			continue
 		}
-		if v, ok := strings.CutPrefix(line, marker); ok {
+		if n, found, valid := parseMarkerLine(line, marker); found {
 			hasMarker = true
-			if n, perr := strconv.Atoi(strings.TrimSpace(v)); perr == nil {
+			if valid {
 				exit = n
 			}
 			all = all[:i]
