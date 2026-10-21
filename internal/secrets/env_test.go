@@ -7,7 +7,7 @@ import (
 	"github.com/trollLemon/MPHarness/internal/secrets"
 )
 
-func TestEnvironmentProviderResolve(t *testing.T) {
+func TestEnvironmentProviderLookup(t *testing.T) {
 	tests := []struct {
 		name    string
 		key     string
@@ -28,18 +28,18 @@ func TestEnvironmentProviderResolve(t *testing.T) {
 				t.Setenv(tt.key, tt.value)
 			}
 			resolver := secrets.NewEnvResolver()
-			got, err := resolver.Resolve(tt.key)
+			got, err := resolver.Lookup(tt.key)
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
-					t.Fatalf("Resolve error = %v, want %v", err, tt.wantErr)
+					t.Fatalf("Lookup error = %v, want %v", err, tt.wantErr)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("Resolve: %v", err)
+				t.Fatalf("Lookup: %v", err)
 			}
 			if got != tt.want {
-				t.Fatalf("Resolve(%q) = %q, want %q", tt.key, got, tt.want)
+				t.Fatalf("Lookup(%q) = %q, want %q", tt.key, got, tt.want)
 			}
 		})
 	}

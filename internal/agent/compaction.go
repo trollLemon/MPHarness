@@ -66,21 +66,6 @@ func (a *Agent) estimateTokens(ctx context.Context, text string) int {
 	return len(text) / bytesPerToken
 }
 
-// measureFixedOverhead splits a request's reported prompt cost into the messages
-// and the per-request overhead around them (tool schemas and template framing).
-// Only the overhead survives compaction, so it has to be carried into the
-// post-compaction figure instead of being assumed away.
-func (a *Agent) measureFixedOverhead(ctx context.Context, usage *model.Usage) int64 {
-	if usage != nil && usage.PromptTokens > 0 {
-		estimate := func(s string) int { return a.estimateTokens(ctx, s) }
-		if n := int64(usage.PromptTokens) - int64(compact.EstimateConversation(a.conversation, estimate)); n > 0 {
-			return n
-		}
-	}
-	// Usage without a prompt count, or an estimate that already overshoots it.
-	return a.schemaOverheadTokens(ctx)
-}
-
 // schemaOverheadTokens is the floor for the overhead: every request carries the
 // tool schemas, whatever the reported usage says.
 func (a *Agent) schemaOverheadTokens(ctx context.Context) int64 {
@@ -103,16 +88,15 @@ func outputHandleInfos(handles []output.Handle) []compact.HandleInfo {
 }
 
 // maybeCompact rewrites the conversation in place when the measured context has
-// reached the threshold, and returns the outcome. All state it reads and
-// updates lives on the Agent.
-func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) string {
+// reached the threshold. All state it reads and updates lives on the Agent.
+func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
 	cc := cfg.Compaction
 	if !cc.Enabled || a.compactionAttempts >= cc.MaxAttempts {
-		return ""
+		return
 	}
 	window := a.krn.ModelConfig().ContextWindow()
 	if !compact.ShouldCompact(a.contextTokens, int64(window), cc.Threshold, len(a.conversation), cc.MinMessages) {
-		return ""
+		return
 	}
 	var infos []compact.HandleInfo
 	if a.store != nil {
@@ -190,13 +174,13 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) string {
 			"compacted": newConv,
 		})
 
-		return outcome
+		return
 	case "reverted", "skipped":
 		// Not worth it yet (or nothing to do): the next attempt with a longer
 		// history may win, so this must not consume the failure budget.
-		return outcome
+		return
 	default:
 		a.compactionAttempts++
-		return outcome
+		return
 	}
 }

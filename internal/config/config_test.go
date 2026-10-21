@@ -407,6 +407,12 @@ func TestSizeParsing(t *testing.T) {
 		{"larger mebibytes", base + "output:\n  max_command_size: 512MiB\n", 512 * 1024 * 1024, false},
 		{"gibibytes", base + "output:\n  max_command_size: 1GiB\n", 1024 * 1024 * 1024, false},
 		{"bare bytes", base + "output:\n  max_command_size: 1024\n", 1024, false},
+		{"kilobytes are binary", base + "output:\n  max_command_size: 1024K\n", 1024 * 1024, false},
+		{"kilobyte suffix is binary", base + "output:\n  max_command_size: 1KB\n", 1024, false},
+		{"terabytes", base + "output:\n  max_command_size: 1T\n", 1 << 40, false},
+		{"fractional with unit", base + "output:\n  max_command_size: 1.5K\n", 1536, false},
+		{"fractional bare bytes", base + "output:\n  max_command_size: 1.5\n", 0, true},
+		{"overflow", base + "output:\n  max_command_size: 99999999999999999999T\n", 0, true},
 		{"invalid suffix", base + "output:\n  max_command_size: 10XB\n", 0, true},
 	}
 	for _, tt := range tests {
@@ -422,7 +428,7 @@ func TestSizeParsing(t *testing.T) {
 				t.Fatalf("unexpected err: %v", err)
 			}
 			if int64(cfg.Output.MaxCommandSize) != tt.want {
-				t.Errorf("got %d want %d", int64(cfg.Output.MaxCommandSize), tt.want)
+				t.Errorf("got %d want %d", cfg.Output.MaxCommandSize, tt.want)
 			}
 		})
 	}
@@ -442,11 +448,11 @@ func TestParseOutputCompaction(t *testing.T) {
 				if !cfg.Output.Enabled || cfg.Output.Mode != "auto" {
 					t.Errorf("output defaults: %+v", cfg.Output)
 				}
-				if int64(cfg.Output.MaxCommandSize) != DefaultOutputMaxCommandBytes {
-					t.Errorf("max_command_size %d", int64(cfg.Output.MaxCommandSize))
+				if cfg.Output.MaxCommandSize != DefaultOutputMaxCommandBytes {
+					t.Errorf("max_command_size %d", cfg.Output.MaxCommandSize)
 				}
-				if int64(cfg.Output.MaxTotalSize) != DefaultOutputMaxTotalBytes {
-					t.Errorf("max_total_size %d", int64(cfg.Output.MaxTotalSize))
+				if cfg.Output.MaxTotalSize != DefaultOutputMaxTotalBytes {
+					t.Errorf("max_total_size %d", cfg.Output.MaxTotalSize)
 				}
 				if cfg.Output.SearchMaxMatches != 200 {
 					t.Errorf("search_max_matches %d", cfg.Output.SearchMaxMatches)
@@ -484,7 +490,7 @@ func TestParseOutputCompaction(t *testing.T) {
 			name: "explicit zero size disables cap",
 			yaml: base + "output:\n  max_command_size: 0\n  max_total_size: 0\n",
 			check: func(t *testing.T, cfg Config) {
-				if int64(cfg.Output.MaxCommandSize) != 0 || int64(cfg.Output.MaxTotalSize) != 0 {
+				if cfg.Output.MaxCommandSize != 0 || cfg.Output.MaxTotalSize != 0 {
 					t.Errorf("explicit 0 must stay disabled, got %+v", cfg.Output)
 				}
 			},

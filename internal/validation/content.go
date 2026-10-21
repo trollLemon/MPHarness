@@ -54,14 +54,23 @@ func isTextFile(fsys fs.FS, name string) bool {
 	return true
 }
 
-func ScanContentDir(dir string) ([]ContentFinding, error) {
-	clean := filepath.Clean(dir)
+// ContentDirPath normalizes a content directory and checks that it exists.
+func ContentDirPath(dir string) (string, error) {
+	clean := filepath.Clean(strings.TrimSpace(dir))
 	info, err := os.Stat(clean)
 	if err != nil {
-		return nil, fmt.Errorf("content_dir %q: %w", clean, err)
+		return "", fmt.Errorf("content_dir %q: %w", clean, err)
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("content_dir %q is not a directory", clean)
+		return "", fmt.Errorf("content_dir %q is not a directory", clean)
+	}
+	return clean, nil
+}
+
+func ScanContentDir(dir string) ([]ContentFinding, error) {
+	clean, err := ContentDirPath(dir)
+	if err != nil {
+		return nil, err
 	}
 
 	// os.Root refuses to follow symlinks that escape the tree, so a file

@@ -5,9 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
+
+	"github.com/trollLemon/MPHarness/internal/textutil"
 )
 
 const CompactionSystemPrompt = `You are summarising an autonomous VM-operator agent's conversation so it can continue with a smaller context.
@@ -40,19 +41,6 @@ Make sure the handover is formatted clearly so an agent can continue without con
 `
 
 const StandingInstructions = `Operate asynchronously without user interaction. Prior messages are your own execution logs. Stop immediately on any permission or policy denial without workarounds. Inspect every result's status field. Always finish with a tool-call-free completion summary.`
-
-// ToolResultStyle selects how much of a tool result a render carries.
-type ToolResultStyle int
-
-const (
-	// ToolResultFullText keeps the bytes, for the summarizer that has to reason
-	// about what the command actually returned.
-	ToolResultFullText ToolResultStyle = iota
-	// ToolResultHandleRef stands a large result down to its size. The handover
-	// is the conversation that replaces the history, so copying the payload
-	// forward makes the rewrite reclaim nothing.
-	ToolResultHandleRef
-)
 
 type Summarizer interface {
 	Summarize(ctx context.Context, systemPrompt, renderedHistory string, maxTokens int) (string, error)
@@ -103,7 +91,7 @@ const summarizerHeadroomTokens = 64
 // NOTE: messages are truncated to budget each, except tool results, which the
 // output store is responsible for keeping out of the conversation. The total is
 // capped at maxBytes so the render cannot outgrow the summarizer's window.
-func RenderHistory(conversation []model.D, budget, maxBytes int, style ToolResultStyle) string {
+func RenderHistory(conversation []model.D, budget, maxBytes int) string {
 	var b strings.Builder
 	remaining := maxBytes
 	write := func(s string) {
@@ -111,7 +99,7 @@ func RenderHistory(conversation []model.D, budget, maxBytes int, style ToolResul
 			return
 		}
 		if len(s) > remaining {
-			s = cutPrefix(s, remaining)
+			s = textutil.CutPrefix(s, remaining)
 			remaining = 0
 		} else {
 			remaining -= len(s)
@@ -140,9 +128,6 @@ func RenderHistory(conversation []model.D, budget, maxBytes int, style ToolResul
 		case "tool":
 			name, _ := m["name"].(string)
 			content, _ := m["content"].(string)
-			if style == ToolResultHandleRef && len(content) > budget {
-				content = fmt.Sprintf("%d bytes, see ## Active output handles", len(content))
-			}
 			write(fmt.Sprintf("tool result %s: %s\n", name, content))
 		case "user":
 			if c, _ := m["content"].(string); c != "" {
@@ -153,26 +138,13 @@ func RenderHistory(conversation []model.D, budget, maxBytes int, style ToolResul
 	return b.String()
 }
 
-// cutPrefix returns the first n bytes of s, backed off to the nearest rune
-// boundary so the result is always valid UTF-8.
-func cutPrefix(s string, n int) string {
-	if n >= len(s) {
-		return s
-	}
-	head := s[:n]
-	for len(head) > 0 && !utf8.ValidString(head) {
-		head = head[:len(head)-1]
-	}
-	return head
-}
-
 // truncateHead keeps the first n bytes, backing off to the nearest rune
 // boundary so the result is always valid UTF-8.
 func truncateHead(s string, n int) string {
 	if n <= 0 || len(s) <= n {
 		return s
 	}
-	return cutPrefix(s, n) + "…(truncated)"
+	return textutil.CutPrefix(s, n) + "…(truncated)"
 }
 
 // minSummaryBudgetTokens floors the adaptive summary budget.
@@ -217,11 +189,6 @@ func EstimateConversation(conversation []model.D, estimate func(string) int) int
 		n += EstimateMessage(m, estimate)
 	}
 	return n
-}
-
-// BuildUserMessage constructs the message to show the agent on what has been done, what needs to be done, and any output handles to query.
-func BuildUserMessage(task, summary string, handles []HandleInfo, compactionsApplied int) string {
-	return buildUserMessage(task, summary, "", handles, compactionsApplied)
 }
 
 func buildUserMessage(task, summary, recentResults string, handles []HandleInfo, compactionsApplied int) string {
@@ -305,7 +272,7 @@ func recentResults(conversation []model.D, maxBytes int) string {
 	for i := len(results) - 1; i >= 0 && kept < recentResultsMax && remaining > 0; i-- {
 		block := fmt.Sprintf("$ %s\n%s\n\n", results[i].command, truncateHead(results[i].output, recentResultBytes))
 		if len(block) > remaining {
-			block = cutPrefix(block, remaining)
+			block = textutil.CutPrefix(block, remaining)
 		}
 		blocks = append(blocks, block)
 		remaining -= len(block)
@@ -400,7 +367,7 @@ func Compact(ctx context.Context, conversation []model.D, handles []HandleInfo, 
 		return after*10 < before*9
 	}
 
-	rendered := RenderHistory(conversation, budget, maxBytes, ToolResultFullText)
+	rendered := RenderHistory(conversation, budget, maxBytes)
 	summary, err := s.Summarize(ctx, CompactionSystemPrompt, rendered, maxSummaryTokens)
 	if err != nil && !errors.Is(err, ErrEmptySummary) {
 		return conversation, "failed", 0, fmt.Errorf("summarize: %w", err)
@@ -436,11 +403,11 @@ func summaryRejection(err error, summary string) error {
 
 func repairSummary(ctx context.Context, s Summarizer, conversation []model.D, budget, maxBytes, maxTokens int, previous string, reason error) (string, error) {
 	system := CompactionSystemPrompt + "\n\nYour previous handover was rejected: " + reason.Error() + " Return a corrected handover with all three headings, using \"- None.\" under any empty section."
-	history := RenderHistory(conversation, budget, maxBytes, ToolResultFullText)
+	history := RenderHistory(conversation, budget, maxBytes)
 	if previous = strings.TrimSpace(previous); previous != "" {
 		block := "\n\n## Previous rejected handover\n" + previous
 		if maxBytes > len(block) {
-			history = RenderHistory(conversation, budget, maxBytes-len(block), ToolResultFullText) + block
+			history = RenderHistory(conversation, budget, maxBytes-len(block)) + block
 		}
 	}
 	return s.Summarize(ctx, system, history, maxTokens)

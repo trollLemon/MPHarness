@@ -55,6 +55,18 @@ type Config struct {
 	RunName            string
 }
 
+// WithDefaults fills blank endpoint and service fields. It is idempotent, so
+// callers that need the resolved values and Setup can both apply it.
+func (c Config) WithDefaults() Config {
+	if c.Endpoint == "" {
+		c.Endpoint = DefaultEndpoint
+	}
+	if c.ServiceName == "" {
+		c.ServiceName = DefaultServiceName
+	}
+	return c
+}
+
 func Setup(ctx context.Context, cfg Config) (func(context.Context) error, error) {
 	if !cfg.Enabled {
 		return func(context.Context) error { return nil }, nil
@@ -63,12 +75,7 @@ func Setup(ctx context.Context, cfg Config) (func(context.Context) error, error)
 		return func(context.Context) error { return nil }, nil
 	}
 
-	if cfg.Endpoint == "" {
-		cfg.Endpoint = DefaultEndpoint
-	}
-	if cfg.ServiceName == "" {
-		cfg.ServiceName = DefaultServiceName
-	}
+	cfg = cfg.WithDefaults()
 
 	attrs := []attribute.KeyValue{
 		attribute.String("service.name", cfg.ServiceName),
@@ -160,6 +167,10 @@ func (h Hook) Run(e *zerolog.Event, level zerolog.Level, msg string) {
 	if ctx.Value(skipHookKey) != nil {
 		return
 	}
+	h.logger.Emit(ctx, newRecord(ctx, level, msg))
+}
+
+func newRecord(ctx context.Context, level zerolog.Level, msg string) otellog.Record {
 	rec := otellog.Record{}
 	rec.SetTimestamp(time.Now())
 	rec.SetObservedTimestamp(time.Now())
@@ -169,7 +180,7 @@ func (h Hook) Run(e *zerolog.Event, level zerolog.Level, msg string) {
 	for _, kv := range traceAttrs(ctx) {
 		rec.AddAttributes(kv)
 	}
-	h.logger.Emit(ctx, rec)
+	return rec
 }
 
 // traceAttrs exposes the active span as record attributes. The log SDK's
@@ -205,38 +216,34 @@ func LogEvent(ctx context.Context, logger zerolog.Logger, level zerolog.Level, m
 		}
 		evt.Msg(msg)
 	}
-	rec := otellog.Record{}
-	rec.SetTimestamp(time.Now())
-	rec.SetObservedTimestamp(time.Now())
-	rec.SetSeverity(convertLevel(level))
-	rec.SetSeverityText(level.String())
-	rec.SetBody(attribute.StringValue(msg))
+	rec := newRecord(ctx, level, msg)
 	for k, v := range fields {
-		switch val := v.(type) {
-		case string:
-			rec.AddAttributes(attribute.String(k, val))
-		case int:
-			rec.AddAttributes(attribute.Int(k, val))
-		case int64:
-			rec.AddAttributes(attribute.Int64(k, val))
-		case bool:
-			rec.AddAttributes(attribute.Bool(k, val))
-		case float64:
-			rec.AddAttributes(attribute.Float64(k, val))
-		case json.RawMessage:
-			rec.AddAttributes(attribute.String(k, string(val)))
-		case []byte:
-			rec.AddAttributes(attribute.String(k, string(val)))
-		case error:
-			rec.AddAttributes(attribute.String(k, val.Error()))
-		default:
-			rec.AddAttributes(attribute.String(k, fmt.Sprint(v)))
-		}
-	}
-	for _, kv := range traceAttrs(ctx) {
-		rec.AddAttributes(kv)
+		rec.AddAttributes(fieldAttribute(k, v))
 	}
 	runLogger.Emit(ctx, rec)
+}
+
+func fieldAttribute(k string, v any) attribute.KeyValue {
+	switch val := v.(type) {
+	case string:
+		return attribute.String(k, val)
+	case int:
+		return attribute.Int(k, val)
+	case int64:
+		return attribute.Int64(k, val)
+	case bool:
+		return attribute.Bool(k, val)
+	case float64:
+		return attribute.Float64(k, val)
+	case json.RawMessage:
+		return attribute.String(k, string(val))
+	case []byte:
+		return attribute.String(k, string(val))
+	case error:
+		return attribute.String(k, val.Error())
+	default:
+		return attribute.String(k, fmt.Sprint(v))
+	}
 }
 
 // runLogger is resolved once. go.opentelemetry.io/otel/log/global hands back a

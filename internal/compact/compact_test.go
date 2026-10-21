@@ -395,7 +395,7 @@ func TestBuildUserMessageGuidesHandles(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := BuildUserMessage("do things", "Completed: x. Remaining: y.", tt.handles, tt.applied)
+			got := buildUserMessage("do things", "Completed: x. Remaining: y.", "", tt.handles, tt.applied)
 			for _, want := range tt.wantSubs {
 				if !strings.Contains(got, want) {
 					t.Fatalf("missing %q in %q", want, got)
@@ -449,23 +449,21 @@ func TestRenderHistory(t *testing.T) {
 		conversation []model.D
 		budget       int
 		maxBytes     int
-		style        ToolResultStyle
 		maxRendered  int
 		want         []string
-		dontWant     []string
 	}{
 		{
 			// Prose is the summarizer's only view of what the agent was doing,
 			// but a single rambling message still has to respect the budget.
 			name:         "assistant prose respects the per-message budget",
 			conversation: []model.D{{"role": "assistant", "content": strings.Repeat("a", 100000)}},
-			budget:       100, maxBytes: 1 << 20, style: ToolResultFullText,
+			budget:       100, maxBytes: 1 << 20,
 			maxRendered: 500,
 		},
 		{
 			name:         "user text respects the per-message budget",
 			conversation: []model.D{{"role": "user", "content": strings.Repeat("u", 100000)}},
-			budget:       100, maxBytes: 1 << 20, style: ToolResultFullText,
+			budget:       100, maxBytes: 1 << 20,
 			maxRendered: 500,
 		},
 		{
@@ -474,47 +472,26 @@ func TestRenderHistory(t *testing.T) {
 			// prompt grows without limit.
 			name:         "total render is bounded by maxBytes",
 			conversation: manyTurns,
-			budget:       1000, maxBytes: 8000, style: ToolResultFullText,
+			budget:       1000, maxBytes: 8000,
 			maxRendered: 8000,
 		},
 		{
 			// The summarizer has to see what a command actually returned.
-			name:         "full text style keeps tool output in the summarizer view",
+			name:         "full text keeps tool output in the summarizer view",
 			conversation: longToolResult,
-			budget:       100, maxBytes: 1 << 20, style: ToolResultFullText,
+			budget:       100, maxBytes: 1 << 20,
 			want: []string{"vm_exec", "zzz"},
-		},
-		{
-			// The handover replaces the history, so copying the payload forward
-			// makes the rewrite reclaim nothing.
-			name:         "handle ref style stands the payload down in the handover",
-			conversation: longToolResult,
-			budget:       100, maxBytes: 1 << 20, style: ToolResultHandleRef,
-			maxRendered: 500,
-			want:        []string{"vm_exec", "5000 bytes"},
-			dontWant:    []string{"zzz"},
-		},
-		{
-			name:         "handle ref style keeps a short tool result inline",
-			conversation: []model.D{{"role": "tool", "name": "vm_exec", "content": "ok"}},
-			budget:       100, maxBytes: 1 << 20, style: ToolResultHandleRef,
-			want: []string{"ok"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := RenderHistory(tt.conversation, tt.budget, tt.maxBytes, tt.style)
+			got := RenderHistory(tt.conversation, tt.budget, tt.maxBytes)
 			if tt.maxRendered > 0 && len(got) > tt.maxRendered {
 				t.Fatalf("rendered %d bytes, over the %d bound", len(got), tt.maxRendered)
 			}
 			for _, want := range tt.want {
 				if !strings.Contains(got, want) {
 					t.Fatalf("missing %q in %q", want, got)
-				}
-			}
-			for _, dontWant := range tt.dontWant {
-				if strings.Contains(got, dontWant) {
-					t.Fatalf("must not contain %q: %q", dontWant, got)
 				}
 			}
 		})
@@ -551,7 +528,7 @@ func TestCompactionSystemPromptProtectsHandleIDs(t *testing.T) {
 }
 
 func TestBuildUserMessageCarriesNoVerbatimTail(t *testing.T) {
-	got := BuildUserMessage("do things", "Done: x", nil, 1)
+	got := buildUserMessage("do things", "Done: x", "", nil, 1)
 	if strings.Contains(got, "## Recent activity") {
 		t.Fatalf("handover still carries a verbatim recent block: %q", got)
 	}

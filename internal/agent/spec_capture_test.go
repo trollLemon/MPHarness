@@ -131,12 +131,13 @@ func TestCallVMExecCapture(t *testing.T) {
 					return "", nil
 				}
 			}}
-			store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, tt.cutoff, nil)
+			store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, tt.cutoff)
 			got, err := Call(context.Background(), nil, cfg, store, "vm_exec", tt.args)
 			if err != nil {
 				t.Fatalf("call: %v", err)
 			}
-			if isCaptureEnvelope(got) != tt.wantCapture {
+			env, ok := parseToolEnvelope(got)
+			if (ok && env.Data.Result.Captured) != tt.wantCapture {
 				t.Fatalf("capture=%v, got %q", tt.wantCapture, got)
 			}
 			for _, want := range tt.wantSubs {
@@ -194,8 +195,8 @@ func TestCallOutputSearchReportsAbsoluteLines(t *testing.T) {
 					return "", nil
 				}
 			}}
-			store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10, nil)
-			id := capturedOutputID(captureEnvelope(t, cfg, store))
+			store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10)
+			id := capturedID(t, captureEnvelope(t, cfg, store))
 			res, err := Call(context.Background(), nil, cfg, store, "output_search", map[string]any{
 				"output_id": id, "pattern": "hit",
 			})
@@ -240,10 +241,19 @@ func captureEnvelope(t *testing.T, cfg config.Config, store *output.Store) strin
 	if err != nil {
 		t.Fatalf("capture: %v", err)
 	}
-	if !isCaptureEnvelope(got) {
+	if env, ok := parseToolEnvelope(got); !ok || !env.Data.Result.Captured {
 		t.Fatalf("want capture envelope, got %q", got)
 	}
 	return got
+}
+
+func capturedID(t *testing.T, envelope string) string {
+	t.Helper()
+	env, ok := parseToolEnvelope(envelope)
+	if !ok {
+		t.Fatalf("want tool envelope, got %q", envelope)
+	}
+	return env.Data.Result.OutputID
 }
 
 // grepMarker extracts the per-capture exit marker the search command echoes.
@@ -303,12 +313,12 @@ func TestCallOutputReadRoundTrip(t *testing.T) {
 			return "", nil
 		}
 	}}
-	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10, nil)
+	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10)
 	capGot, err := Call(context.Background(), nil, cfg, store, "vm_exec", map[string]any{"command": "echo hi"})
 	if err != nil {
 		t.Fatalf("capture: %v", err)
 	}
-	id := capturedOutputID(capGot)
+	id := capturedID(t, capGot)
 	if id == "" {
 		t.Fatalf("no output_id in %q", capGot)
 	}
@@ -355,7 +365,7 @@ func TestCaptureLogsAttributionLine(t *testing.T) {
 			return "", nil
 		}
 	}}
-	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10, nil)
+	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10)
 	agt := NewAgent(zerolog.New(&buf), &mockKronk{}, Options{
 		MaxIterations: 1,
 		ChatTimeout:   time.Second,
@@ -403,7 +413,7 @@ func TestExecuteToolCallsLogsPerCommandOutput(t *testing.T) {
 		}
 		return "", nil
 	}}
-	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 1<<20, nil)
+	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 1<<20)
 	agt := NewAgent(zerolog.New(&buf), &mockKronk{}, Options{
 		MaxIterations: 1,
 		ChatTimeout:   time.Second,

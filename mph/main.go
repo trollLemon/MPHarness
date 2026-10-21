@@ -116,8 +116,8 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "    enabled: true\n")
 	_, _ = fmt.Fprintf(w, "    mode: auto          # auto|always\n")
 	_, _ = fmt.Fprintf(w, "    inline_max_size: 0   # 0 = derive from tool-result budget\n")
-	_, _ = fmt.Fprintf(w, "    max_command_size: 64MiB\n")
-	_, _ = fmt.Fprintf(w, "    max_total_size: 512MiB\n")
+	_, _ = fmt.Fprintf(w, "    max_command_size: %dMiB\n", config.DefaultOutputMaxCommandBytes/(1<<20))
+	_, _ = fmt.Fprintf(w, "    max_total_size: %dMiB\n", config.DefaultOutputMaxTotalBytes/(1<<20))
 	_, _ = fmt.Fprintf(w, "    search_max_matches: %d\n", config.DefaultOutputSearchMatches)
 	_, _ = fmt.Fprintf(w, "  compaction:           # optional, conversation compaction\n")
 	_, _ = fmt.Fprintf(w, "    enabled: true\n")
@@ -287,7 +287,7 @@ func setupLogger(verbose, pretty bool) {
 		if i := strings.LastIndexByte(file, '/'); i >= 0 {
 			file = file[i+1:]
 		}
-		return file + ":" + strings.TrimSpace(fmt.Sprint(line))
+		return file + ":" + fmt.Sprint(line)
 	}
 	zerolog.SetGlobalLevel(zerolog.InfoLevel)
 	if verbose {
@@ -340,18 +340,10 @@ func resolveOtelConfig(yamlCfg config.OtelConfig, flagEnabled bool, runID, runNa
 	if v := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")); v != "" {
 		endpoint = v
 	}
-	if endpoint == "" {
-		endpoint = mphotel.DefaultEndpoint
-	}
-
 	serviceName := yamlCfg.ServiceName
 	if v := strings.TrimSpace(os.Getenv("OTEL_SERVICE_NAME")); v != "" {
 		serviceName = v
 	}
-	if serviceName == "" {
-		serviceName = mphotel.DefaultServiceName
-	}
-
 	return mphotel.Config{
 		Enabled:            enabled,
 		Endpoint:           endpoint,
@@ -359,7 +351,7 @@ func resolveOtelConfig(yamlCfg config.OtelConfig, flagEnabled bool, runID, runNa
 		ResourceAttributes: yamlCfg.ResourceAttributes,
 		RunID:              runID,
 		RunName:            runName,
-	}
+	}.WithDefaults()
 }
 
 func isEnvTrue(v string) bool {

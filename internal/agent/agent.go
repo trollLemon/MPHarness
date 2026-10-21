@@ -124,7 +124,6 @@ type Agent struct {
 	commandOutputs     []string      // Captured command results, in the order they ran.
 	store              *output.Store // Captured output handles, or nil when disabled.
 	contextTokens      int64         // Live context size, driving compaction.
-	fixedOverhead      int64         // Per-request cost outside the messages: tool schemas and template framing.
 	iteration          int           // Zero-based index of the round now running.
 	compactionAttempts int           // Failed compactions; budget for the current one.
 	compactionsApplied int           // Compactions that succeeded this run.
@@ -145,9 +144,7 @@ type Options struct {
 // NewAgent builds an Agent for a single run. The run's telemetry identity
 // arrives on the context Execute is called with, not through Options.
 func NewAgent(log zerolog.Logger, krn Kronk, opts Options) *Agent {
-	if opts.LLM.ToolChoice == "" {
-		opts.LLM.ToolChoice = "auto"
-	}
+	opts.LLM = opts.LLM.WithDefaults()
 	log = log.With().Str("component", "agent").Logger()
 	return &Agent{
 		log:           log,
@@ -183,7 +180,7 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *lxd.Client
 	a.toolResultBudget = toolResultBudgetBytes(conf, a.krn.ModelConfig().ContextWindow())
 
 	if conf.Output.Enabled {
-		a.store = output.NewStore(cli, conf.VM.Name, config.OutputRunDir(a.runID), conf.Output, int64(a.toolResultBudget), conf.AllowedCommands)
+		a.store = output.NewStore(cli, conf.VM.Name, config.OutputRunDir(a.runID), conf.Output, int64(a.toolResultBudget))
 	}
 
 	a.log.Info().Int("tools", len(a.toolDocs)).Msg("tool documents built")
@@ -257,9 +254,6 @@ func (a *Agent) runIteration(ctx context.Context, cli *lxd.Client, conf config.C
 	if resp.Usage != nil {
 		a.contextTokens = int64(resp.Usage.TotalTokens)
 	}
-	// Measured before the assistant message lands, so a.conversation is still
-	// exactly what the request carried.
-	a.fixedOverhead = a.measureFixedOverhead(iterCtx, resp.Usage)
 
 	msg, finishReason, shouldBreak := a.extractAssistantMessage(resp)
 	iterSpan.SetAttributes(attribute.String("mph.finish_reason", finishReason))
@@ -287,7 +281,8 @@ func (a *Agent) runIteration(ctx context.Context, cli *lxd.Client, conf config.C
 	}
 
 	toolCalls := msg.ToolCalls
-	addToolCallEvents(iterSpan, toolCalls, conf.Truncation.ToolResult)
+	argsJSON := marshalToolCallArgs(toolCalls)
+	addToolCallEvents(iterSpan, toolCalls, argsJSON, conf.Truncation.ToolResult)
 
 	if len(toolCalls) == 0 && finishReason == model.FinishReasonLength {
 		mphotel.LogEvent(iterCtx, iterLog, zerolog.WarnLevel, "hit length limit without tool calls, injecting nudge and continuing", map[string]any{
@@ -306,7 +301,7 @@ func (a *Agent) runIteration(ctx context.Context, cli *lxd.Client, conf config.C
 		return nil
 	}
 
-	toolCallDocs := a.buildToolCallDocsWithContext(iterCtx, toolCalls, iter)
+	toolCallDocs := a.buildToolCallDocsWithContext(iterCtx, toolCalls, argsJSON, iter)
 	a.conversation = appendToConversation(a.conversation, buildAssistantMessage(msg, toolCallDocs, conf.Agent.Reasoning()))
 
 	toolStart := time.Now()
@@ -375,13 +370,20 @@ func (a *Agent) recordTokenUsage(ctx context.Context, span trace.Span, log zerol
 	)
 }
 
-func addToolCallEvents(span trace.Span, toolCalls []model.ResponseToolCall, maxArgs int) {
-	for _, tc := range toolCalls {
-		argsJSON, _ := json.Marshal(tc.Function.Arguments)
+func marshalToolCallArgs(toolCalls []model.ResponseToolCall) []json.RawMessage {
+	out := make([]json.RawMessage, len(toolCalls))
+	for i, tc := range toolCalls {
+		out[i], _ = json.Marshal(tc.Function.Arguments)
+	}
+	return out
+}
+
+func addToolCallEvents(span trace.Span, toolCalls []model.ResponseToolCall, args []json.RawMessage, maxArgs int) {
+	for i, tc := range toolCalls {
 		span.AddEvent("mph.agent.tool_call", trace.WithAttributes(
 			attribute.String("mph.tool.name", tc.Function.Name),
 			attribute.String("mph.tool.id", tc.ID),
-			attribute.String("mph.tool.arguments", textutil.Truncate(string(argsJSON), maxArgs)),
+			attribute.String("mph.tool.arguments", textutil.Truncate(string(args[i]), maxArgs)),
 		))
 	}
 }
@@ -455,16 +457,15 @@ func (a *Agent) shouldTerminateWithoutToolCalls(toolCalls []model.ResponseToolCa
 	return true
 }
 
-func (a *Agent) buildToolCallDocsWithContext(ctx context.Context, toolCalls []model.ResponseToolCall, iter int) []model.D {
+func (a *Agent) buildToolCallDocsWithContext(ctx context.Context, toolCalls []model.ResponseToolCall, args []json.RawMessage, iter int) []model.D {
 	docs := make([]model.D, 0, len(toolCalls))
-	for _, tc := range toolCalls {
-		argsJSON, _ := json.Marshal(tc.Function.Arguments)
+	for i, tc := range toolCalls {
 		mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "agent tool call", map[string]any{
 			"event": eventAgentToolCall,
 			"iter":  iter + 1,
 			"tool":  tc.Function.Name,
 			"id":    tc.ID,
-			"args":  json.RawMessage(argsJSON),
+			"args":  args[i],
 		})
 
 		docs = append(docs, model.D{
@@ -472,7 +473,7 @@ func (a *Agent) buildToolCallDocsWithContext(ctx context.Context, toolCalls []mo
 			"type": "function",
 			"function": model.D{
 				"name":      tc.Function.Name,
-				"arguments": string(argsJSON),
+				"arguments": string(args[i]),
 			},
 		})
 	}
@@ -487,7 +488,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 	iter, _ := iterationFromContext(ctx)
 	for _, tc := range toolCalls {
 		start := time.Now()
-		result, err := Call(ctx, cli, cfg, a.store, tc.Function.Name, map[string]any(tc.Function.Arguments))
+		result, err := Call(ctx, cli, cfg, a.store, tc.Function.Name, tc.Function.Arguments)
 		duration := time.Since(start)
 
 		status := "SUCCESS"
@@ -497,6 +498,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 		var failure error
 
 		a.totals.ToolCalls++
+		env, isEnvelope := parseToolEnvelope(result)
 		switch {
 		case err != nil:
 			status = "FAILED"
@@ -505,16 +507,15 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 			content = buildToolErrorContent(err)
 			resultSize = len(content)
 			a.totals.ToolFailures++
-		case isToolEnvelope(result):
-			if isCaptureEnvelope(result) {
-				if id := capturedOutputID(result); id != "" {
-					commandOutputs = append(commandOutputs, fmt.Sprintf("<captured output_id=%s>", id))
-					mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "command output too large for inline context, captured to file", map[string]any{
-						"tool":   tc.Function.Name,
-						"id":     tc.ID,
-						"out_id": id,
-					})
-				}
+		case isEnvelope:
+			if env.Data.Result.Captured {
+				id := env.Data.Result.OutputID
+				commandOutputs = append(commandOutputs, fmt.Sprintf("<captured output_id=%s>", id))
+				mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "command output too large for inline context, captured to file", map[string]any{
+					"tool":   tc.Function.Name,
+					"id":     tc.ID,
+					"out_id": id,
+				})
 			}
 			content = result
 		default:

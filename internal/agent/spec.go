@@ -168,9 +168,9 @@ func Call(ctx context.Context, cli *lxd.Client, cfg config.Config, store *output
 	case "vm_info":
 		return cli.Info(ctx, cfg.VM.Name)
 	case "output_search":
-		return callOutputSearch(ctx, cfg, store, args)
+		return callOutputSearch(ctx, store, args)
 	case "output_read":
-		return callOutputRead(ctx, cfg, store, args)
+		return callOutputRead(ctx, store, args)
 	default:
 		return "", fmt.Errorf("unknown tool %q", name)
 	}
@@ -199,7 +199,7 @@ func callExec(ctx context.Context, cli *lxd.Client, cfg config.Config, store *ou
 		}
 		out := res.Inline
 		if out == "" {
-			out = "(no output)"
+			out = output.NoOutput
 		}
 		if res.ExitCode != 0 {
 			out += fmt.Sprintf("\n(exit code: %d)", res.ExitCode)
@@ -212,12 +212,12 @@ func callExec(ctx context.Context, cli *lxd.Client, cfg config.Config, store *ou
 		return "", execErr
 	}
 	if out == "" {
-		return "(no output)", nil
+		return output.NoOutput, nil
 	}
 	return out, nil
 }
 
-func callOutputSearch(ctx context.Context, _ config.Config, store *output.Store, args map[string]any) (string, error) {
+func callOutputSearch(ctx context.Context, store *output.Store, args map[string]any) (string, error) {
 	if store == nil {
 		return "", fmt.Errorf("output_search is disabled (output.enabled is false)")
 	}
@@ -263,7 +263,7 @@ func buildSearchSuccessContent(res output.SearchResult) string {
 	return string(b)
 }
 
-func callOutputRead(ctx context.Context, _ config.Config, store *output.Store, args map[string]any) (string, error) {
+func callOutputRead(ctx context.Context, store *output.Store, args map[string]any) (string, error) {
 	if store == nil {
 		return "", fmt.Errorf("output_read is disabled (output.enabled is false)")
 	}
@@ -321,37 +321,22 @@ func buildReadSuccessContent(res output.ReadResult) string {
 	return string(b)
 }
 
-func isCaptureEnvelope(s string) bool {
-	return strings.Contains(s, `"captured":true`)
+type toolEnvelope struct {
+	Status string `json:"status"`
+	Data   struct {
+		Result struct {
+			OutputID string `json:"output_id"`
+			Captured bool   `json:"captured"`
+		} `json:"result"`
+	} `json:"data"`
 }
 
-func capturedOutputID(s string) string {
-	var v struct {
-		Data struct {
-			Result struct {
-				OutputID string `json:"output_id"`
-			} `json:"result"`
-		} `json:"data"`
-	}
+func parseToolEnvelope(s string) (toolEnvelope, bool) {
+	var v toolEnvelope
 	if err := json.Unmarshal([]byte(s), &v); err != nil {
-		return ""
+		return toolEnvelope{}, false
 	}
-	return v.Data.Result.OutputID
-}
-
-func isToolEnvelope(s string) bool {
-	var v struct {
-		Status string `json:"status"`
-		Data   struct {
-			Result struct {
-				OutputID string `json:"output_id"`
-			} `json:"result"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal([]byte(s), &v); err != nil {
-		return false
-	}
-	return v.Status == "SUCCESS" && v.Data.Result.OutputID != ""
+	return v, v.Status == "SUCCESS" && v.Data.Result.OutputID != ""
 }
 
 func buildToolErrorContent(err error) string {
@@ -456,10 +441,7 @@ func buildLengthNudgeMessages(msg *model.ResponseMessage, maxContent int) []mode
 }
 
 func buildChatRequest(conversation, toolDocs []model.D, llmConfig config.LLMConfig) model.D {
-	maxOutputTokens := llmConfig.MaxOutputTokens
-	if maxOutputTokens <= 0 {
-		maxOutputTokens = config.DefaultLLMMaxOutputTokens
-	}
+	llmConfig = llmConfig.WithDefaults()
 	req := model.D{
 		"messages":    conversation,
 		"temperature": llmConfig.Temperature,
@@ -468,7 +450,7 @@ func buildChatRequest(conversation, toolDocs []model.D, llmConfig config.LLMConf
 		"tool_choice": llmConfig.ToolChoice,
 		// The chat path reads max_tokens (not the Responses-API max_output_tokens)
 		// and applies it to n_predict, clamped to what is left of the window.
-		"max_tokens": maxOutputTokens,
+		"max_tokens": llmConfig.MaxOutputTokens,
 	}
 
 	// top_k defaults to greedy only when the caller also asked for greedy

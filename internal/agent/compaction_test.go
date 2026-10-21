@@ -263,9 +263,9 @@ func TestRevertedDoesNotBurnAttempts(t *testing.T) {
 		{"role": "user", "content": "task"},
 	}
 	agt.conversation, agt.contextTokens, agt.toolResultBudget = tiny, 7500, 4096
-	outcome := agt.maybeCompact(context.Background(), conf)
-	if outcome != "reverted" {
-		t.Fatalf("want reverted for tiny history, got %q", outcome)
+	agt.maybeCompact(context.Background(), conf)
+	if agt.contextTokens != 7500 || agt.compactionsApplied != 0 {
+		t.Fatalf("tiny history must be reverted, got context=%d applied=%d", agt.contextTokens, agt.compactionsApplied)
 	}
 	if agt.compactionAttempts != 0 {
 		t.Fatalf("revert must not burn the failure budget, attempts=%d", agt.compactionAttempts)
@@ -305,9 +305,9 @@ func TestAppliedCompactionResetsAttempts(t *testing.T) {
 
 	agt.conversation, agt.contextTokens, agt.toolResultBudget = conv, 7500, 4096
 	agt.compactionAttempts = 2
-	outcome := agt.maybeCompact(context.Background(), conf)
-	if outcome != "applied" {
-		t.Fatalf("want applied, got %q", outcome)
+	agt.maybeCompact(context.Background(), conf)
+	if agt.compactionsApplied != 1 {
+		t.Fatalf("want applied, got %d compactions", agt.compactionsApplied)
 	}
 	if agt.compactionAttempts != 0 {
 		t.Fatalf("a successful compaction must restore the failure budget, attempts=%d", agt.compactionAttempts)
@@ -359,8 +359,9 @@ func TestPostCompactionContextKeepsToolSchemaOverhead(t *testing.T) {
 			schemaTokens := int64(agt.estimateTokens(context.Background(), string(schemaJSON)))
 
 			agt.conversation, agt.contextTokens, agt.toolResultBudget = base, 7500, 4096
-			if outcome := agt.maybeCompact(context.Background(), conf); outcome != "applied" {
-				t.Fatalf("want applied, got %q", outcome)
+			agt.maybeCompact(context.Background(), conf)
+			if agt.compactionsApplied != 1 {
+				t.Fatalf("want applied, got %d compactions", agt.compactionsApplied)
 			}
 			if !tt.wantOverhead {
 				return
@@ -437,7 +438,7 @@ func TestCompactionSeesToolResultBeforeNextModelCall(t *testing.T) {
 		return "", nil
 	}}
 	// Cutoff must match what NewAgent passes the store in production.
-	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, int64(agt.toolResultBudget), nil)
+	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, int64(agt.toolResultBudget))
 	agt.store = store
 
 	if reported >= threshold {
@@ -456,8 +457,9 @@ func TestCompactionSeesToolResultBeforeNextModelCall(t *testing.T) {
 	if agt.contextTokens < threshold {
 		t.Fatalf("context %d must reach the %d threshold for the next call to be oversized", agt.contextTokens, threshold)
 	}
-	if outcome := agt.maybeCompact(context.Background(), cfg); outcome != "applied" {
-		t.Fatalf("compaction must fire before the next model call, got %q", outcome)
+	agt.maybeCompact(context.Background(), cfg)
+	if agt.compactionsApplied != 1 {
+		t.Fatalf("compaction must fire before the next model call, got %d compactions", agt.compactionsApplied)
 	}
 	if agt.contextTokens >= threshold {
 		t.Fatalf("compaction did not reclaim context: %d still over budget", agt.contextTokens)
