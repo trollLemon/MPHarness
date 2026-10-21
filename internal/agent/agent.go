@@ -14,7 +14,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/trollLemon/MPHarness/internal/compact"
 	"github.com/trollLemon/MPHarness/internal/config"
 	"github.com/trollLemon/MPHarness/internal/lxd"
 	mphotel "github.com/trollLemon/MPHarness/internal/otel"
@@ -637,7 +636,7 @@ func (s *agentSummarizer) Summarize(ctx context.Context, systemPrompt, renderedH
 		return "", err
 	}
 	if len(resp.Choices) == 0 {
-		return "", fmt.Errorf("%w (no choices)", compact.ErrEmptySummary)
+		return "", fmt.Errorf("%w (no choices)", errEmptySummary)
 	}
 	choice := resp.Choices[0]
 	msg := choice.Message
@@ -647,7 +646,7 @@ func (s *agentSummarizer) Summarize(ctx context.Context, systemPrompt, renderedH
 	if msg != nil && msg.Content != "" {
 		return msg.Content, nil
 	}
-	return "", fmt.Errorf("%w (finish_reason=%s)", compact.ErrEmptySummary, choice.FinishReason())
+	return "", fmt.Errorf("%w (finish_reason=%s)", errEmptySummary, choice.FinishReason())
 }
 
 func (a *Agent) estimateTokens(ctx context.Context, text string) int {
@@ -670,10 +669,10 @@ func (a *Agent) schemaOverheadTokens(ctx context.Context) int64 {
 	return int64(a.estimateTokens(ctx, string(schemas)))
 }
 
-func outputHandleInfos(handles []output.Handle) []compact.HandleInfo {
-	infos := make([]compact.HandleInfo, 0, len(handles))
+func outputHandleInfos(handles []output.Handle) []handleInfo {
+	infos := make([]handleInfo, 0, len(handles))
 	for _, h := range handles {
-		infos = append(infos, compact.HandleInfo{
+		infos = append(infos, handleInfo{
 			ID: h.ID, TotalLines: h.TotalLines,
 			TotalBytes: h.TotalBytes, Command: h.Command,
 		})
@@ -689,10 +688,10 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
 		return
 	}
 	window := a.krn.ModelConfig().ContextWindow()
-	if !compact.ShouldCompact(a.contextTokens, int64(window), cc.Threshold, len(a.conversation), cc.MinMessages) {
+	if !shouldCompact(a.contextTokens, int64(window), cc.Threshold) {
 		return
 	}
-	var infos []compact.HandleInfo
+	var infos []handleInfo
 	if a.store != nil {
 		infos = outputHandleInfos(a.store.Handles())
 	}
@@ -708,16 +707,15 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
 
 	start := time.Now()
 	summarizer := &agentSummarizer{krn: a.krn, chatTimeout: a.chatTimeout}
-	estimate := func(s string) int { return a.estimateTokens(compCtx, s) }
 	overhead := a.schemaOverheadTokens(compCtx)
 	before := a.contextTokens
-	win := compact.Window{Size: window, FixedOverhead: int(overhead)}
+	win := compactionWindow{Size: window, FixedOverhead: int(overhead)}
 
 	heartbeatLog := a.log.With().Ctx(compCtx).Str("run", a.runID).Int("iter", a.iteration+1).Str("phase", "compaction").Logger()
 	newConv, outcome, summaryLen, compactErr := func() ([]model.D, string, int, error) {
 		cancel := heartbeatWithCancel(heartbeatLog, "still compacting")
 		defer cancel()
-		return compact.Compact(compCtx, a.conversation, infos, cc.MaxSummaryTokens, a.toolResultBudget, win, summarizer, estimate, a.compactionsApplied)
+		return compactConversation(compCtx, a.conversation, infos, cc.MaxSummaryTokens, a.toolResultBudget, win, summarizer, a.compactionsApplied)
 	}()
 	duration := time.Since(start)
 
@@ -727,7 +725,7 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
 		after = overhead
 		for _, m := range newConv {
 			if c, _ := m["content"].(string); c != "" {
-				after += int64(estimate(c))
+				after += int64(a.estimateTokens(compCtx, c))
 			}
 		}
 		a.conversation = newConv
@@ -775,9 +773,8 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
 		})
 
 		return
-	case "reverted", "skipped":
-		// Not worth it yet (or nothing to do): the next attempt with a longer
-		// history may win, so this must not consume the failure budget.
+	case "skipped":
+		// Nothing to rewrite yet.
 		return
 	default:
 		a.compactionAttempts++
