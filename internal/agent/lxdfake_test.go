@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"testing"
 
@@ -43,4 +44,28 @@ func (fakeServer) ExecInstance(_ string, _ api.InstanceExecPost, args *lxdclient
 func newTestClient(t *testing.T) *lxd.Client {
 	t.Helper()
 	return lxd.NewWithServer(fakeServer{}, zerolog.Nop(), nil)
+}
+
+type scriptedOutputServer struct {
+	fakeServer
+	fn func(command string) (string, int)
+}
+
+func (s scriptedOutputServer) ExecInstance(_ string, post api.InstanceExecPost, args *lxdclient.InstanceExecArgs) (lxdclient.Operation, error) {
+	out, exit := "", 0
+	if args != nil && len(post.Command) >= 3 {
+		out, exit = s.fn(post.Command[2])
+		if args.Stdout != nil && out != "" {
+			_, _ = io.WriteString(args.Stdout, out)
+		}
+	}
+	if args != nil && args.DataDone != nil {
+		close(args.DataDone)
+	}
+	return fakeOperation{exit: exit}, nil
+}
+
+func newScriptedTestClient(t *testing.T, fn func(command string) (string, int)) *lxd.Client {
+	t.Helper()
+	return lxd.NewWithServer(scriptedOutputServer{fn: fn}, zerolog.Nop(), nil)
 }

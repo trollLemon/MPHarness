@@ -2,6 +2,7 @@ package compact
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"unicode/utf8"
@@ -11,26 +12,31 @@ import (
 
 const CompactionSystemPrompt = `You are summarising an autonomous VM-operator agent's conversation so it can continue with a smaller context.
 
-Structure the handover as three sections of bullet points:
+Return a handover using exactly these three headings, in this order:
 
-Done
-- What was attempted, what succeeded, and what failed.
-- Key outputs: exact values, file paths, command names, and counts. Copy them verbatim; never round, reformat, or paraphrase a value you are reporting.
+## Done
+- Every task or step attempted, whether it passed or failed.
+- For each one, include the observed result with enough concrete detail to verify or continue the work. Preserve exact values from the command output, for example HTTP status codes, file paths, counts, version strings, or error text; never paraphrase or round them.
+- Keep any other facts the next turn needs, such as decisions made, assumptions, and blockers.
 
-In progress
-- Anything started but not finished, and the exact point it stopped at.
+## In progress
+- Work that was started but not finished, and the exact point it stopped at.
 
-Not started
-- Everything from the original task that has not been attempted yet, so nothing is silently dropped.
+## Not started
+- Work from the original task that has not been attempted yet.
 
 Rules:
+- Every handover must include all three headings, even when a section is empty. Under an empty heading write "- None." instead of omitting the heading.
+- Never rename, merge, or reorder the headings. Use the exact text "## Done", "## In progress", and "## Not started".
+- Before replying, check that all three headings are present.
 - This summary is the only record of prior work. Anything you leave out cannot be recovered.
+- Do not reply with only a heading, a single word, or an empty section.
 - Captured output handles are referenced by their output_id. Copy every output_id verbatim, character for character, and say what each one contains. Never invent, shorten, or reformat an id.
 - Do not invent results, and do not claim work succeeded that the log shows failing.
+- Summarize inlined command outputs so their result is articulated without including the whole payload.
 - Plain prose and bullets.
-- Summarize inlined command outputs so that their result is articulated without needing to include the whole thing.
 
-Make sure these are formatted/indicated clearly so an agent can continue without confusion.
+Make sure the handover is formatted clearly so an agent can continue without confusion.
 `
 
 const StandingInstructions = `Operate asynchronously without user interaction. Prior messages are your own execution logs. Stop immediately on any permission or policy denial without workarounds. Inspect every result's status field. Always finish with a tool-call-free completion summary.`
@@ -213,9 +219,12 @@ func EstimateConversation(conversation []model.D, estimate func(string) int) int
 	return n
 }
 
-// BuildUserMessage constructs the message to show the agent on what has been done, what needs to be done, and any output handles to query. There is no verbatim tail of the conversation: the summary is the only
-// record of prior work, and re-inlining recent tool results is what stopped the rewrite from reclaiming anything.
+// BuildUserMessage constructs the message to show the agent on what has been done, what needs to be done, and any output handles to query.
 func BuildUserMessage(task, summary string, handles []HandleInfo, compactionsApplied int) string {
+	return buildUserMessage(task, summary, "", handles, compactionsApplied)
+}
+
+func buildUserMessage(task, summary, recentResults string, handles []HandleInfo, compactionsApplied int) string {
 	var b strings.Builder
 	b.WriteString("## Task\n" + strings.TrimSpace(task) + "\n\n")
 	b.WriteString("## Standing instructions\n" + StandingInstructions + "\n\n")
@@ -225,6 +234,10 @@ func BuildUserMessage(task, summary string, handles []HandleInfo, compactionsApp
 		fmt.Fprintf(&b, "## Work completed so far (after %d compactions)\n", compactionsApplied)
 	}
 	b.WriteString(strings.TrimSpace(summary) + "\n\n")
+	if recent := strings.TrimSpace(recentResults); recent != "" {
+		b.WriteString("## Recent command results\n")
+		b.WriteString(recent + "\n\n")
+	}
 	b.WriteString("## Active output handles\n")
 	if len(handles) == 0 {
 		b.WriteString("(none; do not call output_search or output_read, run new commands with vm_exec)\n")
@@ -235,6 +248,84 @@ func BuildUserMessage(task, summary string, handles []HandleInfo, compactionsApp
 		b.WriteString("Only use the output_id values listed above; never invent one.\n")
 	}
 	return b.String()
+}
+
+const (
+	recentResultBytes     = 512
+	recentResultsMax      = 8
+	recentResultsMaxBytes = 4096
+)
+
+// recentResults renders the most recent tool results as bounded evidence for the
+// handover. The summarizer is not trusted to preserve exact values on its own.
+func recentResults(conversation []model.D, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	commands := make(map[string]string)
+	type result struct {
+		command string
+		output  string
+	}
+	var results []result
+	for _, m := range conversation {
+		role, _ := m["role"].(string)
+		switch role {
+		case "assistant":
+			tcs, _ := m["tool_calls"].([]model.D)
+			for _, tc := range tcs {
+				id, _ := tc["id"].(string)
+				fn, _ := tc["function"].(model.D)
+				name, _ := fn["name"].(string)
+				args, _ := fn["arguments"].(string)
+				if id != "" && name != "" {
+					commands[id] = strings.TrimSpace(name + " " + args)
+				}
+			}
+		case "tool":
+			content, _ := m["content"].(string)
+			if strings.TrimSpace(content) == "" {
+				continue
+			}
+			id, _ := m["tool_call_id"].(string)
+			command := commands[id]
+			if command == "" {
+				command, _ = m["name"].(string)
+			}
+			if command == "" {
+				command = "command"
+			}
+			results = append(results, result{command: command, output: content})
+		}
+	}
+
+	remaining := maxBytes
+	kept := 0
+	var blocks []string
+	for i := len(results) - 1; i >= 0 && kept < recentResultsMax && remaining > 0; i-- {
+		block := fmt.Sprintf("$ %s\n%s\n\n", results[i].command, truncateHead(results[i].output, recentResultBytes))
+		if len(block) > remaining {
+			block = cutPrefix(block, remaining)
+		}
+		blocks = append(blocks, block)
+		remaining -= len(block)
+		kept++
+	}
+	var b strings.Builder
+	for i := len(blocks) - 1; i >= 0; i-- {
+		b.WriteString(blocks[i])
+	}
+	return strings.TrimSpace(b.String())
+}
+
+const minSummaryBytes = 64
+
+func validateSummary(summary string) error {
+	trimmed := strings.TrimSpace(summary)
+	if len(trimmed) < minSummaryBytes {
+		return fmt.Errorf("summary is %d bytes, want at least %d", len(trimmed), minSummaryBytes)
+	}
+	return nil
 }
 
 func taskText(conversation []model.D) string {
@@ -265,43 +356,92 @@ func renderBudgetBytes(win Window, budget int, estimate func(string) int) int {
 	return avail * bytesPerToken
 }
 
+// ErrEmptySummary marks a summarizer reply that carried no content, so
+// compaction can retry it with a corrective prompt instead of treating it like
+// a transport failure.
+var ErrEmptySummary = errors.New("summary response contained no content")
+
 // Compact rewrites the conversation into a system message plus a summary, or
 // returns the original with skipped, reverted, failed, or applied. The third
-// return is the summary length in bytes (0 when no summary was produced).
+// return is the summary length in bytes (0 when no summary was produced). The
+// error explains a failed outcome and is nil otherwise.
 // A revert never counts against retry budgets: it means "not worth it yet",
 // and the next attempt with a longer history may win.
-func Compact(ctx context.Context, conversation []model.D, handles []HandleInfo, maxSummaryTokens, budget int, win Window, s Summarizer, estimate func(string) int, compactionsApplied int) ([]model.D, string, int) {
+func Compact(ctx context.Context, conversation []model.D, handles []HandleInfo, maxSummaryTokens, budget int, win Window, s Summarizer, estimate func(string) int, compactionsApplied int) ([]model.D, string, int, error) {
 	if len(conversation) == 0 {
-		return conversation, "skipped", 0
+		return conversation, "skipped", 0, nil
 	}
 	system := conversation[0]
 	task := taskText(conversation)
 	maxBytes := renderBudgetBytes(win, budget, estimate)
+	recentBudget := maxBytes / 4
+	if recentBudget > recentResultsMaxBytes {
+		recentBudget = recentResultsMaxBytes
+	}
+	recent := recentResults(conversation, recentBudget)
 	if estimate != nil {
 		before := EstimateConversation(conversation, estimate)
-		afterMin := EstimateMessage(system, estimate) + estimate(BuildUserMessage(task, "", handles, compactionsApplied))
+		afterMin := EstimateMessage(system, estimate) + estimate(buildUserMessage(task, "", recent, handles, compactionsApplied))
 		if afterMin >= before {
-			return conversation, "reverted", 0
+			return conversation, "reverted", 0, nil
 		}
 		if savings := before - afterMin; savings*9/10 < minSummaryBudgetTokens {
-			return conversation, "reverted", 0
+			return conversation, "reverted", 0, nil
 		} else if maxSummaryTokens > savings*9/10 {
 			maxSummaryTokens = savings * 9 / 10
 		}
 	}
+	worthIt := func(summary string) bool {
+		if estimate == nil {
+			return true
+		}
+		before := EstimateConversation(conversation, estimate)
+		after := EstimateMessage(system, estimate) + estimate(buildUserMessage(task, summary, recent, handles, compactionsApplied))
+		return after*10 < before*9
+	}
+
 	rendered := RenderHistory(conversation, budget, maxBytes, ToolResultFullText)
 	summary, err := s.Summarize(ctx, CompactionSystemPrompt, rendered, maxSummaryTokens)
-	if err != nil || strings.TrimSpace(summary) == "" {
-		return conversation, "failed", 0
+	if err != nil && !errors.Is(err, ErrEmptySummary) {
+		return conversation, "failed", 0, fmt.Errorf("summarize: %w", err)
 	}
-	userMsg := model.D{"role": "user", "content": BuildUserMessage(task, summary, handles, compactionsApplied)}
-	compacted := []model.D{system, userMsg}
-	if estimate != nil {
-		before := EstimateConversation(conversation, estimate)
-		after := EstimateMessage(system, estimate) + EstimateMessage(userMsg, estimate)
-		if after*10 >= before*9 {
-			return conversation, "reverted", len(summary)
+	if !worthIt(summary) {
+		return conversation, "reverted", len(summary), nil
+	}
+	if reason := summaryRejection(err, summary); reason != nil {
+		summary, err = repairSummary(ctx, s, conversation, budget, maxBytes, maxSummaryTokens, summary, reason)
+		if err != nil {
+			return conversation, "failed", 0, fmt.Errorf("summary repair: %w", err)
+		}
+		if reason := summaryRejection(nil, summary); reason != nil {
+			return conversation, "failed", 0, fmt.Errorf("summary rejected after repair: %w", reason)
+		}
+		if !worthIt(summary) {
+			return conversation, "reverted", len(summary), nil
 		}
 	}
-	return compacted, "applied", len(summary)
+	userMsg := model.D{"role": "user", "content": buildUserMessage(task, summary, recent, handles, compactionsApplied)}
+	return []model.D{system, userMsg}, "applied", len(summary), nil
+}
+
+func summaryRejection(err error, summary string) error {
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(summary) == "" {
+		return errors.New("summary is empty")
+	}
+	return validateSummary(summary)
+}
+
+func repairSummary(ctx context.Context, s Summarizer, conversation []model.D, budget, maxBytes, maxTokens int, previous string, reason error) (string, error) {
+	system := CompactionSystemPrompt + "\n\nYour previous handover was rejected: " + reason.Error() + " Return a corrected handover with all three headings, using \"- None.\" under any empty section."
+	history := RenderHistory(conversation, budget, maxBytes, ToolResultFullText)
+	if previous = strings.TrimSpace(previous); previous != "" {
+		block := "\n\n## Previous rejected handover\n" + previous
+		if maxBytes > len(block) {
+			history = RenderHistory(conversation, budget, maxBytes-len(block), ToolResultFullText) + block
+		}
+	}
+	return s.Summarize(ctx, system, history, maxTokens)
 }

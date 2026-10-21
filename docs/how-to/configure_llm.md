@@ -84,7 +84,7 @@ output:
 | Key | Default | Effect |
 |-----|---------|--------|
 | `enabled` | `true` | `false` restores exactly today's behaviour. |
-| `mode` | `auto` | `always` captures every command to a file. In `auto` the model sees uncaptured output untruncated, so set `always` if runaway output is a concern. |
+| `mode` | `auto` | `always` captures every command to a file. In `auto` the model sees uncaptured output inline until it exceeds the per-result context budget; that result is then rejected with `FAILED`, so the model retries with `capture: true` or a narrower command. |
 | `inline_max_size` | `0` | Inline cutoff; `0` = derived tool-result budget. |
 | `max_command_size` | `64MiB` | Per-capture ceiling. |
 | `max_total_size` | `512MiB` | Per-run cumulative ceiling. |
@@ -104,6 +104,8 @@ compaction:
   min_messages: 6
   max_attempts: 3
 ```
+
+Compaction retries an empty or too-short handover once with a corrective prompt. If it still fails, the conversation is left intact and the reason is logged on the `context_compaction` event.
 
 ## Related
 

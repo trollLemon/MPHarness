@@ -57,6 +57,8 @@ const (
 	eventAgentToolCall            = "agent_tool_call"
 	eventToolSucceeded            = "tool_succeeded"
 	eventToolFailed               = "tool_failed"
+	eventToolOutputTooLarge       = "tool_output_too_large"
+	eventContextOverflow          = "context_overflow"
 	eventContextCompaction        = "context_compaction"
 	eventContextCompactionApplied = "context_compaction_applied"
 	eventRunSummary               = "run_summary"
@@ -241,9 +243,7 @@ func (a *Agent) runIteration(ctx context.Context, cli *lxd.Client, conf config.C
 
 	iterLog.Debug().Int("iter", iter+1).Msg("running inference")
 
-	chatStart := time.Now()
-	resp, err := a.callChat(iterCtx, buildChatRequest(a.conversation, a.toolDocs, a.llmConfig), iter)
-	chatDur = time.Since(chatStart)
+	resp, chatDur, err := a.chatWithOverflowRecovery(iterCtx, iter, iterLog)
 	if err != nil {
 		mphotel.FailSpan(iterSpan, err)
 		iterSpan.End()
@@ -492,33 +492,18 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 
 		status := "SUCCESS"
 		detail := result
+		resultSize := len(result)
 		var content string
+		var failure error
 
 		a.totals.ToolCalls++
-		if err == nil {
-			mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "tool succeeded", map[string]any{
-				"event":  eventToolSucceeded,
-				"iter":   iter,
-				"tool":   tc.Function.Name,
-				"id":     tc.ID,
-				"dur_ms": duration.Milliseconds(),
-				"out":    textutil.Truncate(result, cfg.Truncation.ToolResult),
-			})
-		}
-
 		switch {
 		case err != nil:
 			status = "FAILED"
 			detail = err.Error()
-			mphotel.LogEvent(ctx, a.log, zerolog.ErrorLevel, "tool execution failed", map[string]any{
-				"event":  eventToolFailed,
-				"iter":   iter,
-				"tool":   tc.Function.Name,
-				"id":     tc.ID,
-				"dur_ms": duration.Milliseconds(),
-				"error":  err,
-			})
+			failure = err
 			content = buildToolErrorContent(err)
+			resultSize = len(content)
 			a.totals.ToolFailures++
 		case isToolEnvelope(result):
 			if isCaptureEnvelope(result) {
@@ -533,13 +518,51 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 			}
 			content = result
 		default:
+			content = buildToolSuccessContent(tc.Function.Name, result)
 			if tc.Function.Name == "vm_exec" {
 				commandOutputs = append(commandOutputs, result)
 				mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "command output", map[string]any{
 					"command_output": textutil.Truncate(result, cfg.Truncation.CommandOutput),
 				})
 			}
-			content = buildToolSuccessContent(tc.Function.Name, result)
+		}
+
+		if a.toolResultBudget > 0 && resultSize > a.toolResultBudget {
+			content = buildContextOverflowContent(tc.Function.Name, resultSize, a.toolResultBudget, a.store != nil)
+			detail = content
+			if status == "SUCCESS" {
+				status = "FAILED"
+				failure = fmt.Errorf("tool result too large: %d bytes over the %d-byte context budget", resultSize, a.toolResultBudget)
+				a.totals.ToolFailures++
+			}
+			mphotel.LogEvent(ctx, a.log, zerolog.WarnLevel, "tool output too large", map[string]any{
+				"event":  eventToolOutputTooLarge,
+				"iter":   iter,
+				"tool":   tc.Function.Name,
+				"id":     tc.ID,
+				"bytes":  resultSize,
+				"budget": a.toolResultBudget,
+			})
+		}
+
+		if failure != nil {
+			mphotel.LogEvent(ctx, a.log, zerolog.ErrorLevel, "tool execution failed", map[string]any{
+				"event":  eventToolFailed,
+				"iter":   iter,
+				"tool":   tc.Function.Name,
+				"id":     tc.ID,
+				"dur_ms": duration.Milliseconds(),
+				"error":  failure,
+			})
+		} else {
+			mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "tool succeeded", map[string]any{
+				"event":  eventToolSucceeded,
+				"iter":   iter,
+				"tool":   tc.Function.Name,
+				"id":     tc.ID,
+				"dur_ms": duration.Milliseconds(),
+				"out":    textutil.Truncate(result, cfg.Truncation.ToolResult),
+			})
 		}
 
 		span.AddEvent("mph.agent.tool_result", trace.WithAttributes(

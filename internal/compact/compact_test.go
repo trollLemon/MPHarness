@@ -51,6 +51,10 @@ func TestShouldCompact(t *testing.T) {
 	}
 }
 
+func summaryWith(text string) string {
+	return "## Done\n- " + text + "\n\n## In progress\n- None.\n\n## Not started\n- None."
+}
+
 func TestCompactHandover(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -73,7 +77,7 @@ func TestCompactHandover(t *testing.T) {
 				{"role": "tool", "name": "vm_exec", "content": "out2"},
 			},
 			handles:     []HandleInfo{{ID: "oid-1", TotalLines: 10, TotalBytes: 100, Command: "cat big"}},
-			summary:     "did stuff",
+			summary:     summaryWith("did stuff"),
 			wantOutcome: "applied",
 			wantSystem:  "SYS-BYTES",
 			wantSubs:    []string{"## Task", "run ls", "did stuff", "oid-1", "after 0 compactions", "never invent one"},
@@ -82,14 +86,14 @@ func TestCompactHandover(t *testing.T) {
 			name:         "handles survive when the model omits them",
 			conversation: conv(8),
 			handles:      []HandleInfo{{ID: "must-survive", TotalLines: 5, TotalBytes: 50, Command: "ls"}},
-			summary:      "no handles mentioned",
+			summary:      summaryWith("no handles mentioned"),
 			wantOutcome:  "applied",
 			wantSubs:     []string{"must-survive"},
 		},
 		{
 			name:         "handover carries the compaction count",
 			conversation: conv(8),
-			summary:      "did stuff",
+			summary:      summaryWith("did stuff"),
 			applied:      3,
 			wantOutcome:  "applied",
 			wantSubs:     []string{"after 3 compactions", "do not call output_search or output_read"},
@@ -97,7 +101,7 @@ func TestCompactHandover(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, outcome, _ := Compact(context.Background(), tt.conversation, tt.handles, 2048, 4000, Window{Size: 1 << 20}, &fakeSummarizer{summary: tt.summary}, nil, tt.applied)
+			got, outcome, _, _ := Compact(context.Background(), tt.conversation, tt.handles, 2048, 4000, Window{Size: 1 << 20}, &fakeSummarizer{summary: tt.summary}, nil, tt.applied)
 			if outcome != tt.wantOutcome {
 				t.Fatalf("outcome %q want %q", outcome, tt.wantOutcome)
 			}
@@ -119,7 +123,7 @@ func TestCompactHandover(t *testing.T) {
 
 func TestShrinkGuardReverts(t *testing.T) {
 	conversation := conv(8)
-	_, outcome, _ := Compact(context.Background(), conversation, nil, 2048, 4000, Window{Size: 1 << 20}, &fakeSummarizer{summary: strings.Repeat("x", 100000)}, func(s string) int { return len(s) }, 0)
+	_, outcome, _, _ := Compact(context.Background(), conversation, nil, 2048, 4000, Window{Size: 1 << 20}, &fakeSummarizer{summary: strings.Repeat("x", 100000)}, func(s string) int { return len(s) }, 0)
 	if outcome != "reverted" {
 		t.Fatalf("want reverted, got %q", outcome)
 	}
@@ -137,7 +141,7 @@ func TestFailureKeepsOriginal(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			conversation := conv(8)
-			got, outcome, _ := Compact(context.Background(), conversation, nil, 2048, 4000, Window{Size: 1 << 20}, &fakeSummarizer{summary: tt.summary, err: tt.err}, nil, 0)
+			got, outcome, _, _ := Compact(context.Background(), conversation, nil, 2048, 4000, Window{Size: 1 << 20}, &fakeSummarizer{summary: tt.summary, err: tt.err}, nil, 0)
 			if outcome != "failed" {
 				t.Fatalf("want failed, got %q", outcome)
 			}
@@ -146,6 +150,30 @@ func TestFailureKeepsOriginal(t *testing.T) {
 			}
 		})
 	}
+}
+
+type sequenceSummarizer struct {
+	summaries []string
+	errs      []error
+	calls     int
+	systems   []string
+	rendered  []string
+}
+
+func (s *sequenceSummarizer) Summarize(_ context.Context, systemPrompt, renderedHistory string, _ int) (string, error) {
+	s.calls++
+	s.systems = append(s.systems, systemPrompt)
+	s.rendered = append(s.rendered, renderedHistory)
+	idx := s.calls - 1
+	var summary string
+	var err error
+	if idx < len(s.summaries) {
+		summary = s.summaries[idx]
+	}
+	if idx < len(s.errs) {
+		err = s.errs[idx]
+	}
+	return summary, err
 }
 
 type countingSummarizer struct {
@@ -165,7 +193,7 @@ func (f *countingSummarizer) Summarize(_ context.Context, _, renderedHistory str
 func TestPreCheckSkipsSummarizerWhenNothingToSave(t *testing.T) {
 	conversation := conv(4)
 	sum := &countingSummarizer{summary: "brief"}
-	_, outcome, summaryLen := Compact(context.Background(), conversation, nil, 2048, 4000, Window{Size: 1 << 20}, sum, func(s string) int { return len(s) }, 0)
+	_, outcome, summaryLen, _ := Compact(context.Background(), conversation, nil, 2048, 4000, Window{Size: 1 << 20}, sum, func(s string) int { return len(s) }, 0)
 	if outcome != "reverted" {
 		t.Fatalf("want reverted, got %q", outcome)
 	}
@@ -174,6 +202,79 @@ func TestPreCheckSkipsSummarizerWhenNothingToSave(t *testing.T) {
 	}
 	if summaryLen != 0 {
 		t.Fatalf("no summary produced, want 0 bytes, got %d", summaryLen)
+	}
+}
+
+func TestCompactRepairsRejectedSummary(t *testing.T) {
+	sum := &sequenceSummarizer{summaries: []string{"too short", validSummary}}
+	_, outcome, _, err := Compact(context.Background(), conv(8), nil, 2048, 4000,
+		Window{Size: 1 << 20}, sum, nil, 0)
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if outcome != "applied" {
+		t.Fatalf("outcome %q, want applied", outcome)
+	}
+	if sum.calls != 2 {
+		t.Fatalf("calls = %d, want 2 (initial + repair)", sum.calls)
+	}
+	if !strings.Contains(sum.systems[1], "rejected") {
+		t.Errorf("repair system prompt must name the rejection: %q", sum.systems[1])
+	}
+	if !strings.Contains(sum.rendered[1], "Previous rejected handover") || !strings.Contains(sum.rendered[1], "too short") {
+		t.Errorf("repair history must carry the rejected summary: %q", sum.rendered[1])
+	}
+}
+
+func TestCompactRepairsEmptySummary(t *testing.T) {
+	sum := &sequenceSummarizer{
+		summaries: []string{"", validSummary},
+		errs:      []error{ErrEmptySummary, nil},
+	}
+	_, outcome, _, err := Compact(context.Background(), conv(8), nil, 2048, 4000,
+		Window{Size: 1 << 20}, sum, nil, 0)
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if outcome != "applied" {
+		t.Fatalf("outcome %q, want applied", outcome)
+	}
+	if sum.calls != 2 {
+		t.Fatalf("calls = %d, want 2", sum.calls)
+	}
+	if !strings.Contains(sum.systems[1], "no content") {
+		t.Errorf("repair prompt must explain the empty summary: %q", sum.systems[1])
+	}
+}
+
+func TestCompactReportsFailureReason(t *testing.T) {
+	tests := []struct {
+		name string
+		sum  *sequenceSummarizer
+		want string
+	}{
+		{
+			name: "short twice",
+			sum:  &sequenceSummarizer{summaries: []string{"too short", "too short"}},
+			want: "summary rejected after repair",
+		},
+		{
+			name: "summarizer error",
+			sum:  &sequenceSummarizer{errs: []error{context.DeadlineExceeded}, summaries: []string{""}},
+			want: "summarize",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, outcome, _, err := Compact(context.Background(), conv(8), nil, 2048, 4000,
+				Window{Size: 1 << 20}, tt.sum, nil, 0)
+			if outcome != "failed" {
+				t.Fatalf("outcome %q, want failed", outcome)
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want it to contain %q", err, tt.want)
+			}
+		})
 	}
 }
 
@@ -205,8 +306,8 @@ func TestSummarizerInputFitsWindow(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sum := &countingSummarizer{summary: "brief"}
-			Compact(context.Background(), conversation, nil, 512, tt.budget,
+			sum := &countingSummarizer{summary: summaryWith("listed the requested output")}
+			_, _, _, _ = Compact(context.Background(), conversation, nil, 512, tt.budget,
 				Window{Size: tt.window}, sum, est, 0)
 
 			if sum.calls != 1 {
@@ -231,9 +332,10 @@ func TestSummaryBudgetCappedBySavings(t *testing.T) {
 		{"role": "tool", "name": "vm_exec", "content": strings.Repeat("b", 2000)},
 	}
 
-	sum := &countingSummarizer{summary: "Completed: listed files. Remaining: done."}
+	summary := summaryWith("Completed: listed files. Remaining: done.")
+	sum := &countingSummarizer{summary: summary}
 	est := func(s string) int { return len(s)/4 + 1 }
-	got, outcome, summaryLen := Compact(context.Background(), conversation, nil, 2048, 4000, Window{Size: 1 << 20}, sum, est, 2)
+	got, outcome, summaryLen, _ := Compact(context.Background(), conversation, nil, 2048, 4000, Window{Size: 1 << 20}, sum, est, 2)
 	if outcome != "applied" {
 		t.Fatalf("want applied, got %q", outcome)
 	}
@@ -243,7 +345,7 @@ func TestSummaryBudgetCappedBySavings(t *testing.T) {
 	if sum.maxTokens[0] >= 2048 {
 		t.Fatalf("budget must be capped below maxSummaryTokens 2048, got %d", sum.maxTokens[0])
 	}
-	if summaryLen != len("Completed: listed files. Remaining: done.") {
+	if summaryLen != len(summary) {
 		t.Fatalf("want summary bytes logged, got %d", summaryLen)
 	}
 	body, _ := got[1]["content"].(string)
@@ -264,7 +366,7 @@ func TestRevertedReportsSummaryBytes(t *testing.T) {
 		)
 	}
 	sum := &countingSummarizer{summary: strings.Repeat("x", 50000)}
-	_, outcome, summaryLen := Compact(context.Background(), conversation, nil, 2048, 4000, Window{Size: 1 << 20}, sum, func(s string) int { return len(s) }, 0)
+	_, outcome, summaryLen, _ := Compact(context.Background(), conversation, nil, 2048, 4000, Window{Size: 1 << 20}, sum, func(s string) int { return len(s) }, 0)
 	if outcome != "reverted" {
 		t.Fatalf("want reverted, got %q", outcome)
 	}
@@ -433,9 +535,9 @@ func TestEstimateMessageCountsToolCalls(t *testing.T) {
 }
 
 func TestCompactionSystemPromptAsksForResumableState(t *testing.T) {
-	for _, want := range []string{"Done", "In progress", "Not started"} {
+	for _, want := range []string{"## Done", "## In progress", "## Not started", "even when a section is empty", "None.", "Before replying"} {
 		if !strings.Contains(CompactionSystemPrompt, want) {
-			t.Errorf("CompactionSystemPrompt missing %q section", want)
+			t.Errorf("CompactionSystemPrompt missing %q", want)
 		}
 	}
 }
@@ -452,5 +554,110 @@ func TestBuildUserMessageCarriesNoVerbatimTail(t *testing.T) {
 	got := BuildUserMessage("do things", "Done: x", nil, 1)
 	if strings.Contains(got, "## Recent activity") {
 		t.Fatalf("handover still carries a verbatim recent block: %q", got)
+	}
+}
+
+const validSummary = `## Done
+- Ran curl --version; observed curl 8.5.0 (x86_64-pc-linux-gnu).
+- GET https://example.com returned HTTP/2 200 with "Example Domain" in the body.
+
+## In progress
+- None.
+
+## Not started
+- None.`
+
+func TestCompactRejectsDegenerateSummary(t *testing.T) {
+	conversation := conv(8)
+	got, outcome, summaryLen, _ := Compact(context.Background(), conversation, nil, 2048, 4000,
+		Window{Size: 1 << 20}, &fakeSummarizer{summary: "too short"}, nil, 0)
+	if outcome != "failed" {
+		t.Fatalf("want failed for a short summary, got %q", outcome)
+	}
+	if len(got) != len(conversation) {
+		t.Fatalf("degenerate summary must keep the original history, got %d messages", len(got))
+	}
+	if summaryLen != 0 {
+		t.Fatalf("rejected summary must not report bytes, got %d", summaryLen)
+	}
+}
+
+func TestCompactAcceptsSummaryWithoutHeadings(t *testing.T) {
+	const summary = "Ran curl --version and observed curl 8.5.0. The download finished, but verification is still pending."
+	conversation := conv(8)
+	got, outcome, _, _ := Compact(context.Background(), conversation, nil, 2048, 4000,
+		Window{Size: 1 << 20}, &fakeSummarizer{summary: summary}, nil, 0)
+	if outcome != "applied" {
+		t.Fatalf("outcome %q, want applied", outcome)
+	}
+	body, _ := got[1]["content"].(string)
+	if !strings.Contains(body, summary) {
+		t.Fatalf("handover lost the summary: %q", body)
+	}
+}
+
+func TestCompactHandoverCarriesRecentCommandResults(t *testing.T) {
+	conversation := []model.D{
+		{"role": "system", "content": "sys"},
+		{"role": "user", "content": "Task:\nrun curl tests"},
+		{"role": "assistant", "content": "", "tool_calls": []model.D{{
+			"id": "c1",
+			"function": model.D{
+				"name": "vm_exec", "arguments": `{"command":"curl -sS -I https://example.com"}`,
+			},
+		}}},
+		{"role": "tool", "name": "vm_exec", "tool_call_id": "c1", "content": "HTTP/2 200"},
+	}
+	got, outcome, _, _ := Compact(context.Background(), conversation, nil, 2048, 4000,
+		Window{Size: 1 << 20}, &fakeSummarizer{summary: validSummary}, nil, 0)
+	if outcome != "applied" {
+		t.Fatalf("want applied, got %q", outcome)
+	}
+	body, _ := got[1]["content"].(string)
+	for _, want := range []string{"## Recent command results", "curl -sS -I https://example.com", "HTTP/2 200"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("handover missing %q in %q", want, body)
+		}
+	}
+}
+
+func TestCompactHandoverRecentResultsAreBounded(t *testing.T) {
+	big := strings.Repeat("z", 10000)
+	conversation := []model.D{
+		{"role": "system", "content": "sys"},
+		{"role": "user", "content": "Task:\nrun curl tests"},
+		{"role": "assistant", "content": "", "tool_calls": []model.D{{
+			"id": "c1",
+			"function": model.D{
+				"name": "vm_exec", "arguments": `{"command":"cat huge"}`,
+			},
+		}}},
+		{"role": "tool", "name": "vm_exec", "tool_call_id": "c1", "content": big},
+	}
+	got, outcome, _, _ := Compact(context.Background(), conversation, nil, 2048, 4000,
+		Window{Size: 1 << 20}, &fakeSummarizer{summary: validSummary}, nil, 0)
+	if outcome != "applied" {
+		t.Fatalf("want applied, got %q", outcome)
+	}
+	body, _ := got[1]["content"].(string)
+	if strings.Contains(body, big) {
+		t.Fatal("handover copied the entire tool result instead of a bounded excerpt")
+	}
+	if !strings.Contains(body, "…(truncated)") {
+		t.Fatalf("handover must show that the result was truncated: %q", body)
+	}
+	if len(body) > 4096 {
+		t.Fatalf("handover is %d bytes, want evidence and summary bounded", len(body))
+	}
+}
+
+func TestCompactionSystemPromptRequiresConcreteSections(t *testing.T) {
+	for _, want := range []string{
+		"## Done", "## In progress", "## Not started",
+		"observed result", "only a heading",
+	} {
+		if !strings.Contains(CompactionSystemPrompt, want) {
+			t.Errorf("CompactionSystemPrompt missing %q", want)
+		}
 	}
 }

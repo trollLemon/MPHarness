@@ -22,6 +22,15 @@ import (
 	"github.com/trollLemon/MPHarness/internal/textutil"
 )
 
+const validHandoverSummary = `## Done
+- Ran the requested commands and captured their results, for example curl 8.5.0 and HTTP/2 200.
+
+## In progress
+- None.
+
+## Not started
+- None.`
+
 type mockKronk struct {
 	responses    []model.ChatResponse
 	errs         []error
@@ -51,7 +60,7 @@ func (m *mockKronk) Chat(ctx context.Context, req model.D) (model.ChatResponse, 
 		if m.failHandover {
 			return model.ChatResponse{}, context.DeadlineExceeded
 		}
-		return chatResp("work summary", "", model.FinishReasonStop, nil, nil), nil
+		return chatResp(validHandoverSummary, "", model.FinishReasonStop, nil, nil), nil
 	}
 	idx := m.respIdx
 	m.respIdx++
