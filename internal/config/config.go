@@ -80,7 +80,6 @@ const (
 
 	DefaultCompactionThreshold   = 0.8
 	DefaultCompactionMaxTokens   = 2048
-	DefaultCompactionMinMessages = 6
 	DefaultCompactionMaxAttempts = 3
 )
 
@@ -410,7 +409,6 @@ type CompactionConfig struct {
 	Enabled          bool    `yaml:"enabled"`
 	Threshold        float64 `yaml:"threshold"`
 	MaxSummaryTokens int     `yaml:"max_summary_tokens"`
-	MinMessages      int     `yaml:"min_messages"`
 	MaxAttempts      int     `yaml:"max_attempts"`
 }
 
@@ -423,9 +421,6 @@ func (c CompactionConfig) Validate() error {
 	}
 	if c.MaxSummaryTokens <= 0 {
 		return fmt.Errorf("compaction.max_summary_tokens must be > 0, got %d", c.MaxSummaryTokens)
-	}
-	if c.MinMessages <= 0 {
-		return fmt.Errorf("compaction.min_messages must be > 0, got %d", c.MinMessages)
 	}
 	if c.MaxAttempts <= 0 {
 		return fmt.Errorf("compaction.max_attempts must be > 0, got %d", c.MaxAttempts)
@@ -769,7 +764,7 @@ func applyDefaults(k *koanf.Koanf, cfg *Config) {
 		cfg.Compaction = CompactionConfig{
 			Enabled: true, Threshold: DefaultCompactionThreshold,
 			MaxSummaryTokens: DefaultCompactionMaxTokens,
-			MinMessages:      DefaultCompactionMinMessages, MaxAttempts: DefaultCompactionMaxAttempts,
+			MaxAttempts:      DefaultCompactionMaxAttempts,
 		}
 	} else {
 		if !k.Exists("compaction.enabled") {
@@ -780,9 +775,6 @@ func applyDefaults(k *koanf.Koanf, cfg *Config) {
 		}
 		if cfg.Compaction.MaxSummaryTokens == 0 {
 			cfg.Compaction.MaxSummaryTokens = DefaultCompactionMaxTokens
-		}
-		if cfg.Compaction.MinMessages == 0 {
-			cfg.Compaction.MinMessages = DefaultCompactionMinMessages
 		}
 		if cfg.Compaction.MaxAttempts == 0 {
 			cfg.Compaction.MaxAttempts = DefaultCompactionMaxAttempts
