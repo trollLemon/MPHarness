@@ -2,12 +2,15 @@ package config
 
 import (
 	"errors"
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
-
-	"gopkg.in/yaml.v3"
+	"time"
 )
 
 func TestVMConfig_Validate(t *testing.T) {
@@ -132,7 +135,7 @@ func TestNormalizeAllowedCommandsCoreUtils(t *testing.T) {
 	}
 }
 
-func TestUnmarshalYAML_AllowedCommands(t *testing.T) {
+func TestParseAllowedCommands(t *testing.T) {
 	tests := []struct {
 		name string
 		yaml string
@@ -151,9 +154,9 @@ func TestUnmarshalYAML_AllowedCommands(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var c Config
-			if err := yaml.Unmarshal([]byte(tt.yaml), &c); err != nil {
-				t.Fatalf("unmarshal: %v", err)
+			c, err := Parse([]byte(tt.yaml))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
 			}
 			if !reflect.DeepEqual(c.AllowedCommands, tt.want) {
 				t.Fatalf("got %v want %v", c.AllowedCommands, tt.want)
@@ -221,6 +224,293 @@ func TestParse(t *testing.T) {
 			if !reflect.DeepEqual(cfg.AllowedCommands, tt.wantSet) {
 				t.Fatalf("set %v want %v", cfg.AllowedCommands, tt.wantSet)
 			}
+		})
+	}
+}
+
+func TestParseEnvBool(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    bool
+		wantErr bool
+	}{
+		{"true", "true", true, false},
+		{"uppercase true", "TRUE", true, false},
+		{"false", "false", false, false},
+		{"padded false", " false ", false, false},
+		{"one rejected", "1", false, true},
+		{"zero rejected", "0", false, true},
+		{"yes rejected", "yes", false, true},
+		{"no rejected", "no", false, true},
+		{"off rejected", "off", false, true},
+		{"blank rejected", "", false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseEnvBool(tt.value)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q", tt.value)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("parseEnvBool(%q) = %v, want %v", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadEnvOverrides(t *testing.T) {
+	base := "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\nrun:\n  name: yaml-run\notel:\n  enabled: %t\n  endpoint: yaml:4317\n  service_name: yamlsvc\n"
+	tests := []struct {
+		name         string
+		yamlEnabled  bool
+		environ      []string
+		wantEnabled  bool
+		wantEndpoint string
+		wantService  string
+		wantRun      string
+		wantErr      bool
+	}{
+		{
+			name:         "yaml only",
+			wantEndpoint: "yaml:4317",
+			wantService:  "yamlsvc",
+			wantRun:      "yaml-run",
+		},
+		{
+			name:         "env overrides yaml",
+			environ:      []string{"MPH_OTEL=true", "OTEL_EXPORTER_OTLP_ENDPOINT=env:4317", "OTEL_SERVICE_NAME=envsvc", "MPH_RUN_NAME=env-run"},
+			wantEnabled:  true,
+			wantEndpoint: "env:4317",
+			wantService:  "envsvc",
+			wantRun:      "env-run",
+		},
+		{
+			name:         "env false overrides yaml true",
+			yamlEnabled:  true,
+			environ:      []string{"MPH_OTEL=false"},
+			wantEnabled:  false,
+			wantEndpoint: "yaml:4317",
+			wantService:  "yamlsvc",
+			wantRun:      "yaml-run",
+		},
+		{
+			name:         "uppercase true enables",
+			environ:      []string{"MPH_OTEL=TRUE"},
+			wantEnabled:  true,
+			wantEndpoint: "yaml:4317",
+			wantService:  "yamlsvc",
+			wantRun:      "yaml-run",
+		},
+		{
+			name:    "invalid MPH_OTEL errors",
+			environ: []string{"MPH_OTEL=yes"},
+			wantErr: true,
+		},
+		{
+			name:    "blank MPH_OTEL errors",
+			environ: []string{"MPH_OTEL="},
+			wantErr: true,
+		},
+		{
+			name:         "blank env ignored",
+			yamlEnabled:  true,
+			environ:      []string{"OTEL_EXPORTER_OTLP_ENDPOINT=   ", "OTEL_SERVICE_NAME=", "MPH_RUN_NAME=  "},
+			wantEnabled:  true,
+			wantEndpoint: "yaml:4317",
+			wantService:  "yamlsvc",
+			wantRun:      "yaml-run",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := load([]byte(fmt.Sprintf(base, tt.yamlEnabled)), Sources{Environ: tt.environ})
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error")
+				}
+				if !strings.Contains(err.Error(), "MPH_OTEL") {
+					t.Fatalf("error should mention MPH_OTEL: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if cfg.Otel.Enabled != tt.wantEnabled {
+				t.Errorf("enabled = %v, want %v", cfg.Otel.Enabled, tt.wantEnabled)
+			}
+			if cfg.Otel.Endpoint != tt.wantEndpoint {
+				t.Errorf("endpoint = %q, want %q", cfg.Otel.Endpoint, tt.wantEndpoint)
+			}
+			if cfg.Otel.ServiceName != tt.wantService {
+				t.Errorf("service = %q, want %q", cfg.Otel.ServiceName, tt.wantService)
+			}
+			if cfg.Run.Name != tt.wantRun {
+				t.Errorf("run name = %q, want %q", cfg.Run.Name, tt.wantRun)
+			}
+		})
+	}
+}
+
+func TestLoadFlagOverrides(t *testing.T) {
+	base := "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\notel:\n  enabled: %t\n"
+	tests := []struct {
+		name        string
+		yamlEnabled bool
+		environ     []string
+		flag        bool
+		set         bool
+		want        bool
+	}{
+		{
+			name:        "flag disables yaml",
+			yamlEnabled: true,
+			flag:        false,
+			set:         true,
+			want:        false,
+		},
+		{
+			name: "flag enables yaml",
+			flag: true,
+			set:  true,
+			want: true,
+		},
+		{
+			name:    "flag overrides env",
+			environ: []string{"MPH_OTEL=true"},
+			flag:    false,
+			set:     true,
+			want:    false,
+		},
+		{
+			name:        "unset flag leaves yaml",
+			yamlEnabled: true,
+			want:        true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.Bool("otel", false, "")
+			if tt.set {
+				if err := fs.Set("otel", fmt.Sprintf("%t", tt.flag)); err != nil {
+					t.Fatalf("set flag: %v", err)
+				}
+			}
+			cfg, err := load([]byte(fmt.Sprintf(base, tt.yamlEnabled)), Sources{Environ: tt.environ, Flags: fs})
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if cfg.Otel.Enabled != tt.want {
+				t.Errorf("enabled = %v, want %v", cfg.Otel.Enabled, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadFileWithSources(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mph.yaml")
+	cfgYAML := "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\nrun:\n  name: yaml-run\n"
+	if err := os.WriteFile(path, []byte(cfgYAML), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadFileWithSources(path, Sources{Environ: []string{"MPH_RUN_NAME=env-run"}})
+	if err != nil {
+		t.Fatalf("LoadFileWithSources: %v", err)
+	}
+	if cfg.Run.Name != "env-run" {
+		t.Errorf("run name = %q, want %q", cfg.Run.Name, "env-run")
+	}
+}
+
+func TestParseDurationValues(t *testing.T) {
+	base := "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\nagent:\n  chat_timeout: "
+	tests := []struct {
+		name    string
+		value   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"duration string", "90s", 90 * time.Second, false},
+		{"numeric seconds", "90", 90 * time.Second, false},
+		{"float seconds", "90.0", 90 * time.Second, false},
+		{"fractional seconds truncate", "1.5", time.Second, false},
+		{"compound string", "1m30s", 90 * time.Second, false},
+		{"out of range", "9223372037", 0, true},
+		{"invalid duration", "soon", 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(base + tt.value + "\n"))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if got := time.Duration(cfg.Agent.ChatTimeout); got != tt.want {
+				t.Errorf("chat_timeout = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseLegacyScalarCompatibility(t *testing.T) {
+	base := "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\n"
+	tests := []struct {
+		name  string
+		yaml  string
+		check func(t *testing.T, cfg Config)
+	}{
+		{
+			name: "numeric string field",
+			yaml: base + "run:\n  name: 789\n",
+			check: func(t *testing.T, cfg Config) {
+				if cfg.Run.Name != "789" {
+					t.Errorf("run name = %q, want %q", cfg.Run.Name, "789")
+				}
+			},
+		},
+		{
+			name: "numeric resource attribute",
+			yaml: base + "otel:\n  resource_attributes:\n    build: 42\n",
+			check: func(t *testing.T, cfg Config) {
+				if got := cfg.Otel.ResourceAttributes["build"]; got != "42" {
+					t.Errorf("build = %q, want %q", got, "42")
+				}
+			},
+		},
+		{
+			name: "yaml 1.1 booleans",
+			yaml: base + "agent:\n  send_reasoning: no\notel:\n  enabled: yes\n",
+			check: func(t *testing.T, cfg Config) {
+				if !cfg.Otel.Enabled {
+					t.Error("otel.enabled = false, want true")
+				}
+				if cfg.Agent.SendReasoning == nil || *cfg.Agent.SendReasoning {
+					t.Error("send_reasoning = true, want false")
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(tt.yaml))
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			tt.check(t, cfg)
 		})
 	}
 }
@@ -406,13 +696,17 @@ func TestSizeParsing(t *testing.T) {
 		{"mebibytes", base + "output:\n  max_command_size: 64MiB\n", 64 * 1024 * 1024, false},
 		{"larger mebibytes", base + "output:\n  max_command_size: 512MiB\n", 512 * 1024 * 1024, false},
 		{"gibibytes", base + "output:\n  max_command_size: 1GiB\n", 1024 * 1024 * 1024, false},
-		{"bare bytes", base + "output:\n  max_command_size: 1024\n", 1024, false},
+		{"quoted bytes", base + "output:\n  max_command_size: \"1024\"\n", 1024, false},
+		{"empty string", base + "output:\n  max_command_size: \"\"\n", 0, false},
+		{"unquoted bytes rejected", base + "output:\n  max_command_size: 1024\n", 0, true},
 		{"kilobytes are binary", base + "output:\n  max_command_size: 1024K\n", 1024 * 1024, false},
 		{"kilobyte suffix is binary", base + "output:\n  max_command_size: 1KB\n", 1024, false},
 		{"terabytes", base + "output:\n  max_command_size: 1T\n", 1 << 40, false},
 		{"fractional with unit", base + "output:\n  max_command_size: 1.5K\n", 1536, false},
-		{"fractional bare bytes", base + "output:\n  max_command_size: 1.5\n", 0, true},
-		{"overflow", base + "output:\n  max_command_size: 99999999999999999999T\n", 0, true},
+		{"fractional string bytes", base + "output:\n  max_command_size: \"1.5\"\n", 0, true},
+		{"unquoted fractional rejected", base + "output:\n  max_command_size: 1.5\n", 0, true},
+		{"overflow", base + "output:\n  max_command_size: \"99999999999999999999T\"\n", 0, true},
+		{"float overflow", base + "output:\n  max_command_size: \"9223372036854775808.0\"\n", 0, true},
 		{"invalid suffix", base + "output:\n  max_command_size: 10XB\n", 0, true},
 	}
 	for _, tt := range tests {
@@ -488,7 +782,7 @@ func TestParseOutputCompaction(t *testing.T) {
 		},
 		{
 			name: "explicit zero size disables cap",
-			yaml: base + "output:\n  max_command_size: 0\n  max_total_size: 0\n",
+			yaml: base + "output:\n  max_command_size: \"0\"\n  max_total_size: \"0\"\n",
 			check: func(t *testing.T, cfg Config) {
 				if cfg.Output.MaxCommandSize != 0 || cfg.Output.MaxTotalSize != 0 {
 					t.Errorf("explicit 0 must stay disabled, got %+v", cfg.Output)
@@ -567,7 +861,7 @@ func TestOutputRunDir(t *testing.T) {
 	}
 }
 
-func TestUnmarshalYAMLDecodesEveryKey(t *testing.T) {
+func TestParseDecodesEveryKey(t *testing.T) {
 	cfg, err := Parse([]byte(`
 vm:
   name: my-vm
@@ -634,6 +928,8 @@ compaction:
 		{"llm.context_window", cfg.LLM.ContextWindow, 8192},
 		{"llm.max_output_tokens", cfg.LLM.MaxOutputTokens, 512},
 		{"agent.max_iterations", cfg.Agent.MaxIterations, 7},
+		{"agent.chat_timeout", time.Duration(cfg.Agent.ChatTimeout), 90 * time.Second},
+		{"agent.total_timeout", time.Duration(cfg.Agent.TotalTimeout), 20 * time.Minute},
 		{"agent.max_output_bytes", cfg.Agent.MaxOutputBytes, 4096},
 		{"truncation.command_output", cfg.Truncation.CommandOutput, 1},
 		{"truncation.log_content", cfg.Truncation.LogContent, 2},

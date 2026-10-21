@@ -32,7 +32,7 @@ golangci-lint run
 - Use `internal/` packages for non-exported code
 - Tests live alongside source files (`*_test.go`)
 - Write table-driven tests where possible
-- Configuration via `internal/config`
+- Configuration via `internal/config` (koanf: YAML, then existing env vars, then explicit flags, then defaults)
 - LXD interactions via `internal/lxd`
 - Agent lifecycle in `internal/agent`
 
@@ -43,6 +43,10 @@ golangci-lint run
 - Use meaningful variable and function names
 - Minimal comments - code should be self-documenting
 - Only add comments for non-obvious workarounds or constraints
+- Search for an existing helper before adding one; do not duplicate parsing, validation, or formatting logic
+- Do not keep exported functions or methods that only tests use; put test helpers in `_test.go`
+- Avoid redundant casts and conversions; let the declared types do the work
+- Keep one source of truth for defaults and derive help text or docs from it
 - Do not use em dashes or en dashes in documentation. A sentence that wants one is usually too long: split it, or use a semicolon, colon, or parentheses.
 
 ## Testing OTel Instrumentation
@@ -61,10 +65,10 @@ Traces: `mph.run` → `mph.vm.create`/`vm.launch` → `mph.agent.iteration`×N (
 ### Negative checks
 - Run `./bin/mph ./testing/test.yaml` with collector down. It must complete with no `:4317` dials. This proves default-off.
 - Env override: `OTEL_EXPORTER_OTLP_ENDPOINT=host:4317 ./bin/mph --otel ./testing/test.yaml`.
-- Flag vs YAML: `--otel` with no `otel:` block enables via defaults; `otel.enabled: true` (e.g. `testing/output.yaml`) without flag also enables.
+- Flag vs YAML: `--otel` with no `otel:` block enables via defaults; `otel.enabled: true` (e.g. `testing/output.yaml`) without flag also enables; `--otel=false` overrides YAML.
 
 ### Enabling
-`--otel` flag (or `MPH_OTEL=true`) / YAML `otel.enabled: true` / standard `OTEL_*` env vars. Precedence: flag/env > YAML > defaults (`localhost:4317`, service `mph`). See `docs/how-to/enable_otel.md`.
+`--otel` (explicit true/false) / `MPH_OTEL` / YAML `otel.enabled` / standard `OTEL_*` env vars. Precedence: `--otel` > `MPH_OTEL` > YAML > defaults (`localhost:4317`, service `mph`). `MPH_RUN_NAME` overrides `run.name`. See `docs/how-to/enable_otel.md`.
 
 ## Dependencies
 - Go 1.27.2+

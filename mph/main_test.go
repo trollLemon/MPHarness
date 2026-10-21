@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"strings"
 	"testing"
 	"uuid"
@@ -12,11 +11,7 @@ import (
 func TestResolveOtelConfig(t *testing.T) {
 	tests := []struct {
 		name         string
-		yaml         config.OtelConfig
-		flagEnabled  bool
-		envEndpoint  string
-		envService   string
-		envMPHOtel   string
+		otel         config.OtelConfig
 		wantEnabled  bool
 		wantEndpoint string
 		wantService  string
@@ -28,62 +23,16 @@ func TestResolveOtelConfig(t *testing.T) {
 			wantService:  "mph",
 		},
 		{
-			name:         "yaml is used when no env is set",
-			yaml:         config.OtelConfig{Enabled: true, Endpoint: "yamlcol:4317", ServiceName: "yamlsvc"},
+			name:         "config values",
+			otel:         config.OtelConfig{Enabled: true, Endpoint: "yamlcol:4317", ServiceName: "yamlsvc"},
 			wantEnabled:  true,
 			wantEndpoint: "yamlcol:4317",
 			wantService:  "yamlsvc",
 		},
-		{
-			name:         "env endpoint overrides yaml",
-			yaml:         config.OtelConfig{Endpoint: "yamlcol:4317"},
-			envEndpoint:  "envcol:4317",
-			wantEndpoint: "envcol:4317",
-			wantService:  "mph",
-		},
-		{
-			name:         "env service name overrides yaml",
-			yaml:         config.OtelConfig{ServiceName: "yamlsvc"},
-			envService:   "envsvc",
-			wantEndpoint: "localhost:4317",
-			wantService:  "envsvc",
-		},
-		{
-			name:         "blank env endpoint is ignored",
-			yaml:         config.OtelConfig{Endpoint: "yamlcol:4317"},
-			envEndpoint:  "   ",
-			wantEndpoint: "yamlcol:4317",
-			wantService:  "mph",
-		},
-		{
-			name:         "flag enables otel",
-			flagEnabled:  true,
-			wantEnabled:  true,
-			wantEndpoint: "localhost:4317",
-			wantService:  "mph",
-		},
-		{
-			name:         "MPH_OTEL env enables otel",
-			envMPHOtel:   "true",
-			wantEnabled:  true,
-			wantEndpoint: "localhost:4317",
-			wantService:  "mph",
-		},
-		{
-			name:         "MPH_OTEL false does not enable otel",
-			envMPHOtel:   "false",
-			wantEnabled:  false,
-			wantEndpoint: "localhost:4317",
-			wantService:  "mph",
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", tt.envEndpoint)
-			t.Setenv("OTEL_SERVICE_NAME", tt.envService)
-			t.Setenv("MPH_OTEL", tt.envMPHOtel)
-
-			got := resolveOtelConfig(tt.yaml, tt.flagEnabled, "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5", "baseline")
+			got := resolveOtelConfig(tt.otel, "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5", "baseline")
 			if got.Enabled != tt.wantEnabled {
 				t.Errorf("Enabled = %v, want %v", got.Enabled, tt.wantEnabled)
 			}
@@ -106,24 +55,20 @@ func TestResolveOtelConfig(t *testing.T) {
 func TestResolveRunName(t *testing.T) {
 	tests := []struct {
 		name string
-		yaml string
-		env  string
+		run  string
 		vm   string
 		want string
 	}{
-		{"yaml wins", "from-yaml", "from-env", "mph-vm", "from-yaml"},
-		{"env over vm", "", "from-env", "mph-vm", "from-env"},
-		{"vm over fallback", "", "", "mph-longrun", "mph-longrun"},
-		{"fallback last", "", "", "", "mph"},
-		{"blank yaml falls through", "   ", "", "mph-vm", "mph-vm"},
-		{"blank env falls through", "", "\t", "mph-vm", "mph-vm"},
-		{"blank vm falls through", "", "", "  ", "mph"},
+		{"run name wins", "from-yaml", "mph-vm", "from-yaml"},
+		{"vm fallback", "", "mph-longrun", "mph-longrun"},
+		{"fallback last", "", "", "mph"},
+		{"blank run name falls through", "   ", "mph-vm", "mph-vm"},
+		{"blank vm falls through", "", "  ", "mph"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("MPH_RUN_NAME", tt.env)
-			if got := resolveRunName(tt.yaml, os.Getenv("MPH_RUN_NAME"), tt.vm); got != tt.want {
+			if got := resolveRunName(tt.run, tt.vm); got != tt.want {
 				t.Errorf("resolveRunName() = %q, want %q", got, tt.want)
 			}
 		})
@@ -131,8 +76,6 @@ func TestResolveRunName(t *testing.T) {
 }
 
 func TestNewRunIdentity(t *testing.T) {
-	t.Setenv("MPH_RUN_NAME", "")
-
 	got := newRunIdentity(config.RunConfig{Name: "baseline"}, "mph-vm")
 
 	if got.Name != "baseline" {
@@ -147,8 +90,6 @@ func TestNewRunIdentity(t *testing.T) {
 }
 
 func TestRunIdentityIDIsBareUUID(t *testing.T) {
-	t.Setenv("MPH_RUN_NAME", "")
-
 	got := newRunIdentity(config.RunConfig{Name: "baseline"}, "mph-vm")
 
 	if strings.Contains(got.ID, ":") {
