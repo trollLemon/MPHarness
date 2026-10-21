@@ -1,6 +1,6 @@
 # Passing secrets to the agent
 
-Tasks like "attach this Pro account and run the healthcheck" need a secret, but the prompt, the tool calls, the traces, and the logs are all visible to the model and to Loki, leaving nowhere safe to write one. Placeholders solve this: you write `%{PRO_TOKEN}` in your prompt, the agent copies it into its `vm_exec` calls, and `mph` swaps in the real value at the last moment before the command reaches the VM. Neither the model, nor the trace, nor the log ever sees the value.
+Tasks like "attach this Pro account and run the healthcheck" need a secret, but the prompt, the tool calls, and the logs are all visible to the model and to Loki, leaving nowhere safe to write one. Placeholders solve this: you write `%{PRO_TOKEN}` in your prompt, the agent copies it into its `vm_exec` calls, and `mph` swaps in the real value at the last moment before the command reaches the VM. Neither the model nor the log ever sees the value.
 
 ```yaml
 prompt: "run sudo pro attach %{PRO_TOKEN} and report the status"

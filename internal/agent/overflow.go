@@ -11,7 +11,7 @@ import (
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	"github.com/rs/zerolog"
 
-	mphotel "github.com/trollLemon/MPHarness/internal/otel"
+	"github.com/trollLemon/MPHarness/internal/otlp"
 )
 
 // minOverflowReclaimBytes stops the repair loop once replacing a result no
@@ -174,5 +174,5 @@ func logContextOverflow(ctx context.Context, log zerolog.Logger, iter int, first
 	if final != nil {
 		fields["error"] = final
 	}
-	mphotel.LogEvent(ctx, log, level, "context overflow", fields)
+	otlp.LogEvent(ctx, log, level, "context overflow", fields)
 }

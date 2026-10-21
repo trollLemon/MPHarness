@@ -1,4 +1,4 @@
-package otel
+package otlp
 
 import (
 	"bytes"
@@ -11,7 +11,6 @@ import (
 	"go.opentelemetry.io/otel"
 	otellog "go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 // TestSetup covers the Setup matrix: disabled and SDK-disabled installs
@@ -83,11 +82,8 @@ func TestSetup(t *testing.T) {
 				}
 				return
 			}
-			if got := otel.GetTracerProvider(); got == origTP {
-				t.Fatalf("tracer provider not set")
-			}
-			if _, ok := otel.GetTracerProvider().(*sdktrace.TracerProvider); !ok {
-				t.Fatalf("unexpected tracer provider type %T", otel.GetTracerProvider())
+			if got := otel.GetTracerProvider(); got != origTP {
+				t.Fatalf("tracer provider installed; mph exports no traces")
 			}
 			if got := otel.GetMeterProvider(); got != origMP {
 				t.Fatalf("meter provider installed; mph exports no metrics")
@@ -123,22 +119,10 @@ func TestHookRun(t *testing.T) {
 	// Run should not panic for nil event
 	h.Run(nil, zerolog.InfoLevel, "nil event")
 
-	// Normal event with context
 	logger := zerolog.Nop()
-	evt := logger.Info().Ctx(context.Background())
-	// Hook is called inside msg(); we can directly call Run with a fake event
-	// that has ctx. Use zerolog's event creation via logger.Info()
-	// but we need an *Event to pass. Create via scratch.
-	e := logger.Info()
-	if e != nil {
-		// Set ctx to background with span
-		ctx, span := otel.Tracer("mph").Start(context.Background(), "test-hook")
-		e.Ctx(ctx)
+	if e := logger.Info().Ctx(context.Background()); e != nil {
 		h.Run(e, zerolog.InfoLevel, "hello hook")
-		span.End()
-		_ = ctx
 	}
-	_ = evt
 }
 
 func TestConvertLevel(t *testing.T) {
@@ -160,74 +144,6 @@ func TestConvertLevel(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := convertLevel(tt.level); got != tt.want {
 				t.Fatalf("convertLevel(%v) = %v want %v", tt.level, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestTraceAttrs(t *testing.T) {
-	origTP := otel.GetTracerProvider()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
-	otel.SetTracerProvider(tp)
-	t.Cleanup(func() {
-		otel.SetTracerProvider(origTP)
-		_ = tp.Shutdown(context.Background())
-	})
-
-	tests := []struct {
-		name    string
-		setup   func(t *testing.T) (context.Context, string, string)
-		wantNil bool
-	}{
-		{
-			name:    "no span in context yields no attributes",
-			setup:   func(t *testing.T) (context.Context, string, string) { return context.Background(), "", "" },
-			wantNil: true,
-		},
-		{
-			name: "active span yields trace and span id attributes",
-			setup: func(t *testing.T) (context.Context, string, string) {
-				ctx, span := otel.Tracer("mph").Start(context.Background(), "test-span")
-				t.Cleanup(func() { span.End() })
-				return ctx, span.SpanContext().TraceID().String(), span.SpanContext().SpanID().String()
-			},
-		},
-		{
-			name: "ended span still yields attributes",
-			setup: func(t *testing.T) (context.Context, string, string) {
-				ctx, span := otel.Tracer("mph").Start(context.Background(), "ended-span")
-				span.End()
-				return ctx, span.SpanContext().TraceID().String(), span.SpanContext().SpanID().String()
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctx, traceID, spanID := tt.setup(t)
-			got := traceAttrs(ctx)
-			if tt.wantNil {
-				if got != nil {
-					t.Fatalf("traceAttrs(background) = %v, want nil", got)
-				}
-				return
-			}
-			if len(got) != 2 {
-				t.Fatalf("traceAttrs returned %d attributes, want 2: %v", len(got), got)
-			}
-			want := map[string]string{"trace_id": traceID, "span_id": spanID}
-			for _, kv := range got {
-				key := string(kv.Key)
-				if want[key] == "" {
-					t.Errorf("unexpected attribute %q", key)
-					continue
-				}
-				if got := kv.Value.AsString(); got != want[key] {
-					t.Errorf("%s = %v, want %v", key, got, want[key])
-				}
-				delete(want, key)
-			}
-			for key := range want {
-				t.Errorf("missing attribute %q", key)
 			}
 		})
 	}

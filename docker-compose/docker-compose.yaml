@@ -18,24 +18,8 @@ services:
       - "55679:55679" # zpages
       - "1777:1777"   # pprof
     depends_on:
-      tempo:
-        condition: service_started
       loki:
         condition: service_started
-    networks:
-      - mph-otel
-    restart: unless-stopped
-
-  tempo:
-    image: grafana/tempo:2.10.8
-    container_name: mph-tempo
-    user: root
-    command: ["-config.file=/etc/tempo.yaml"]
-    volumes:
-      - ./tempo.yaml:/etc/tempo.yaml:ro
-      - tempo-data:/var/tempo
-    ports:
-      - "3200:3200" # Tempo API
     networks:
       - mph-otel
     restart: unless-stopped
@@ -82,7 +66,6 @@ services:
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
-      GF_FEATURE_TOGGLES_ENABLE: traceToLogs
     volumes:
       - ../example_grafana/provisioning/datasources/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
       - ../example_grafana/provisioning/dashboards/dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml:ro
@@ -97,21 +80,6 @@ services:
       - loki
     restart: unless-stopped
 
-  # Optional lightweight alternative: Grafana LGTM (Loki+Grafana+Tempo+Mimir) single-image stack.
-  # Uncomment to try the one-container LGTM experience instead of the 5-service stack above.
-  # Then mph still points to localhost:4317. Access Grafana on http://localhost:3000 (admin/admin),
-  # or Tempo traces via Grafana Explore. Comment out the 5 services above if you use this.
-  # lgtm:
-  #   image: grafana/otel-lgtm:latest
-  #   container_name: mph-lgtm
-  #   ports:
-  #     - "3000:3000"   # Grafana
-  #     - "4317:4317"   # OTLP gRPC
-  #     - "4318:4318"   # OTLP HTTP
-  #     - "9090:9090"   # Prometheus (inside LGTM via Mimir)
-  #   environment:
-  #     GF_PATHS_PROVISIONING: /etc/grafana/provisioning
-
 networks:
   mph-otel:
     driver: bridge
@@ -120,4 +88,3 @@ volumes:
   prometheus-data:
   grafana-data:
   loki-data:
-  tempo-data:

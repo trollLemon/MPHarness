@@ -9,7 +9,7 @@ Local harness for running tests in an LXD VM.
 - `internal/config/` - Configuration handling
 - `internal/harness/` - Harness orchestration
 - `internal/lxd/` - LXD VM operations
-- `internal/otel/` - OpenTelemetry pipeline (tracer/logger providers, zerolog Hook)
+- `internal/otlp/` - OTLP log pipeline (logger provider, zerolog Hook)
 - `internal/validation/` - Input validation
 
 ## Commands
@@ -50,7 +50,7 @@ golangci-lint run
 - Do not use em dashes or en dashes in documentation. A sentence that wants one is usually too long: split it, or use a semicolon, colon, or parentheses.
 
 ## Testing OTel Instrumentation
-OTel is disabled by default; when enabled it exports logs and traces via OTLP/gRPC (default `localhost:4317`). There are no OTel metrics: dashboards use LogQL over structured log events.
+OTel is disabled by default; when enabled it exports logs via OTLP/gRPC (default `localhost:4317`). There are no OTel traces or metrics: dashboards use LogQL over structured log events.
 
 ### Smoke test (tiny deterministic model)
 Uses `testing/test.yaml` (`unsloth/granite-4.0-350m-IQ4_XS`, `llm.temperature: 0.0` so output is stable across runs); the config has no `otel:` block, so enable with `--otel`:
@@ -60,7 +60,7 @@ make otel-up                       # Compose stack under docker-compose/, OTLP o
 ./bin/mph --otel ./testing/test.yaml
 ```
 The smoke test runs a real LXD VM, so the host needs a working LXD daemon and default profile.
-Traces: `mph.run` → `mph.vm.create`/`vm.launch` → `mph.agent.iteration`×N (with `mph.agent.tool_call`/`tool_result` events and `vm.exec` children) → `mph.vm.delete`; logs mirror console lines with `trace_id`; dashboard data comes from log lines tagged `event=` (`token_usage`, `iteration`, `agent_tool_call`, `tool_succeeded`, `tool_failed`, `tool_output_too_large`, `context_overflow`, `context_compaction`, `context_compaction_applied`, `run_summary`).
+Dashboard data comes from log lines tagged `event=` (`token_usage`, `iteration`, `agent_tool_call`, `tool_succeeded`, `tool_failed`, `tool_output_too_large`, `context_overflow`, `context_compaction`, `context_compaction_applied`, `run_summary`). The `<name>:<uuid>` `instance` label identifies a run in Loki.
 
 ### Negative checks
 - Run `./bin/mph ./testing/test.yaml` with collector down. It must complete with no `:4317` dials. This proves default-off.

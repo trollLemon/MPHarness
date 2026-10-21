@@ -12,7 +12,6 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/trollLemon/MPHarness/internal/config"
-	mphotel "github.com/trollLemon/MPHarness/internal/otel"
 )
 
 func TestClassifyOutcome(t *testing.T) {
@@ -40,7 +39,7 @@ func TestClassifyOutcome(t *testing.T) {
 
 func TestLogRunSummaryEmitsEveryField(t *testing.T) {
 	var buf bytes.Buffer
-	ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
+	ctx := t.Context()
 	a := &Agent{
 		runID:              "01J9",
 		log:                zerolog.New(&buf),
@@ -126,8 +125,7 @@ func TestExecuteAccumulatesRunTotals(t *testing.T) {
 				LLM: defaultLLMConfig(), RunID: "01J9",
 			})
 			conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
-			ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
-			if err := a.Execute(ctx, conf, newTestClient(t)); err != nil {
+			if err := a.Execute(t.Context(), conf, newTestClient(t)); err != nil {
 				t.Fatalf("Execute: %v", err)
 			}
 
@@ -161,8 +159,7 @@ func TestExecuteAccumulatesReclaimedTokens(t *testing.T) {
 		Prompt:     "task",
 		Compaction: enabledCompaction(),
 	}
-	ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
-	if err := a.Execute(ctx, conf, newTestClient(t)); err != nil {
+	if err := a.Execute(t.Context(), conf, newTestClient(t)); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 
@@ -194,9 +191,7 @@ func TestExecuteCountsAbortedIteration(t *testing.T) {
 		LLM: defaultLLMConfig(), RunID: "01J9",
 	})
 	conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
-	ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
-
-	if err := a.Execute(ctx, conf, newTestClient(t)); err == nil {
+	if err := a.Execute(t.Context(), conf, newTestClient(t)); err == nil {
 		t.Fatal("Execute succeeded against a failing backend; test setup is wrong")
 	}
 

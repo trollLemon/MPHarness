@@ -19,7 +19,7 @@ type fakeOutputExec struct {
 	fn func(name, command string) (string, error)
 }
 
-func (f *fakeOutputExec) Exec(_ context.Context, name, command string, _ int) (string, error) {
+func (f *fakeOutputExec) Exec(_ context.Context, name, command string) (string, error) {
 	return f.fn(name, command)
 }
 

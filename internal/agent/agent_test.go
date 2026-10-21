@@ -11,13 +11,8 @@ import (
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	"github.com/rs/zerolog"
-	"go.opentelemetry.io/otel/attribute"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/trollLemon/MPHarness/internal/config"
-	mphotel "github.com/trollLemon/MPHarness/internal/otel"
 	"github.com/trollLemon/MPHarness/internal/output"
 	"github.com/trollLemon/MPHarness/internal/textutil"
 )
@@ -952,7 +947,7 @@ func TestExecuteLogsTokenUsageAndIterationEvents(t *testing.T) {
 		RunID:         "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5",
 	})
 	conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
-	ctx := mphotel.WithRunIdentity(context.Background(), "baseline:0198f0c1-2a3b-7c4d-8e5f-60718293a4b5", "baseline")
+	ctx := context.Background()
 	if err := agent.Execute(ctx, conf, newTestClient(t)); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -1122,87 +1117,12 @@ func TestRunIterationUsageSupersedesEarlierToolResults(t *testing.T) {
 	}
 }
 
-func TestExecuteToolCallsEmitsOneResultEventPerCall(t *testing.T) {
-	rec := tracetest.NewSpanRecorder()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
-
-	ctx, iterSpan := tp.Tracer("t").Start(context.Background(), "iter")
-
-	agt := NewAgent(zerolog.Nop(), &mockKronk{}, Options{
-		MaxIterations: 3,
-		ChatTimeout:   time.Second,
-		TotalTimeout:  5 * time.Second,
-		LLM:           defaultLLMConfig(),
-		RunID:         "run-events",
-	})
-	calls := []model.ResponseToolCall{
-		{ID: "a", Type: "function", Function: model.ResponseToolCallFunction{Name: "unknown_tool"}},
-		{ID: "b", Type: "function", Function: model.ResponseToolCallFunction{Name: "unknown_tool"}},
-	}
-
-	responses, _ := agt.executeToolCalls(ctx, nil, config.Config{}, calls)
-	iterSpan.End()
-
-	if len(responses) != 2 {
-		t.Fatalf("want 2 tool responses, got %d", len(responses))
-	}
-
-	ended := rec.Ended()
-	if len(ended) != 1 {
-		t.Fatalf("want 1 ended span, got %d", len(ended))
-	}
-	var results int
-	for _, e := range ended[0].Events() {
-		if e.Name == "mph.agent.tool_result" {
-			results++
-		}
-	}
-	if results != len(calls) {
-		t.Fatalf("want %d mph.agent.tool_result events, got %d", len(calls), results)
-	}
-}
-
-func TestEventAttrsAddsIteration(t *testing.T) {
-	ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
-	ctx = withIteration(ctx, 6) // zero-based; label must be 7
-
-	got := eventAttrs(ctx, attribute.String("mph.tool.name", "vm_exec"))
-
-	var iteration string
-	var hasRun bool
-	for _, kv := range got {
-		switch string(kv.Key) {
-		case "mph.iteration":
-			iteration = kv.Value.String()
-		case "mph.run.id":
-			hasRun = true
-		}
-	}
-	if iteration != "7" {
-		t.Errorf("mph.iteration = %q, want %q (iteration labels are 1-based)", iteration, "7")
-	}
-	if !hasRun {
-		t.Error("eventAttrs() dropped the run id")
-	}
-}
-
-func TestEventAttrsWithoutIteration(t *testing.T) {
-	ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
-
-	for _, kv := range eventAttrs(ctx) {
-		if string(kv.Key) == "mph.iteration" {
-			t.Errorf("eventAttrs() without iteration context emitted %q", kv.Key)
-		}
-	}
-}
-
 func TestRecordTokenUsageReadsPrefillAndCache(t *testing.T) {
 	var buf bytes.Buffer
-	ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
-	ctx = withIteration(ctx, 2)
+	ctx := withIteration(t.Context(), 2)
 
 	a := &Agent{krn: &mockKronk{contextWidth: 8192}}
-	a.recordTokenUsage(ctx, trace.SpanFromContext(ctx), zerolog.New(&buf), &model.Usage{
+	a.recordTokenUsage(ctx, zerolog.New(&buf), &model.Usage{
 		PromptTokens:            1200,
 		CompletionTokens:        300,
 		TotalTokens:             1500,
@@ -1231,7 +1151,7 @@ func TestRecordTokenUsageReadsPrefillAndCache(t *testing.T) {
 func TestRecordTokenUsageKeepsZeroCachedTokens(t *testing.T) {
 	var buf bytes.Buffer
 	a := &Agent{krn: &mockKronk{}}
-	a.recordTokenUsage(t.Context(), trace.SpanFromContext(t.Context()), zerolog.New(&buf), &model.Usage{PromptTokens: 10})
+	a.recordTokenUsage(t.Context(), zerolog.New(&buf), &model.Usage{PromptTokens: 10})
 
 	usage := onlyEvent(t, decodeEvents(t, &buf), eventTokenUsage)
 	if got, ok := usage["cached_tokens"]; !ok || got != float64(0) {
@@ -1271,8 +1191,7 @@ func TestRunOutcomeDistinguishesCleanFinishFromExhaustion(t *testing.T) {
 				RunID:         "01J9",
 			})
 			conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
-			ctx := mphotel.WithRunIdentity(t.Context(), "baseline:01J9", "baseline")
-			if err := a.Execute(ctx, conf, newTestClient(t)); err != nil {
+			if err := a.Execute(t.Context(), conf, newTestClient(t)); err != nil {
 				t.Fatalf("Execute: %v", err)
 			}
 

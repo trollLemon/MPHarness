@@ -19,11 +19,6 @@ import (
 	lxdclient "github.com/canonical/lxd/client"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/rs/zerolog"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/trollLemon/MPHarness/internal/config"
 	"github.com/trollLemon/MPHarness/internal/secrets"
@@ -342,7 +337,7 @@ func TestExecSecretsAndExitCode(t *testing.T) {
 			server.exec = commandReplies(tt.replies)
 			client := newTestClient(server, mapResolver{"TOKEN": "s3cret"})
 
-			got, err := client.Exec(context.Background(), "vm", "echo %{TOKEN}", 1024)
+			got, err := client.Exec(context.Background(), "vm", "echo %{TOKEN}")
 			if tt.wantErr != "" {
 				if err == nil || err.Error() != tt.wantErr {
 					t.Fatalf("Exec error = %v, want %q", err, tt.wantErr)
@@ -407,7 +402,7 @@ func TestExecSubstitutesPlaceholdersBeforeTheVM(t *testing.T) {
 		map[string]string{"PRO_TOKEN": testSecret},
 	)
 
-	out, err := client.Exec(t.Context(), "vm1", "sudo pro attach %{PRO_TOKEN}", 0)
+	out, err := client.Exec(t.Context(), "vm1", "sudo pro attach %{PRO_TOKEN}")
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
 	}
@@ -439,7 +434,7 @@ func TestExecRedactsResolvedValuesFromOutput(t *testing.T) {
 		map[string]string{"PRO_TOKEN": testSecret},
 	)
 
-	out, err := client.Exec(t.Context(), "vm1", "attach %{PRO_TOKEN}", 0)
+	out, err := client.Exec(t.Context(), "vm1", "attach %{PRO_TOKEN}")
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
 	}
@@ -463,11 +458,11 @@ func TestExecRedactsSecretsFromLaterCommands(t *testing.T) {
 		map[string]string{"PRO_TOKEN": testSecret},
 	)
 
-	if _, err := client.Exec(t.Context(), "vm1", "attach %{PRO_TOKEN}", 0); err != nil {
+	if _, err := client.Exec(t.Context(), "vm1", "attach %{PRO_TOKEN}"); err != nil {
 		t.Fatalf("first Exec: %v", err)
 	}
 
-	out, err := client.Exec(t.Context(), "vm1", "cat /tmp/mph-output/run1/raw", 0)
+	out, err := client.Exec(t.Context(), "vm1", "cat /tmp/mph-output/run1/raw")
 	if err != nil {
 		t.Fatalf("second Exec: %v", err)
 	}
@@ -489,14 +484,14 @@ func TestExecRedactsEverySecretUsedInTheRun(t *testing.T) {
 		map[string]string{"PRO_TOKEN": "aaa111", "GH_PAT": "bbb222"},
 	)
 
-	if _, err := client.Exec(t.Context(), "vm1", "attach %{PRO_TOKEN}", 0); err != nil {
+	if _, err := client.Exec(t.Context(), "vm1", "attach %{PRO_TOKEN}"); err != nil {
 		t.Fatalf("first Exec: %v", err)
 	}
-	if _, err := client.Exec(t.Context(), "vm1", "auth %{GH_PAT}", 0); err != nil {
+	if _, err := client.Exec(t.Context(), "vm1", "auth %{GH_PAT}"); err != nil {
 		t.Fatalf("second Exec: %v", err)
 	}
 
-	out, err := client.Exec(t.Context(), "vm1", "cat /tmp/mph-output/run1/raw", 0)
+	out, err := client.Exec(t.Context(), "vm1", "cat /tmp/mph-output/run1/raw")
 	if err != nil {
 		t.Fatalf("third Exec: %v", err)
 	}
@@ -511,7 +506,7 @@ func TestExecLeavesMarkerFreeOutputUntouched(t *testing.T) {
 		map[string]string{"PRO_TOKEN": testSecret},
 	)
 
-	out, err := client.Exec(t.Context(), "vm1", "echo hello world", 0)
+	out, err := client.Exec(t.Context(), "vm1", "echo hello world")
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
 	}
@@ -528,7 +523,7 @@ func TestExecRedactsSecretsFromErrors(t *testing.T) {
 		map[string]string{"PRO_TOKEN": testSecret},
 	)
 
-	_, err := client.Exec(t.Context(), "vm1", "attach %{PRO_TOKEN}", 0)
+	_, err := client.Exec(t.Context(), "vm1", "attach %{PRO_TOKEN}")
 	if err == nil {
 		t.Fatal("Exec succeeded, want the non-zero exit to surface")
 	}
@@ -551,7 +546,7 @@ func TestExecRejectsUnsafeValues(t *testing.T) {
 		map[string]string{"PRO_TOKEN": "$(id -u)"},
 	)
 
-	if _, err := client.Exec(t.Context(), "vm1", "attach %{PRO_TOKEN}", 0); err == nil {
+	if _, err := client.Exec(t.Context(), "vm1", "attach %{PRO_TOKEN}"); err == nil {
 		t.Fatal("Exec succeeded, want a value containing shell metacharacters rejected")
 	}
 	if posts := server.posts(); len(posts) != 0 {
@@ -560,34 +555,14 @@ func TestExecRejectsUnsafeValues(t *testing.T) {
 }
 
 func TestExecRejectsPlaceholdersWithoutAResolver(t *testing.T) {
-	sr := tracetest.NewSpanRecorder()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
-	prev := otel.GetTracerProvider()
-	otel.SetTracerProvider(tp)
-	t.Cleanup(func() { otel.SetTracerProvider(prev) })
-
 	client, server, _ := newSecretClient(t, repliesWithIdentity(nil), nil)
 
-	_, err := client.Exec(t.Context(), "vm1", "attach %{PRO_TOKEN}", 0)
+	_, err := client.Exec(t.Context(), "vm1", "attach %{PRO_TOKEN}")
 	if !errors.Is(err, secrets.ErrUnknownName) {
 		t.Fatalf("Exec error = %v, want ErrUnknownName", err)
 	}
 	if posts := server.posts(); len(posts) != 0 {
 		t.Errorf("exec ran %d commands, want none after a resolution failure", len(posts))
-	}
-
-	var execSpan sdktrace.ReadOnlySpan
-	for _, s := range sr.Ended() {
-		if s.Name() == "vm.exec" {
-			execSpan = s
-			break
-		}
-	}
-	if execSpan == nil {
-		t.Fatal("no vm.exec span recorded for the failed resolution")
-	}
-	if execSpan.Status().Code != codes.Error {
-		t.Errorf("vm.exec span status = %v, want error", execSpan.Status().Code)
 	}
 }
 
@@ -597,7 +572,7 @@ func TestExecLeavesMarkerFreeCommandsWorkingWithoutAResolver(t *testing.T) {
 		nil,
 	)
 
-	out, err := client.Exec(t.Context(), "vm1", "df -h", 0)
+	out, err := client.Exec(t.Context(), "vm1", "df -h")
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
 	}
@@ -616,7 +591,7 @@ func TestExecScrubsTransportErrors(t *testing.T) {
 	}
 	client := newTestClient(server, mapResolver{"PRO_TOKEN": "s3cret"})
 
-	_, err := client.Exec(context.Background(), "vm", "attach %{PRO_TOKEN}", 1024)
+	_, err := client.Exec(context.Background(), "vm", "attach %{PRO_TOKEN}")
 	if err == nil {
 		t.Fatal("Exec succeeded, want the transport error to surface")
 	}
@@ -625,60 +600,6 @@ func TestExecScrubsTransportErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "%{PRO_TOKEN}") {
 		t.Fatalf("error text = %s, want the value masked as its placeholder", err)
-	}
-}
-
-func TestExecDoesNotRecordSecretsInSpans(t *testing.T) {
-	sr := tracetest.NewSpanRecorder()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
-	prev := otel.GetTracerProvider()
-	otel.SetTracerProvider(tp)
-	t.Cleanup(func() { otel.SetTracerProvider(prev) })
-
-	replies := repliesWithIdentity(map[string]reply{
-		"sudo pro attach " + testSecret: {out: "ran\n"},
-	})
-	client, _, _ := newSecretClient(t, replies, map[string]string{"PRO_TOKEN": testSecret})
-
-	if _, err := client.Exec(t.Context(), "vm1", "sudo pro attach %{PRO_TOKEN}", 1024); err != nil {
-		t.Fatalf("Exec: %v", err)
-	}
-
-	var execSpan sdktrace.ReadOnlySpan
-	for _, s := range sr.Ended() {
-		if s.Name() == "vm.exec" {
-			execSpan = s
-			break
-		}
-	}
-	if execSpan == nil {
-		t.Fatal("no vm.exec span recorded, so this test would prove nothing")
-	}
-
-	const wantCommand = "sudo pro attach %{PRO_TOKEN}"
-	var sawCommand bool
-	for _, attr := range execSpan.Attributes() {
-		var vals []string
-		switch attr.Value.Type() {
-		case attribute.STRING:
-			vals = []string{attr.Value.AsString()}
-		case attribute.STRINGSLICE:
-			vals = attr.Value.AsStringSlice()
-		}
-		for _, v := range vals {
-			if attr.Key == "mph.command" {
-				sawCommand = true
-				if v != wantCommand {
-					t.Errorf("mph.command = %q, want marker form %q", v, wantCommand)
-				}
-			}
-			if strings.Contains(v, testSecret) {
-				t.Errorf("span attribute %s leaked the resolved value: %q", attr.Key, v)
-			}
-		}
-	}
-	if !sawCommand {
-		t.Error("mph.command attribute missing, so the attribute assertions above proved nothing")
 	}
 }
 
@@ -696,7 +617,7 @@ func TestExecIgnoresNonFloatExitCode(t *testing.T) {
 	}
 	client := newTestClient(server, nil)
 
-	if _, err := client.Exec(context.Background(), "vm", "true", 16); err != nil {
+	if _, err := client.Exec(context.Background(), "vm", "true"); err != nil {
 		t.Fatalf("Exec with non-float return metadata: %v", err)
 	}
 }
@@ -724,7 +645,7 @@ func TestExecCombinesStdoutAndStderr(t *testing.T) {
 	}
 	client := newTestClient(server, nil)
 
-	out, err := client.Exec(context.Background(), "vm", "cat big", 64)
+	out, err := client.Exec(context.Background(), "vm", "cat big")
 	if err != nil {
 		t.Fatalf("Exec: %v", err)
 	}
@@ -763,7 +684,7 @@ func TestExecCancellationCancelsOperation(t *testing.T) {
 	}
 	client := newTestClient(server, nil)
 
-	_, err := client.Exec(ctx, "vm", "sleep forever", 64)
+	_, err := client.Exec(ctx, "vm", "sleep forever")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Exec error = %v, want context.Canceled", err)
 	}
@@ -778,7 +699,7 @@ func TestIdentityCaching(t *testing.T) {
 	client := newTestClient(server, nil)
 
 	for range 2 {
-		if _, err := client.Exec(context.Background(), "vm", "echo hi", 64); err != nil {
+		if _, err := client.Exec(context.Background(), "vm", "echo hi"); err != nil {
 			t.Fatalf("Exec: %v", err)
 		}
 	}
@@ -855,7 +776,7 @@ func TestExecSetsUpGuestUser(t *testing.T) {
 
 			var logs bytes.Buffer
 			client := NewWithServer(server, zerolog.New(&logs), nil)
-			out, err := client.Exec(t.Context(), "vm", "echo hi", 64)
+			out, err := client.Exec(t.Context(), "vm", "echo hi")
 			if err != nil {
 				t.Fatalf("Exec: %v", err)
 			}
@@ -910,7 +831,7 @@ func TestExecReportsGuestSetupFailure(t *testing.T) {
 	}
 	client := newTestClient(server, nil)
 
-	_, err := client.Exec(context.Background(), "vm", "echo hi", 64)
+	_, err := client.Exec(context.Background(), "vm", "echo hi")
 	if err == nil || !strings.Contains(err.Error(), "set up ubuntu user") {
 		t.Fatalf("Exec error = %v, want a guest setup error", err)
 	}

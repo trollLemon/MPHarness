@@ -19,7 +19,7 @@ import (
 	"github.com/trollLemon/MPHarness/internal/config"
 	"github.com/trollLemon/MPHarness/internal/harness"
 	"github.com/trollLemon/MPHarness/internal/lxd"
-	mphotel "github.com/trollLemon/MPHarness/internal/otel"
+	"github.com/trollLemon/MPHarness/internal/otlp"
 	"github.com/trollLemon/MPHarness/internal/secrets"
 )
 
@@ -108,8 +108,8 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "    nudge: %d\n", config.DefaultNudgeBytes)
 	_, _ = fmt.Fprintf(w, "  otel:                 # optional, OpenTelemetry\n")
 	_, _ = fmt.Fprintf(w, "    enabled: false\n")
-	_, _ = fmt.Fprintf(w, "    endpoint: %s\n", mphotel.DefaultEndpoint)
-	_, _ = fmt.Fprintf(w, "    service_name: %s\n", mphotel.DefaultServiceName)
+	_, _ = fmt.Fprintf(w, "    endpoint: %s\n", otlp.DefaultEndpoint)
+	_, _ = fmt.Fprintf(w, "    service_name: %s\n", otlp.DefaultServiceName)
 	_, _ = fmt.Fprintf(w, "    resource_attributes:\n")
 	_, _ = fmt.Fprintf(w, "      environment: dev\n")
 	_, _ = fmt.Fprintf(w, "  output:               # optional, captured command output\n")
@@ -153,7 +153,7 @@ func run() error {
 	flag.BoolVar(&needHelp, "h", false, "show help (shorthand)")
 	flag.BoolVar(&ignoreExisting, "i", false, "ignore that a VM with the given name exists already and run against that VM")
 	flag.BoolVar(&keep, "k", false, "keep the VM after execution rather than deleting it")
-	flag.Bool("otel", false, "enable or disable OpenTelemetry tracing (default: YAML otel.enabled or MPH_OTEL)")
+	flag.Bool("otel", false, "enable or disable OpenTelemetry logging (default: YAML otel.enabled or MPH_OTEL)")
 
 	flag.Usage = func() { printUsage(os.Stderr) }
 
@@ -206,7 +206,7 @@ func run() error {
 	otelCfg := resolveOtelConfig(cfg.Otel, ident.Label, ident.Name)
 
 	if otelCfg.Enabled {
-		shutdown, err := mphotel.Setup(ctx, otelCfg)
+		shutdown, err := otlp.Setup(ctx, otelCfg)
 		if err != nil {
 			return fmt.Errorf("otel setup: %w", err)
 		}
@@ -219,7 +219,7 @@ func run() error {
 				log.Debug().Msg("otel flush/shutdown complete")
 			}
 		}()
-		log.Logger = log.Logger.Hook(mphotel.NewHook("mph"))
+		log.Logger = log.Logger.Hook(otlp.NewHook("mph"))
 		log.Info().Str("endpoint", otelCfg.Endpoint).Str("svc", otelCfg.ServiceName).Msg("otel enabled")
 	}
 
@@ -277,8 +277,6 @@ func run() error {
 		IgnoreExisting: ignoreExisting,
 		Keep:           keep,
 		RunID:          ident.ID,
-		RunLabel:       ident.Label,
-		RunName:        ident.Name,
 	})
 }
 
@@ -331,8 +329,8 @@ func newRunIdentity(runCfg config.RunConfig, vmName string) runIdentity {
 	return runIdentity{ID: id, Label: name + ":" + id, Name: name}
 }
 
-func resolveOtelConfig(otelCfg config.OtelConfig, runID, runName string) mphotel.Config {
-	return mphotel.Config{
+func resolveOtelConfig(otelCfg config.OtelConfig, runID, runName string) otlp.Config {
+	return otlp.Config{
 		Enabled:            otelCfg.Enabled,
 		Endpoint:           otelCfg.Endpoint,
 		ServiceName:        otelCfg.ServiceName,

@@ -7,7 +7,7 @@ import (
 
 	"github.com/rs/zerolog"
 
-	mphotel "github.com/trollLemon/MPHarness/internal/otel"
+	"github.com/trollLemon/MPHarness/internal/otlp"
 )
 
 // runOutcome is the single terminal state of a run. It is logged once, on the
@@ -68,5 +68,5 @@ func (a *Agent) logRunSummary(ctx context.Context, outcome runOutcome, elapsed t
 			fields["ctx_window"] = window
 		}
 	}
-	mphotel.LogEvent(ctx, a.log.With().Ctx(ctx).Logger(), zerolog.InfoLevel, "run summary", fields)
+	otlp.LogEvent(ctx, a.log.With().Ctx(ctx).Logger(), zerolog.InfoLevel, "run summary", fields)
 }

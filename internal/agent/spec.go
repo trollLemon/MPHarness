@@ -207,7 +207,7 @@ func callExec(ctx context.Context, cli *lxd.Client, cfg config.Config, store *ou
 		return out, nil
 	}
 
-	out, execErr := cli.Exec(ctx, cfg.VM.Name, command, cfg.Truncation.ToolResult)
+	out, execErr := cli.Exec(ctx, cfg.VM.Name, command)
 	if execErr != nil {
 		return "", execErr
 	}

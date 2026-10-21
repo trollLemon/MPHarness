@@ -61,7 +61,7 @@ const (
 )
 
 type ExecClient interface {
-	Exec(ctx context.Context, name, command string, maxAttrBytes int) (string, error)
+	Exec(ctx context.Context, name, command string) (string, error)
 }
 
 // Store keeps every command output capture for one run.
@@ -146,7 +146,7 @@ func (s *Store) mode() string {
 }
 
 func (s *Store) directExec(ctx context.Context, cmd string) (Result, error) {
-	out, err := s.client.Exec(ctx, s.vm, cmd, 0)
+	out, err := s.client.Exec(ctx, s.vm, cmd)
 	if err != nil {
 		return Result{}, err
 	}
@@ -166,7 +166,7 @@ func (s *Store) preflight(ctx context.Context) error {
 	if maxCmd <= 0 {
 		return nil
 	}
-	freeOut, err := s.client.Exec(ctx, s.vm, fmt.Sprintf("df -P %s | awk 'NR==2 {print $4}'", shellQuote(s.runDir)), 0)
+	freeOut, err := s.client.Exec(ctx, s.vm, fmt.Sprintf("df -P %s | awk 'NR==2 {print $4}'", shellQuote(s.runDir)))
 	if err != nil {
 		return nil
 	}
@@ -181,12 +181,12 @@ func (s *Store) preflight(ctx context.Context) error {
 }
 
 func (s *Store) ensureSubdir(ctx context.Context, subdir string) error {
-	_, err := s.client.Exec(ctx, s.vm, fmt.Sprintf("mkdir -p %s", shellQuote(subdir)), 0)
+	_, err := s.client.Exec(ctx, s.vm, fmt.Sprintf("mkdir -p %s", shellQuote(subdir)))
 	return err
 }
 
 func (s *Store) removeSubdir(ctx context.Context, subdir string) {
-	_, _ = s.client.Exec(ctx, s.vm, fmt.Sprintf("rm -rf %s", shellQuote(subdir)), 0)
+	_, _ = s.client.Exec(ctx, s.vm, fmt.Sprintf("rm -rf %s", shellQuote(subdir)))
 }
 
 func parseMarkerLine(line, marker string) (exit int, found, valid bool) {
@@ -238,7 +238,7 @@ func wrapCapture(cmd, raw, marker string, maxBytes int64) string {
 }
 
 func (s *Store) runRedirect(ctx context.Context, cmd, raw, marker string) (int, error) {
-	execOut, execErr := s.client.Exec(ctx, s.vm, wrapCapture(cmd, raw, marker, int64(s.cfg.MaxCommandSize)), 0)
+	execOut, execErr := s.client.Exec(ctx, s.vm, wrapCapture(cmd, raw, marker, int64(s.cfg.MaxCommandSize)))
 	if strings.Contains(execOut, "No space left on device") {
 		return 0, fmt.Errorf("capture failed: no space left on device")
 	}
@@ -252,7 +252,7 @@ func (s *Store) runRedirect(ctx context.Context, cmd, raw, marker string) (int, 
 }
 
 func (s *Store) rawSize(ctx context.Context, raw string) (int64, error) {
-	sizeOut, err := s.client.Exec(ctx, s.vm, fmt.Sprintf("wc -c < %s", shellQuote(raw)), 0)
+	sizeOut, err := s.client.Exec(ctx, s.vm, fmt.Sprintf("wc -c < %s", shellQuote(raw)))
 	if err != nil {
 		if strings.Contains(err.Error(), "No space left on device") || strings.Contains(sizeOut, "No space left on device") {
 			return 0, fmt.Errorf("capture failed: no space left on device")
@@ -284,7 +284,7 @@ func (s *Store) shouldInline(mode string, size int64) bool {
 func (s *Store) materializeInline(ctx context.Context, subdir, raw string, size int64, exit int) (Result, error) {
 	inline := ""
 	if size > 0 {
-		catOut, err := s.client.Exec(ctx, s.vm, fmt.Sprintf("cat %s", shellQuote(raw)), 0)
+		catOut, err := s.client.Exec(ctx, s.vm, fmt.Sprintf("cat %s", shellQuote(raw)))
 		if err != nil {
 			return Result{}, err
 		}
@@ -298,7 +298,7 @@ func (s *Store) materializeInline(ctx context.Context, subdir, raw string, size 
 }
 
 func (s *Store) materializeHandle(ctx context.Context, cmd, oid, raw string, size int64, exit int) (Result, error) {
-	linesOut, err := s.client.Exec(ctx, s.vm, fmt.Sprintf("wc -l < %s", shellQuote(raw)), 0)
+	linesOut, err := s.client.Exec(ctx, s.vm, fmt.Sprintf("wc -l < %s", shellQuote(raw)))
 	if err != nil {
 		return Result{}, fmt.Errorf("capture line count failed: %w", err)
 	}
@@ -496,7 +496,7 @@ func (s *Store) Search(ctx context.Context, args SearchArgs) (SearchResult, erro
 	maxM := s.cfg.SearchMaxMatches
 	marker := "__MPH_GREP_EXIT_" + strings.ReplaceAll(h.ID, "-", "") + ":"
 
-	out, execErr := s.client.Exec(ctx, s.vm, buildGrepCmd(h.Path, args.Pattern, args.FixedString, args.IgnoreCase, maxM, marker), 0)
+	out, execErr := s.client.Exec(ctx, s.vm, buildGrepCmd(h.Path, args.Pattern, args.FixedString, args.IgnoreCase, maxM, marker))
 	lines, grepExit, hasMarker := parseGrepOutput(out, marker)
 
 	if !hasMarker && execErr != nil {
@@ -526,7 +526,7 @@ func (s *Store) countMatches(ctx context.Context, h Handle, args SearchArgs, gre
 	if grepExit == 1 {
 		return 0
 	}
-	out, err := s.client.Exec(ctx, s.vm, buildGrepCountCmd(h.Path, args.Pattern, args.FixedString, args.IgnoreCase), 0)
+	out, err := s.client.Exec(ctx, s.vm, buildGrepCountCmd(h.Path, args.Pattern, args.FixedString, args.IgnoreCase))
 	if err != nil {
 		return listed
 	}
@@ -565,7 +565,7 @@ func (s *Store) Read(ctx context.Context, outputID string, offset, limit int) (R
 	if offset > h.TotalLines {
 		return ReadResult{OutputID: h.ID, Offset: offset, Limit: limit, TotalLines: h.TotalLines}, nil
 	}
-	out, err := s.client.Exec(ctx, s.vm, buildReadCmd(h.Path, offset, limit), 0)
+	out, err := s.client.Exec(ctx, s.vm, buildReadCmd(h.Path, offset, limit))
 	if err != nil {
 		return ReadResult{}, fmt.Errorf("read failed for output %q: %w", h.ID, err)
 	}

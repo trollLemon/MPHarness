@@ -128,7 +128,7 @@ mph [flags] <config.yaml>
   -k                    keep the VM after the task instead of deleting it
   -v, --verbose         debug logging
   --pretty              human-readable console logs instead of JSON
-  --otel                enable OpenTelemetry tracing; --otel=false disables (also MPH_OTEL, YAML otel.enabled)
+  --otel                enable OpenTelemetry logging; --otel=false disables (also MPH_OTEL, YAML otel.enabled)
   --version             print version and exit
   -h, --help            show help
 ```
@@ -140,7 +140,7 @@ Note: `-i` and `-k` have no long forms.
 OTel is **off by default**. Enable with `--otel` / `otel.enabled: true`, pointing at an OTLP/gRPC collector (default `localhost:4317`):
 
 ```bash
-make otel-up                       # Grafana+Loki+Tempo+Prometheus stack
+make otel-up                       # Grafana+Loki+Prometheus stack
 ./bin/mph --otel ./testing/test.yaml
 # Grafana: http://localhost:3000 (admin/admin)
 ```

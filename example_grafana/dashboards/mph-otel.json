@@ -1,6 +1,6 @@
 {
  "uid": "mph-otel",
- "title": "MPHarness - OTel (Logs / Traces)",
+ "title": "MPHarness - OTel (Logs)",
  "tags": [
   "mph",
   "otel",
@@ -8,10 +8,10 @@
  ],
  "timezone": "browser",
  "schemaVersion": 41,
- "version": 6,
+ "version": 7,
  "refresh": "30s",
  "editable": true,
- "description": "Telemetry from batch test runs, not a long-running service. Every panel is LogQL over the structured log events mph emits (event=token_usage, iteration, agent_tool_call, tool_succeeded, tool_failed, context_compaction, context_compaction_applied, run_summary) plus Tempo traces. The $run variable picks one run by its Loki instance label, a <name>:<uuid> composite, so two runs sharing a name stay separate.",
+ "description": "Telemetry from batch test runs, not a long-running service. Every panel is LogQL over the structured log events mph emits (event=token_usage, iteration, agent_tool_call, tool_succeeded, tool_failed, context_compaction, context_compaction_applied, run_summary). The $run variable picks one run by its Loki instance label, a <name>:<uuid> composite, so two runs sharing a name stay separate.",
  "time": {
   "from": "now-1h",
   "to": "now"
@@ -692,7 +692,7 @@
    },
    "gridPos": {
     "h": 9,
-    "w": 6,
+    "w": 12,
     "x": 12,
     "y": 6
    },
@@ -801,52 +801,6 @@
        "attributes_iter": 0
       }
      }
-    }
-   ]
-  },
-  {
-   "id": 213,
-   "type": "table",
-   "title": "Run traces",
-   "description": "One row per span for the selected run, so nested spans such as vm.exec appear next to their parent. Select a row to open its trace in Explore. TraceQL search only covers flushed blocks, so a run becomes searchable about a minute after it finishes.",
-   "datasource": {
-    "type": "tempo",
-    "uid": "mph-tempo"
-   },
-   "gridPos": {
-    "h": 9,
-    "w": 6,
-    "x": 18,
-    "y": 6
-   },
-   "fieldConfig": {
-    "defaults": {},
-    "overrides": []
-   },
-   "options": {
-    "showHeader": true,
-    "cellHeight": "sm"
-   },
-   "targets": [
-    {
-     "refId": "A",
-     "datasource": {
-      "type": "tempo",
-      "uid": "mph-tempo"
-     },
-     "queryType": "traceqlSearch",
-     "filters": [
-      {
-       "id": "service-instance-id",
-       "scope": "resource",
-       "tag": "service.instance.id",
-       "operator": "=",
-       "value": "$run",
-       "valueType": "string"
-      }
-     ],
-     "limit": 100,
-     "tableType": "spans"
     }
    ]
   },
@@ -2131,8 +2085,8 @@
   {
    "id": 23,
    "type": "logs",
-   "title": "Log lines with trace correlation",
-   "description": "Caller attribution was removed from the logger, so this shows the message with its trace and span ids. The model text itself arrives under body=\"model output\" split by attributes.part (content or reasoning) with the payload in attributes.text.",
+   "title": "All log lines",
+   "description": "Every exported log record. The model text itself arrives under body=\"model output\" split by attributes.part (content or reasoning) with the payload in attributes.text.",
    "datasource": {
     "type": "loki",
     "uid": "mph-loki"
@@ -2163,7 +2117,7 @@
      "queryType": "range",
      "direction": "backward",
      "maxLines": 200,
-     "line_format": "{{.body}}  |  {{.severity}}  trace_id={{.traceid}} span_id={{.spanid}}"
+     "line_format": "{{.body}}  |  {{.severity}}"
     }
    ]
   },
@@ -2183,8 +2137,8 @@
   {
    "id": 40,
    "type": "timeseries",
-   "title": "OTLP received per interval (spans / logs)",
-   "description": "Records arriving per interval, so gaps in traffic read as zero. Spans and log records differ by orders of magnitude, so read the shape rather than the height.",
+   "title": "OTLP received per interval (log records)",
+   "description": "Log records arriving per interval, so gaps in traffic read as zero.",
    "datasource": {
     "type": "prometheus",
     "uid": "mph-prometheus"
@@ -2238,18 +2192,6 @@
       "type": "prometheus",
       "uid": "mph-prometheus"
      },
-     "expr": "sum(increase(otelcol_receiver_accepted_spans_total[$__rate_interval]))",
-     "range": true,
-     "instant": false,
-     "format": "time_series",
-     "legendFormat": "spans"
-    },
-    {
-     "refId": "C",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "mph-prometheus"
-     },
      "expr": "sum(increase(otelcol_receiver_accepted_log_records_total[$__rate_interval]))",
      "range": true,
      "instant": false,
@@ -2262,7 +2204,7 @@
    "id": 41,
    "type": "timeseries",
    "title": "Export failures (should stay flat at zero)",
-   "description": "Any non-zero value means telemetry was dropped on the way to Tempo / Prometheus / Loki.",
+   "description": "Any non-zero value means telemetry was dropped on the way to Prometheus / Loki.",
    "datasource": {
     "type": "prometheus",
     "uid": "mph-prometheus"
@@ -2325,18 +2267,6 @@
    "targets": [
     {
      "refId": "A",
-     "datasource": {
-      "type": "prometheus",
-      "uid": "mph-prometheus"
-     },
-     "expr": "sum by (otelcol_exporter) (increase(otelcol_exporter_send_failed_spans_total[$__range]))",
-     "range": true,
-     "instant": false,
-     "format": "time_series",
-     "legendFormat": "spans {{otelcol_exporter}}"
-    },
-    {
-     "refId": "B",
      "datasource": {
       "type": "prometheus",
       "uid": "mph-prometheus"
