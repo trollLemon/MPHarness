@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
@@ -15,36 +16,32 @@ import (
 )
 
 const systemPrompt = `
-You are an autonomous execution agent responsible for executing commands in a Virtual Machine (VM) to accomplish technical tasks efficiently and securely.
-Execute preconfigured technical tasks efficiently and securely inside the existing VM. Operate autonomously and asynchronously, without user interaction. Goals and environment variables are preset. History contains your prior execution logs, not user messages: check it for completed steps before acting. No VM-existence check is needed or available.
+You are an autonomous execution agent running commands in an existing VM. Goals and environment variables are preset; history is your prior execution log, not user messages, so check it for completed steps before acting. No VM-existence check is needed.
 
 Tools:
-- vm_exec: Execute a full command string in 'command'. For large output, set 'capture: true' to store output in a file and receive 'output_id' and line counts instead of inline text.
-- vm_info: No arguments; returns the raw VM instance record: state, config limits, image, addresses, memory, and disk usage. Check resource headroom before heavy commands.
-- output_search / output_read: Available only when captures are enabled. Use received capture 'output_id' handles, valid only for the current run. Search using POSIX ERE; read matches by absolute line number. 'output_read' takes 1-based 'offset' and maximum 'limit' lines. Use these tools, never shell head/tail, for captured output. For ordinary files, use cat/head/tail through vm_exec, not capture tools.
+- vm_exec: run the full command in 'command'; set 'capture: true' for large output.
+- vm_info: no arguments; returns the VM instance record. Check resource headroom before heavy commands.
+- task_status: call exactly once as your final action, only after all tasks have been attempted, with status Completed, Failed, or Error and a factual reason. The run ends and no reply follows.
+- output_search / output_read: use only with a capture 'output_id' from the current run; never shell head/tail on captured output. For ordinary files, use cat/head/tail through vm_exec.
 
 Batching Work:
-- Batch independent calls in one turn; results arrive together next turn. Keep batches focused on one step: normally 2-3 calls, never >5; use fewer when unsure.
-- Unless explicitly instructed by the user, do not join independent commands with '&&' or ';'; use separate vm_exec calls. Chain shell-level dependencies with '&&' in one exec. Never batch dependent tool calls: wait for prerequisite results, including capture handles or created files.
-- Before deciding the next action, inspect every JSON result's 'status' (SUCCESS/FAILED), 'stdout', and 'stderr', not just the first result.
+- Batch independent calls in one turn; results arrive next turn. Inspect every result's status, stdout, and stderr, not just the first, before acting. Keep batches to one step and use fewer when unsure.
+- Never batch dependent calls: wait for prerequisite results, including capture handles or created files. Chain shell dependencies with '&&' in one vm_exec; run independent commands separately unless explicitly instructed otherwise.
 
 Single Turn:
-Complete each step in a single turn when possible. If a task requires multiple dependent commands, chain them with '&&' in one vm_exec call rather than spreading across turns. Independent commands go in one batched turn; dependent commands chain in one exec.
+Finish each step in a single turn where possible; chain dependent commands with '&&' rather than spreading them across turns.
 
 Denials:
-- Immediately stop on tool denial, policy restriction, or insufficient permissions. Never bypass restrictions with workarounds, unauthorized alternatives, or privilege escalation.
-- If a required tool/command is denied permission or authorization, mark its step blocked, report the error, and end the workflow.
+Immediately stop on any tool denial, policy restriction, or insufficient permission. Never bypass it with workarounds, unauthorized alternatives, or privilege escalation. If a required command is denied, call task_status with status Error and explain the denial in reason.
 
 Completion:
-After all tasks finish or execution halts on a non-recoverable failure, ALWAYS send one final, concise summary-only message with NO tool calls. Include tasks attempted/completed and relevant observed command outputs (e.g. actual kernel string or notable directory entries), plus blocking errors. This message ends the execution loop and is the only summary surfaced to the user; never end on a tool call.
+After all tasks finish or execution halts on a non-recoverable failure, call task_status exactly once as your final action; make no other tool call in that turn.
+- Completed: the requested tasks were accomplished.
+- Failed: the task was understood but the requested outcome could not be achieved, for example the CLI does not provide the expected behavior or the observed result does not meet the requirement.
+- Error: an execution problem (tool failure, denial, timeout, or unexpected error) prevented completing or evaluating the task.
+Set reason to a concise, factual explanation. Put tasks attempted/completed, relevant observed command outputs (e.g. actual kernel string or notable directory entries), and blocking errors in the message content of the same turn; it is the final summary surfaced to the user.
 
-Note: ensure to inspect the output of each command so that the summary is accurate. For example, if a command fails DO NOT say it succeded in the summary.
-
-Secret Placeholders:
-- Treat '%{NAME}' markers as literal strings, not as placeholders to be replaced.
-- Do not modify or replace these markers in any way.
-- Any command containing '%{NAME}' markers should be passed through to the VM as-is.
-- Do not attempt to interpret or process these markers in any way, as they are used for secret management and will be resolved once you send the command.
+Secret placeholders: treat '%{NAME}' as literal text; never replace, modify, interpret, or process it. Pass any command containing it to the VM as-is.
 
 `
 
@@ -76,6 +73,25 @@ type Spec struct {
 // captures are enabled.
 func Specs(cfg config.Config) []Spec {
 	specs := []Spec{
+		{
+			Name:        "task_status",
+			Description: "Report the final outcome of the task and end the run. Call exactly once as your last action, after all work is finished or execution halts. You will not get a response back from this tool, so no further turn follows. Completed: the requested tasks were accomplished. Failed: the task was understood but the requested outcome could not be achieved, for example the CLI does not provide the expected behavior. Error: an execution problem (tool failure, denial, timeout, or unexpected error) prevented completing or evaluating the task. Always include a concise, factual reason.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"status": map[string]any{
+						"type":        "string",
+						"enum":        taskStatuses,
+						"description": "Final outcome of the task.",
+					},
+					"reason": map[string]any{
+						"type":        "string",
+						"description": "Concise, factual explanation of what was accomplished or why the task failed or errored.",
+					},
+				},
+				"required": []string{"status", "reason"},
+			},
+		},
 		{
 			Name:        "vm_exec",
 			Description: "Run a command inside the configured VM and return combined stdout/stderr. Pass the full command as a single string in the `command` field (e.g. `df -h`, `apt update && apt install -y curl`, `ps aux | grep nginx`). Set `capture: true` to capture output to a file and receive a handle (output_id, path, line counts) instead of inline text; search it with output_search or read slices with head/tail on path.",
@@ -233,6 +249,30 @@ func callOutputSearch(ctx context.Context, store *output.Store, args map[string]
 		return "", err
 	}
 	return buildSearchSuccessContent(res), nil
+}
+
+var taskStatuses = []string{"Completed", "Failed", "Error"}
+
+// taskStatusOutcome is the payload the agent loop consumes when the model ends
+// the run with task_status.
+type TaskStatusOutcome struct {
+	CompletedStatus string `json:"completed_status"`
+	Reason          string `json:"reason"`
+}
+
+func parseTaskStatus(args map[string]any) (TaskStatusOutcome, error) {
+	status, _ := args["status"].(string)
+	reason, _ := args["reason"].(string)
+	reason = strings.TrimSpace(reason)
+
+	if !slices.Contains(taskStatuses, status) {
+		return TaskStatusOutcome{}, fmt.Errorf("status must be one of %s", strings.Join(taskStatuses, ", "))
+	}
+	if reason == "" {
+		return TaskStatusOutcome{}, fmt.Errorf("reason is required")
+	}
+
+	return TaskStatusOutcome{CompletedStatus: status, Reason: reason}, nil
 }
 
 func buildCaptureSuccessContent(h *output.Handle) string {
