@@ -120,9 +120,7 @@ func toolResultBudgetBytes(cfg config.Config, contextWindow int) int {
 	return max(min(budget, maxToolResultBytes), minToolResultBytes)
 }
 
-// Agent owns the state of a single run. Iteration state lives here rather than
-// being threaded through every signature, so the per-iteration helpers read as
-// what they do instead of what they carry.
+// Agent comprises of the state of a single run, including the logger, model, conversation, and metrics.
 type Agent struct {
 	log           zerolog.Logger   // Run-scoped logger, already tagged component=agent.
 	krn           Kronk            // Model backend: chat, tokenize, and model metadata.
@@ -143,6 +141,8 @@ type Agent struct {
 	toolResultBudget   int           // Byte cutoff between inline output and a handle.
 	done               bool          // Set when the agent should stop looping.
 	totals             runTotals     // Per-run aggregate for the run_summary event.
+
+	finalRunStatus TaskStatusOutcome // final status of the run.
 }
 
 // Options carries the per-run bounds NewAgent needs.
@@ -174,7 +174,7 @@ func NewAgent(log zerolog.Logger, krn Kronk, opts Options) *Agent {
 // maxIterations, and returns the first error that aborts the run. It owns the
 // iteration loop, compacting the context before each round, and prints the
 // final command output or assistant answer when the loop ends.
-func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *lxd.Client) (err error) {
+func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *lxd.Client) (_ *TaskStatusOutcome, err error) {
 	start := time.Now()
 	defer func() {
 		exhausted := a.iteration >= a.maxIterations && !a.done
@@ -201,7 +201,7 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *lxd.Client
 		a.totals.Iterations++
 		a.maybeCompact(ctx, conf)
 		if err := a.runIteration(ctx, cli, conf); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
@@ -224,7 +224,7 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *lxd.Client
 		Int("compact_tries", a.compactionAttempts).
 		Msg("run complete")
 
-	return nil
+	return &a.finalRunStatus, nil
 }
 
 func (a *Agent) runIteration(ctx context.Context, cli *lxd.Client, conf config.Config) error {
@@ -471,12 +471,31 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 
 	iter, _ := iterationFromContext(ctx)
 	for _, tc := range toolCalls {
-		start := time.Now()
-		result, err := Call(ctx, cli, cfg, a.store, tc.Function.Name, tc.Function.Arguments)
-		duration := time.Since(start)
+
+		var duration time.Duration
+		var err error
+		var result string
+
+		// This function call has no go code to execute and return output to the agent, and is a special
+		// case where we need to modify state, not return output to the model (unless its an error)
+		if tc.Function.Name == "task_status" {
+
+			var status TaskStatusOutcome
+			status, err = parseTaskStatus(tc.Function.Arguments)
+			if err == nil {
+				a.finalRunStatus = status
+				a.done = true
+			}
+
+		} else {
+			start := time.Now()
+			result, err = Call(ctx, cli, cfg, a.store, tc.Function.Name, tc.Function.Arguments)
+			duration = time.Since(start)
+		}
 
 		status := toolStatusSuccess
 		resultSize := len(result)
+
 		var content string
 		var failure error
 
