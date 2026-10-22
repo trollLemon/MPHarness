@@ -15,7 +15,6 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/trollLemon/MPHarness/internal/config"
-	mphotel "github.com/trollLemon/MPHarness/internal/otel"
 	"github.com/trollLemon/MPHarness/internal/output"
 )
 
@@ -522,8 +521,7 @@ func TestCompactionDurationIsLoggedInMilliseconds(t *testing.T) {
 		Prompt:     "task",
 		Compaction: enabledCompaction(),
 	}
-	ctx := mphotel.WithRunIdentity(context.Background(), "baseline:run-compact-ms", "baseline")
-	if err := agent.Execute(ctx, conf, newTestClient(t)); err != nil {
+	if err := agent.Execute(context.Background(), conf, newTestClient(t)); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 

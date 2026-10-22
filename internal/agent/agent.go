@@ -10,13 +10,10 @@ import (
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	"github.com/rs/zerolog"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/trollLemon/MPHarness/internal/config"
 	"github.com/trollLemon/MPHarness/internal/lxd"
-	mphotel "github.com/trollLemon/MPHarness/internal/otel"
+	"github.com/trollLemon/MPHarness/internal/otlp"
 	"github.com/trollLemon/MPHarness/internal/output"
 	"github.com/trollLemon/MPHarness/internal/textutil"
 )
@@ -78,18 +75,6 @@ func withIteration(ctx context.Context, iter int) context.Context {
 func iterationFromContext(ctx context.Context) (int, bool) {
 	v, ok := ctx.Value(iterationKey{}).(int)
 	return v, ok
-}
-
-// eventAttrs adds the iteration dimension to a run-scoped attribute set.
-func eventAttrs(ctx context.Context, extra ...attribute.KeyValue) []attribute.KeyValue {
-	if iter, ok := iterationFromContext(ctx); ok {
-		extra = append(extra, attribute.Int("mph.iteration", iter))
-	}
-	return mphotel.RunAttrs(ctx, extra...)
-}
-
-func getAgentTracer() trace.Tracer {
-	return otel.Tracer("mph")
 }
 
 func heartbeatWithCancel(log zerolog.Logger, msg string) func() {
@@ -245,15 +230,13 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *lxd.Client
 func (a *Agent) runIteration(ctx context.Context, cli *lxd.Client, conf config.Config) error {
 	iter := a.iteration
 
-	iterCtx, iterSpan := getAgentTracer().Start(ctx, "mph.agent.iteration",
-		trace.WithAttributes(mphotel.RunSpanAttrs(ctx, attribute.Int("mph.iteration", iter+1))...))
-	iterCtx = withIteration(iterCtx, iter)
+	iterCtx := withIteration(ctx, iter)
 	iterLog := a.log.With().Ctx(iterCtx).Logger()
 
 	var chatDur, toolDur time.Duration
 	iterStart := time.Now()
 	defer func() {
-		mphotel.LogEvent(iterCtx, iterLog, zerolog.DebugLevel, "iteration timing", map[string]any{
+		otlp.LogEvent(iterCtx, iterLog, zerolog.DebugLevel, "iteration timing", map[string]any{
 			"event":   eventIteration,
 			"iter":    iter + 1,
 			"dur_ms":  time.Since(iterStart).Milliseconds(),
@@ -272,23 +255,19 @@ func (a *Agent) runIteration(ctx context.Context, cli *lxd.Client, conf config.C
 	}()
 
 	if err != nil {
-		mphotel.FailSpan(iterSpan, err)
-		iterSpan.End()
 		return err
 	}
 
 	// The reported usage is the measurement; anything this turn appends on top
 	// of it is tallied by addToolTokens below.
-	a.recordTokenUsage(iterCtx, iterSpan, iterLog, resp.Usage)
+	a.recordTokenUsage(iterCtx, iterLog, resp.Usage)
 	a.contextTokens = 0
 	if resp.Usage != nil {
 		a.contextTokens = int64(resp.Usage.TotalTokens)
 	}
 
 	msg, finishReason, shouldBreak := a.extractAssistantMessage(resp)
-	iterSpan.SetAttributes(attribute.String("mph.finish_reason", finishReason))
 	if shouldBreak {
-		iterSpan.End()
 		a.done = true
 		return nil
 	}
@@ -297,7 +276,7 @@ func (a *Agent) runIteration(ctx context.Context, cli *lxd.Client, conf config.C
 	// Bare tool calls carry no text, so without this a turn leaves no model
 	// output trace at all. The shape event proves the model was heard and
 	// shows what it returned, instead of looking like dropped logging.
-	mphotel.LogEvent(iterCtx, iterLog, zerolog.DebugLevel, "assistant message", map[string]any{
+	otlp.LogEvent(iterCtx, iterLog, zerolog.DebugLevel, "assistant message", map[string]any{
 		"iter":   iter + 1,
 		"finish": finishReason,
 		"clen":   len(msg.Content),
@@ -305,28 +284,24 @@ func (a *Agent) runIteration(ctx context.Context, cli *lxd.Client, conf config.C
 		"calls":  len(msg.ToolCalls),
 	})
 	if content == "" && finishReason != model.FinishReasonTool && len(msg.ToolCalls) == 0 {
-		mphotel.LogEvent(iterCtx, iterLog, zerolog.DebugLevel, "empty content", map[string]any{
+		otlp.LogEvent(iterCtx, iterLog, zerolog.DebugLevel, "empty content", map[string]any{
 			"finish": finishReason,
 		})
 	}
 
 	toolCalls := msg.ToolCalls
 	argsJSON := marshalToolCallArgs(toolCalls)
-	addToolCallEvents(iterSpan, toolCalls, argsJSON, conf.Truncation.ToolResult)
 
 	if len(toolCalls) == 0 && finishReason == model.FinishReasonLength {
-		mphotel.LogEvent(iterCtx, iterLog, zerolog.WarnLevel, "hit length limit without tool calls, injecting nudge and continuing", map[string]any{
+		otlp.LogEvent(iterCtx, iterLog, zerolog.WarnLevel, "hit length limit without tool calls, injecting nudge and continuing", map[string]any{
 			"iter":   iter + 1,
 			"finish": finishReason,
 		})
-		iterSpan.AddEvent("mph.agent.length_nudge", trace.WithAttributes(attribute.Int("mph.iteration", iter+1)))
 		a.conversation = appendToConversation(a.conversation, buildLengthNudgeMessages(msg, conf.Truncation.Nudge)...)
-		iterSpan.End()
 		return nil
 	}
 
 	if a.shouldTerminateWithoutToolCalls(toolCalls, finishReason, iter) {
-		iterSpan.End()
 		a.done = true
 		return nil
 	}
@@ -344,7 +319,6 @@ func (a *Agent) runIteration(ctx context.Context, cli *lxd.Client, conf config.C
 	if len(a.commandOutputs) > 0 {
 		iterLog.Debug().Int("outs", len(a.commandOutputs)).Msg("collected outputs so far")
 	}
-	iterSpan.End()
 	return nil
 }
 
@@ -365,7 +339,7 @@ func (a *Agent) addToolTokens(ctx context.Context, msgs []model.D) {
 	a.contextTokens += added
 }
 
-func (a *Agent) recordTokenUsage(ctx context.Context, span trace.Span, log zerolog.Logger, usage *model.Usage) {
+func (a *Agent) recordTokenUsage(ctx context.Context, log zerolog.Logger, usage *model.Usage) {
 	if usage == nil {
 		return
 	}
@@ -391,13 +365,7 @@ func (a *Agent) recordTokenUsage(ctx context.Context, span trace.Span, log zerol
 	if window := a.krn.ModelConfig().ContextWindow(); window > 0 {
 		fields["ctx_window"] = window
 	}
-	mphotel.LogEvent(ctx, log, zerolog.InfoLevel, "token usage", fields)
-	span.SetAttributes(
-		attribute.Int("mph.tokens.prompt", usage.PromptTokens),
-		attribute.Int("mph.tokens.completion", usage.CompletionTokens),
-		attribute.Int("mph.tokens.total", usage.TotalTokens),
-		attribute.Float64("mph.tokens_per_second", usage.TokensPerSecond),
-	)
+	otlp.LogEvent(ctx, log, zerolog.InfoLevel, "token usage", fields)
 }
 
 func marshalToolCallArgs(toolCalls []model.ResponseToolCall) []json.RawMessage {
@@ -406,16 +374,6 @@ func marshalToolCallArgs(toolCalls []model.ResponseToolCall) []json.RawMessage {
 		out[i], _ = json.Marshal(tc.Function.Arguments)
 	}
 	return out
-}
-
-func addToolCallEvents(span trace.Span, toolCalls []model.ResponseToolCall, args []json.RawMessage, maxArgs int) {
-	for i, tc := range toolCalls {
-		span.AddEvent("mph.agent.tool_call", trace.WithAttributes(
-			attribute.String("mph.tool.name", tc.Function.Name),
-			attribute.String("mph.tool.id", tc.ID),
-			attribute.String("mph.tool.arguments", textutil.Truncate(string(args[i]), maxArgs)),
-		))
-	}
 }
 
 func logModelOutput(ctx context.Context, log zerolog.Logger, iter int, msg *model.ResponseMessage, maxContent int) string {
@@ -430,7 +388,7 @@ func logModelOutput(ctx context.Context, log zerolog.Logger, iter int, msg *mode
 }
 
 func logModelPart(ctx context.Context, log zerolog.Logger, iter int, part, text string, maxContent int) {
-	mphotel.LogEvent(ctx, log, zerolog.InfoLevel, "model output", map[string]any{
+	otlp.LogEvent(ctx, log, zerolog.InfoLevel, "model output", map[string]any{
 		"iter": iter + 1,
 		"part": part,
 		"text": textutil.Truncate(text, maxContent),
@@ -447,9 +405,6 @@ func buildInitialConversation(conf config.Config) []model.D {
 func (a *Agent) callChat(ctx context.Context, req model.D, iter int) (model.ChatResponse, error) {
 	callCtx, callCancel := context.WithTimeout(ctx, a.chatTimeout)
 	defer callCancel()
-
-	callCtx = mphotel.InjectTracing(callCtx, getAgentTracer(),
-		eventAttrs(ctx, attribute.Int("mph.iteration", iter+1))...)
 
 	resp, err := a.krn.Chat(callCtx, req)
 	if err != nil {
@@ -490,7 +445,7 @@ func (a *Agent) shouldTerminateWithoutToolCalls(toolCalls []model.ResponseToolCa
 func (a *Agent) buildToolCallDocsWithContext(ctx context.Context, toolCalls []model.ResponseToolCall, args []json.RawMessage, iter int) []model.D {
 	docs := make([]model.D, 0, len(toolCalls))
 	for i, tc := range toolCalls {
-		mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "agent tool call", map[string]any{
+		otlp.LogEvent(ctx, a.log, zerolog.InfoLevel, "agent tool call", map[string]any{
 			"event": eventAgentToolCall,
 			"iter":  iter + 1,
 			"tool":  tc.Function.Name,
@@ -514,15 +469,13 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 	var toolResponses []model.D
 	var commandOutputs []string
 
-	span := trace.SpanFromContext(ctx)
 	iter, _ := iterationFromContext(ctx)
 	for _, tc := range toolCalls {
 		start := time.Now()
 		result, err := Call(ctx, cli, cfg, a.store, tc.Function.Name, tc.Function.Arguments)
 		duration := time.Since(start)
 
-		status := "SUCCESS"
-		detail := result
+		status := toolStatusSuccess
 		resultSize := len(result)
 		var content string
 		var failure error
@@ -531,8 +484,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 		env, isEnvelope := parseToolEnvelope(result)
 		switch {
 		case err != nil:
-			status = "FAILED"
-			detail = err.Error()
+			status = toolStatusFailed
 			failure = err
 			content = buildToolErrorContent(err)
 			resultSize = len(content)
@@ -541,7 +493,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 			if env.Data.Result.Captured {
 				id := env.Data.Result.OutputID
 				commandOutputs = append(commandOutputs, fmt.Sprintf("<captured output_id=%s>", id))
-				mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "command output too large for inline context, captured to file", map[string]any{
+				otlp.LogEvent(ctx, a.log, zerolog.InfoLevel, "command output too large for inline context, captured to file", map[string]any{
 					"tool":   tc.Function.Name,
 					"id":     tc.ID,
 					"out_id": id,
@@ -552,7 +504,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 			content = buildToolSuccessContent(tc.Function.Name, result)
 			if tc.Function.Name == "vm_exec" {
 				commandOutputs = append(commandOutputs, result)
-				mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "command output", map[string]any{
+				otlp.LogEvent(ctx, a.log, zerolog.InfoLevel, "command output", map[string]any{
 					"command_output": textutil.Truncate(result, cfg.Truncation.CommandOutput),
 				})
 			}
@@ -560,13 +512,11 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 
 		if a.toolResultBudget > 0 && resultSize > a.toolResultBudget {
 			content = buildContextOverflowContent(tc.Function.Name, resultSize, a.toolResultBudget, a.store != nil)
-			detail = content
-			if status == "SUCCESS" {
-				status = "FAILED"
+			if status == toolStatusSuccess {
 				failure = fmt.Errorf("tool result too large: %d bytes over the %d-byte context budget", resultSize, a.toolResultBudget)
 				a.totals.ToolFailures++
 			}
-			mphotel.LogEvent(ctx, a.log, zerolog.WarnLevel, "tool output too large", map[string]any{
+			otlp.LogEvent(ctx, a.log, zerolog.WarnLevel, "tool output too large", map[string]any{
 				"event":  eventToolOutputTooLarge,
 				"iter":   iter,
 				"tool":   tc.Function.Name,
@@ -577,7 +527,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 		}
 
 		if failure != nil {
-			mphotel.LogEvent(ctx, a.log, zerolog.ErrorLevel, "tool execution failed", map[string]any{
+			otlp.LogEvent(ctx, a.log, zerolog.ErrorLevel, "tool execution failed", map[string]any{
 				"event":  eventToolFailed,
 				"iter":   iter,
 				"tool":   tc.Function.Name,
@@ -586,7 +536,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 				"error":  failure,
 			})
 		} else {
-			mphotel.LogEvent(ctx, a.log, zerolog.InfoLevel, "tool succeeded", map[string]any{
+			otlp.LogEvent(ctx, a.log, zerolog.InfoLevel, "tool succeeded", map[string]any{
 				"event":  eventToolSucceeded,
 				"iter":   iter,
 				"tool":   tc.Function.Name,
@@ -595,14 +545,6 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 				"out":    textutil.Truncate(result, cfg.Truncation.ToolResult),
 			})
 		}
-
-		span.AddEvent("mph.agent.tool_result", trace.WithAttributes(
-			attribute.String("mph.tool.name", tc.Function.Name),
-			attribute.String("mph.tool.id", tc.ID),
-			attribute.String("mph.tool.status", status),
-			attribute.String("mph.tool.result", textutil.Truncate(detail, cfg.Truncation.ToolResult)),
-			attribute.Int64("mph.tool.duration_ms", duration.Milliseconds()),
-		))
 
 		toolResponses = append(toolResponses, buildToolResponseMessage(tc, content))
 	}
@@ -696,14 +638,7 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
 		infos = outputHandleInfos(a.store.Handles())
 	}
 
-	compCtx, compSpan := getAgentTracer().Start(ctx, "mph.context.compaction",
-		trace.WithAttributes(mphotel.RunSpanAttrs(ctx, attribute.Int("mph.iteration", a.iteration+1))...))
-	defer compSpan.End()
-
-	// eventAttrs reads the iteration from ctx, and compCtx is about to become
-	// the summarizer's chat context, so the labelled tracer has to be built
-	// from the caller's context rather than the derived one.
-	compCtx = mphotel.InjectTracing(compCtx, getAgentTracer(), eventAttrs(ctx)...)
+	compCtx := ctx
 
 	start := time.Now()
 	summarizer := &agentSummarizer{krn: a.krn, chatTimeout: a.chatTimeout}
@@ -731,17 +666,6 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
 		a.conversation = newConv
 		a.contextTokens = after
 	}
-	compSpan.SetAttributes(
-		attribute.String("mph.context.compaction.outcome", outcome),
-		attribute.Int64("mph.context.tokens.before", before),
-		attribute.Int64("mph.context.tokens.after", after),
-		attribute.Int("mph.context.compaction.summary_bytes", summaryBytes),
-		attribute.Int("mph.context.compaction.handles", len(infos)),
-		attribute.Int("mph.context.compactions_applied", a.compactionsApplied),
-	)
-	if compactErr != nil {
-		compSpan.SetAttributes(attribute.String("mph.context.compaction.error", compactErr.Error()))
-	}
 	compLog := a.log.With().Ctx(compCtx).Logger()
 	fields := map[string]any{
 		"event": eventContextCompaction,
@@ -753,7 +677,7 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
 	if compactErr != nil {
 		fields["error"] = compactErr
 	}
-	mphotel.LogEvent(compCtx, compLog, zerolog.WarnLevel, "context compaction", fields)
+	otlp.LogEvent(compCtx, compLog, zerolog.WarnLevel, "context compaction", fields)
 
 	switch outcome {
 	case "applied":
@@ -766,7 +690,7 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
 		// anywhere in a long run disables compaction for good.
 		a.compactionAttempts = 0
 
-		mphotel.LogEvent(compCtx, compLog, zerolog.InfoLevel, "context compaction", map[string]any{
+		otlp.LogEvent(compCtx, compLog, zerolog.InfoLevel, "context compaction", map[string]any{
 			"event":     eventContextCompactionApplied,
 			"iter":      a.iteration + 1,
 			"compacted": newConv,

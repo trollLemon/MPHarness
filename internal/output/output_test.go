@@ -15,7 +15,7 @@ type fakeExec struct {
 	fn func(name, command string) (string, error)
 }
 
-func (f *fakeExec) Exec(_ context.Context, name, command string, _ int) (string, error) {
+func (f *fakeExec) Exec(_ context.Context, name, command string) (string, error) {
 	return f.fn(name, command)
 }
 
@@ -459,7 +459,7 @@ type ctxAwareExec struct {
 	fn func(ctx context.Context, name, cmd string) (string, error)
 }
 
-func (c ctxAwareExec) Exec(ctx context.Context, name, command string, _ int) (string, error) {
+func (c ctxAwareExec) Exec(ctx context.Context, name, command string) (string, error) {
 	return c.fn(ctx, name, command)
 }
 

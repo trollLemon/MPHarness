@@ -353,24 +353,34 @@ type OtelConfig struct {
 	ResourceAttributes map[string]string `yaml:"resource_attributes"`
 }
 
-// Size is a byte count written as a string in YAML. It accepts "64MiB",
-// "512MiB", "1GiB", a bare byte count such as "1024", and the empty string
-// as zero. 0 means "derive" for inline_max_size and "disabled" for the caps.
+// Size is a byte count. It accepts a unit string such as "64MiB" or a bare
+// integer byte count such as 1024, and the empty string as zero. 0 means
+// "derive" for inline_max_size and "disabled" for the caps.
 type Size int64
 
 func sizeDecodeHook(_, to reflect.Type, data any) (any, error) {
 	if to != sizeType {
 		return data, nil
 	}
-	value, ok := data.(string)
-	if !ok {
-		return nil, fmt.Errorf("size must be a string like %q or %q, got %T", "64MiB", "1024", data)
+	switch value := data.(type) {
+	case string:
+		n, err := parseSize(value)
+		if err != nil {
+			return nil, err
+		}
+		return Size(n), nil
+	case int:
+		return Size(value), nil
+	case int64:
+		return Size(value), nil
+	case uint64:
+		if value > math.MaxInt64 {
+			return nil, fmt.Errorf("size %d overflows", value)
+		}
+		return Size(value), nil
+	default:
+		return nil, fmt.Errorf("size must be a string like %q or a whole number of bytes, got %T", "64MiB", data)
 	}
-	n, err := parseSize(value)
-	if err != nil {
-		return nil, err
-	}
-	return Size(n), nil
 }
 
 func parseSize(s string) (int64, error) {

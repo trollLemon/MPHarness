@@ -21,20 +21,13 @@ exporters:
     sampling_initial: 2
     sampling_thereafter: 100
 
-  otlp/tempo:
-    endpoint: tempo:4317
-    tls:
-      insecure: true
-
   loki:
     endpoint: "http://loki:3100/loki/api/v1/push"
     tls:
       insecure: true
 
-  # Optional offline file exporters; uncomment to persist traces/logs to disk.
+  # Optional offline file exporter; uncomment to persist logs to disk.
   # Requires the path's parent dir to exist; pre-create via `mkdir -p` or volume mount.
-  # file/traces:
-  #   path: /tmp/otel-traces.json
   # file/logs:
   #   path: /tmp/otel-logs.json
 
@@ -49,10 +42,6 @@ extensions:
 service:
   extensions: [health_check, pprof, zpages]
   pipelines:
-    traces:
-      receivers: [otlp]
-      processors: [memory_limiter, batch]
-      exporters: [debug, otlp/tempo]
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch]

@@ -24,7 +24,7 @@ If `content_dir` is set, the system prompt gains an additional section:
 
 > The user has provided a local directory whose contents have been copied to `/home/ubuntu/content` in the VM before execution. This content contains files needed to complete the task. Inspect it as needed (e.g. `ls -R /home/ubuntu/content`).
 
-The top-level value is also recorded on the `mph.run` span (`mph.content_dir`) and a child `mph.vm.content` span covers the `mkdir` + transfer work (with a driver `vm.transfer` child). Check logs for `transferring content to VM` / `transfer complete`.
+Check logs for `transferring content to VM` / `transfer complete` to confirm the copy ran.
 
 ## Tips
 

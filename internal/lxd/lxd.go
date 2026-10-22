@@ -18,14 +18,9 @@ import (
 	lxd "github.com/canonical/lxd/client"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/rs/zerolog"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/trollLemon/MPHarness/internal/config"
-	mphotel "github.com/trollLemon/MPHarness/internal/otel"
 	"github.com/trollLemon/MPHarness/internal/secrets"
-	"github.com/trollLemon/MPHarness/internal/textutil"
 )
 
 var (
@@ -75,10 +70,6 @@ type Client struct {
 	identity map[string]vmIdentity
 
 	connectImage func(url string, args *lxd.ConnectionArgs) (lxd.ImageServer, error)
-}
-
-func getTracer() trace.Tracer {
-	return otel.Tracer("mph")
 }
 
 // New connects to the local LXD daemon and verifies the connection.
@@ -143,17 +134,11 @@ func (c *Client) Info(ctx context.Context, name string) (string, error) {
 		return "", fmt.Errorf("instance name is required")
 	}
 
-	_, span := getTracer().Start(ctx, "vm.info", trace.WithAttributes(
-		attribute.String("mph.vm.name", name),
-	))
-	defer span.End()
-
 	c.log.Info().Str("vm", name).Msg("fetching VM info")
 
 	instance, _, err := c.server.GetInstanceFull(name)
 	if err != nil {
 		c.log.Debug().Err(err).Str("vm", name).Msg("LXD info failed")
-		mphotel.FailSpan(span, err)
 		if api.StatusErrorCheck(err, http.StatusNotFound) {
 			return "", fmt.Errorf("%w: %s", ErrInstanceNotFound, name)
 		}
@@ -162,7 +147,6 @@ func (c *Client) Info(ctx context.Context, name string) (string, error) {
 
 	data, err := json.Marshal(instance)
 	if err != nil {
-		mphotel.FailSpan(span, err)
 		return "", fmt.Errorf("vm info %q failed: %w", name, err)
 	}
 	return string(data), nil
@@ -229,36 +213,21 @@ func (c *Client) defaultRootDevice() (map[string]string, error) {
 
 // Launch creates the VM from the configured image and waits for the guest to answer.
 func (c *Client) Launch(ctx context.Context, vm config.VMConfig) error {
-	ctx, span := getTracer().Start(ctx, "vm.launch", trace.WithAttributes(
-		attribute.String("mph.vm.name", vm.Name),
-		attribute.String("mph.vm.cpu", fmt.Sprint(vm.CPU)),
-		attribute.String("mph.vm.ram", vm.RAM),
-		attribute.String("mph.vm.disk", vm.Disk),
-		attribute.String("mph.vm.image", vm.Image),
-	))
-	defer span.End()
-
 	ram, err := config.NormalizeSize(vm.RAM)
 	if err != nil {
-		err = fmt.Errorf("vm.ram: %w", err)
-		mphotel.FailSpan(span, err)
-		return err
+		return fmt.Errorf("vm.ram: %w", err)
 	}
 	disk, err := config.NormalizeSize(vm.Disk)
 	if err != nil {
-		err = fmt.Errorf("vm.disk: %w", err)
-		mphotel.FailSpan(span, err)
-		return err
+		return fmt.Errorf("vm.disk: %w", err)
 	}
 	rootDevice, err := c.defaultRootDevice()
 	if err != nil {
-		mphotel.FailSpan(span, err)
 		return err
 	}
 	rootDevice["size"] = disk
 	imageServer, image, err := c.resolveImage(vm.Image)
 	if err != nil {
-		mphotel.FailSpan(span, err)
 		return err
 	}
 
@@ -284,20 +253,16 @@ func (c *Client) Launch(ctx context.Context, vm config.VMConfig) error {
 
 	op, err := c.server.CreateInstanceFromImage(imageServer, image, req)
 	if err != nil {
-		mphotel.FailSpan(span, err)
 		return fmt.Errorf("launch VM %q: %w", vm.Name, err)
 	}
 	if err := waitRemote(ctx, op); err != nil {
-		mphotel.FailSpan(span, err)
 		return fmt.Errorf("launch VM %q: %w", vm.Name, err)
 	}
 
 	if err := c.waitForVMReady(ctx, vm.Name); err != nil {
-		mphotel.FailSpan(span, err)
 		return err
 	}
 	if _, err := c.identityFor(ctx, vm.Name); err != nil {
-		mphotel.FailSpan(span, err)
 		return err
 	}
 
@@ -311,21 +276,13 @@ func (c *Client) Delete(ctx context.Context, name string, purge bool) error {
 		return fmt.Errorf("instance name is required")
 	}
 
-	ctx, span := getTracer().Start(ctx, "vm.delete", trace.WithAttributes(
-		attribute.String("mph.vm.name", name),
-		attribute.Bool("mph.purge", purge),
-	))
-	defer span.End()
-
 	c.log.Info().Msgf("Deleting VM %s", name)
 
 	op, err := c.server.DeleteInstance(name, purge)
 	if err != nil {
-		mphotel.FailSpan(span, err)
 		return fmt.Errorf("vm delete %q failed: %w", name, err)
 	}
 	if err := waitOperationContext(ctx, op); err != nil {
-		mphotel.FailSpan(span, err)
 		if ctx.Err() != nil {
 			return err
 		}
@@ -338,8 +295,7 @@ func (c *Client) Delete(ctx context.Context, name string, purge bool) error {
 }
 
 // Exec runs a command in the VM and returns the combined stdout and stderr.
-// maxAttrBytes caps the command echoed into the vm.exec span.
-func (c *Client) Exec(ctx context.Context, name string, command string, maxAttrBytes int) (string, error) {
+func (c *Client) Exec(ctx context.Context, name string, command string) (string, error) {
 	if strings.TrimSpace(name) == "" {
 		return "", fmt.Errorf("instance name is required")
 	}
@@ -347,23 +303,14 @@ func (c *Client) Exec(ctx context.Context, name string, command string, maxAttrB
 		return "", fmt.Errorf("command is required")
 	}
 
-	ctx, span := getTracer().Start(ctx, "vm.exec", trace.WithAttributes(
-		attribute.String("mph.vm.name", name),
-		attribute.String("mph.command", textutil.Truncate(command, maxAttrBytes)),
-		attribute.StringSlice("mph.args", []string{"bash", "-c", command}),
-	))
-	defer span.End()
-
 	resolved, err := c.redactor.Redact(command)
 	if err != nil {
 		c.log.Debug().Err(err).Str("vm", name).Str("cmd", command).Msg("vm exec failed to resolve secrets")
-		mphotel.FailSpan(span, err)
 		return "", fmt.Errorf("vm exec %q %q failed: %w", name, command, err)
 	}
 
 	identity, err := c.identityFor(ctx, name)
 	if err != nil {
-		mphotel.FailSpan(span, err)
 		return "", fmt.Errorf("vm exec %q %q failed: %w", name, command, err)
 	}
 
@@ -372,14 +319,12 @@ func (c *Client) Exec(ctx context.Context, name string, command string, maxAttrB
 	out, exit, err := c.run(ctx, name, resolved, identity)
 	if err != nil {
 		c.log.Debug().Err(err).Str("vm", name).Str("cmd", command).Msg("vm exec failed")
-		mphotel.FailSpan(span, err)
 		return "", fmt.Errorf("vm exec %q %q failed: %w", name, command, err)
 	}
 	if exit != 0 {
 		msg := c.redactor.Scrub(strings.TrimSpace(out))
 		err := fmt.Errorf("vm exec %q %q failed: exit status %d: %s", name, command, exit, msg)
 		c.log.Debug().Err(err).Str("vm", name).Str("cmd", command).Msg("vm exec failed")
-		mphotel.FailSpan(span, err)
 		return "", err
 	}
 
@@ -563,24 +508,15 @@ func (c *Client) Transfer(ctx context.Context, vmName, hostPath, vmDest string) 
 		return fmt.Errorf("destination is required")
 	}
 
-	ctx, span := getTracer().Start(ctx, "vm.transfer", trace.WithAttributes(
-		attribute.String("mph.vm.name", vmName),
-		attribute.String("mph.transfer.source", hostPath),
-		attribute.String("mph.transfer.destination", vmDest),
-	))
-	defer span.End()
-
 	c.log.Info().Str("vm", vmName).Str("src", hostPath).Str("dst", vmDest).Msg("transferring content to VM")
 
 	identity, err := c.identityFor(ctx, vmName)
 	if err != nil {
-		mphotel.FailSpan(span, err)
 		return fmt.Errorf("transfer %q: %w", hostPath, err)
 	}
 
 	root, err := filepath.EvalSymlinks(hostPath)
 	if err != nil {
-		mphotel.FailSpan(span, err)
 		return fmt.Errorf("transfer %q: %w", hostPath, err)
 	}
 
@@ -643,7 +579,6 @@ func (c *Client) Transfer(ctx context.Context, vmName, hostPath, vmDest string) 
 		return createErr
 	})
 	if err != nil {
-		mphotel.FailSpan(span, err)
 		return fmt.Errorf("transfer %q to %s:%s: %w", hostPath, vmName, vmDest, err)
 	}
 
@@ -654,44 +589,32 @@ func (c *Client) Transfer(ctx context.Context, vmName, hostPath, vmDest string) 
 // InstallKernel installs a kernel package in the VM, reboots, and verifies the
 // new kernel is running.
 func (c *Client) InstallKernel(ctx context.Context, name, kernelPkg string) error {
-	ctx, span := getTracer().Start(ctx, "vm.install_kernel", trace.WithAttributes(
-		attribute.String("mph.vm.name", name),
-		attribute.String("mph.kernel.package", kernelPkg),
-	))
-	defer span.End()
-
 	c.log.Info().Str("vm", name).Str("kernel", kernelPkg).Msg("installing kernel")
 
 	installCmd := fmt.Sprintf("sudo apt-get update && sudo apt-get install -y %s", kernelPkg)
-	if _, err := c.Exec(ctx, name, installCmd, 4096); err != nil {
-		mphotel.FailSpan(span, err)
+	if _, err := c.Exec(ctx, name, installCmd); err != nil {
 		return fmt.Errorf("failed to install kernel packages: %w", err)
 	}
 
-	if _, err := c.Exec(ctx, name, "sudo update-grub", 512); err != nil {
-		mphotel.FailSpan(span, err)
+	if _, err := c.Exec(ctx, name, "sudo update-grub"); err != nil {
 		return fmt.Errorf("failed to update grub: %w", err)
 	}
 
 	c.log.Info().Str("vm", name).Msg("rebooting VM for new kernel")
-	if _, err := c.Exec(ctx, name, "sudo systemctl reboot --no-block", 256); err != nil {
-		mphotel.FailSpan(span, err)
+	if _, err := c.Exec(ctx, name, "sudo systemctl reboot --no-block"); err != nil {
 		return fmt.Errorf("failed to reboot VM: %w", err)
 	}
 
 	if err := c.waitForVMDown(ctx, name); err != nil {
-		mphotel.FailSpan(span, err)
 		return fmt.Errorf("VM did not shut down for reboot: %w", err)
 	}
 
 	if err := c.waitForVMReady(ctx, name); err != nil {
-		mphotel.FailSpan(span, err)
 		return fmt.Errorf("VM did not come back after reboot: %w", err)
 	}
 
-	runningKernel, err := c.Exec(ctx, name, "uname -r", 256)
+	runningKernel, err := c.Exec(ctx, name, "uname -r")
 	if err != nil {
-		mphotel.FailSpan(span, err)
 		return fmt.Errorf("failed to get running kernel version: %w", err)
 	}
 	runningKernel = strings.TrimSpace(runningKernel)
@@ -700,9 +623,7 @@ func (c *Client) InstallKernel(ctx context.Context, name, kernelPkg string) erro
 	expectedVersion = strings.TrimPrefix(expectedVersion, "linux-image-")
 
 	if !strings.Contains(runningKernel, expectedVersion) {
-		err := fmt.Errorf("kernel version mismatch: expected %q to contain %q", runningKernel, expectedVersion)
-		mphotel.FailSpan(span, err)
-		return err
+		return fmt.Errorf("kernel version mismatch: expected %q to contain %q", runningKernel, expectedVersion)
 	}
 
 	c.log.Info().Str("vm", name).Str("kernel", runningKernel).Msg("kernel installed and verified")

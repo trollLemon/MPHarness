@@ -207,7 +207,7 @@ func callExec(ctx context.Context, cli *lxd.Client, cfg config.Config, store *ou
 		return out, nil
 	}
 
-	out, execErr := cli.Exec(ctx, cfg.VM.Name, command, cfg.Truncation.ToolResult)
+	out, execErr := cli.Exec(ctx, cfg.VM.Name, command)
 	if execErr != nil {
 		return "", execErr
 	}
@@ -237,7 +237,7 @@ func callOutputSearch(ctx context.Context, store *output.Store, args map[string]
 
 func buildCaptureSuccessContent(h *output.Handle) string {
 	b, _ := json.Marshal(map[string]any{
-		"status": "SUCCESS",
+		"status": toolStatusSuccess,
 		"data": map[string]any{"result": map[string]any{
 			"output_id": h.ID, "captured": true,
 			"total_lines": h.TotalLines, "total_bytes": h.TotalBytes,
@@ -254,7 +254,7 @@ func buildSearchSuccessContent(res output.SearchResult) string {
 		matches = []int{}
 	}
 	b, _ := json.Marshal(map[string]any{
-		"status": "SUCCESS",
+		"status": toolStatusSuccess,
 		"data": map[string]any{"result": map[string]any{
 			"output_id": res.OutputID, "total_matches": res.TotalMatches,
 			"matches": matches, "truncated": res.Truncated,
@@ -311,7 +311,7 @@ func buildReadSuccessContent(res output.ReadResult) string {
 		lines = []string{}
 	}
 	b, _ := json.Marshal(map[string]any{
-		"status": "SUCCESS",
+		"status": toolStatusSuccess,
 		"data": map[string]any{"result": map[string]any{
 			"output_id": res.OutputID, "offset": res.Offset, "limit": res.Limit,
 			"total_lines": res.TotalLines, "lines": lines,
@@ -321,8 +321,15 @@ func buildReadSuccessContent(res output.ReadResult) string {
 	return string(b)
 }
 
+type toolStatus string
+
+const (
+	toolStatusSuccess toolStatus = "SUCCESS"
+	toolStatusFailed  toolStatus = "FAILED"
+)
+
 type toolEnvelope struct {
-	Status string `json:"status"`
+	Status toolStatus `json:"status"`
 	Data   struct {
 		Result struct {
 			OutputID string `json:"output_id"`
@@ -336,12 +343,12 @@ func parseToolEnvelope(s string) (toolEnvelope, bool) {
 	if err := json.Unmarshal([]byte(s), &v); err != nil {
 		return toolEnvelope{}, false
 	}
-	return v, v.Status == "SUCCESS" && v.Data.Result.OutputID != ""
+	return v, v.Status == toolStatusSuccess && v.Data.Result.OutputID != ""
 }
 
 func buildToolErrorContent(err error) string {
 	b, _ := json.Marshal(map[string]any{
-		"status": "FAILED",
+		"status": toolStatusFailed,
 		"data":   map[string]any{"error": err.Error()},
 	})
 	return string(b)
@@ -351,12 +358,12 @@ func buildToolSuccessContent(toolName, result string) string {
 	var payload map[string]any
 	if toolName == "vm_exec" {
 		payload = map[string]any{
-			"status": "SUCCESS",
+			"status": toolStatusSuccess,
 			"data":   map[string]any{"output": result},
 		}
 	} else {
 		payload = map[string]any{
-			"status": "SUCCESS",
+			"status": toolStatusSuccess,
 			"data":   map[string]any{"result": result},
 		}
 	}

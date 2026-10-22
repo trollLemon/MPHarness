@@ -1,9 +1,8 @@
-package otel
+package otlp
 
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -15,15 +14,10 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	otellog "go.opentelemetry.io/otel/log"
-	"go.opentelemetry.io/otel/propagation"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/resource"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/trace"
 )
 
 type ctxKey string
@@ -41,7 +35,6 @@ const (
 // Exporter and batcher tunables.
 const (
 	exporterTimeout = 10 * time.Second
-	batchTimeout    = 2 * time.Second
 	exportTimeout   = 5 * time.Second
 	logInterval     = 1 * time.Second
 )
@@ -100,29 +93,12 @@ func Setup(ctx context.Context, cfg Config) (func(context.Context) error, error)
 		return nil, err
 	}
 
-	traceExp, err := otlptracegrpc.New(ctx,
-		otlptracegrpc.WithEndpoint(cfg.Endpoint),
-		otlptracegrpc.WithInsecure(),
-		otlptracegrpc.WithTimeout(exporterTimeout),
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(traceExp, sdktrace.WithBatchTimeout(batchTimeout), sdktrace.WithExportTimeout(exportTimeout)),
-		sdktrace.WithResource(res),
-	)
-	otel.SetTracerProvider(tp)
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
-
 	logExp, err := otlploggrpc.New(ctx,
 		otlploggrpc.WithEndpoint(cfg.Endpoint),
 		otlploggrpc.WithInsecure(),
 		otlploggrpc.WithTimeout(exporterTimeout),
 	)
 	if err != nil {
-		_ = tp.Shutdown(ctx)
 		return nil, err
 	}
 
@@ -135,18 +111,7 @@ func Setup(ctx context.Context, cfg Config) (func(context.Context) error, error)
 	)
 	otel.SetLoggerProvider(lp)
 
-	shutdown := func(ctx context.Context) error {
-		var errs []error
-		if err := tp.Shutdown(ctx); err != nil {
-			errs = append(errs, err)
-		}
-		if err := lp.Shutdown(ctx); err != nil {
-			errs = append(errs, err)
-		}
-		return errors.Join(errs...)
-	}
-
-	return shutdown, nil
+	return lp.Shutdown, nil
 }
 
 type Hook struct {
@@ -167,42 +132,17 @@ func (h Hook) Run(e *zerolog.Event, level zerolog.Level, msg string) {
 	if ctx.Value(skipHookKey) != nil {
 		return
 	}
-	h.logger.Emit(ctx, newRecord(ctx, level, msg))
+	h.logger.Emit(ctx, newRecord(level, msg))
 }
 
-func newRecord(ctx context.Context, level zerolog.Level, msg string) otellog.Record {
+func newRecord(level zerolog.Level, msg string) otellog.Record {
 	rec := otellog.Record{}
 	rec.SetTimestamp(time.Now())
 	rec.SetObservedTimestamp(time.Now())
 	rec.SetSeverity(convertLevel(level))
 	rec.SetSeverityText(level.String())
 	rec.SetBody(attribute.StringValue(msg))
-	for _, kv := range traceAttrs(ctx) {
-		rec.AddAttributes(kv)
-	}
 	return rec
-}
-
-// traceAttrs exposes the active span as record attributes. The log SDK's
-// Record has no dedicated trace/span fields, so correlation is carried as
-// attributes instead; without them log lines cannot be linked to a trace.
-func traceAttrs(ctx context.Context) []attribute.KeyValue {
-	sc := trace.SpanContextFromContext(ctx)
-	if !sc.IsValid() {
-		return nil
-	}
-	return []attribute.KeyValue{
-		attribute.String("trace_id", sc.TraceID().String()),
-		attribute.String("span_id", sc.SpanID().String()),
-	}
-}
-
-// FailSpan records err on span and marks the span failed. Every error path in
-// the harness, the VM client, and the agent needs both, and forgetting the
-// second half silently reports a failed run as successful.
-func FailSpan(span trace.Span, err error) {
-	span.RecordError(err)
-	span.SetStatus(codes.Error, err.Error())
 }
 
 func LogEvent(ctx context.Context, logger zerolog.Logger, level zerolog.Level, msg string, fields map[string]any) {
@@ -216,7 +156,7 @@ func LogEvent(ctx context.Context, logger zerolog.Logger, level zerolog.Level, m
 		}
 		evt.Msg(msg)
 	}
-	rec := newRecord(ctx, level, msg)
+	rec := newRecord(level, msg)
 	for k, v := range fields {
 		rec.AddAttributes(fieldAttribute(k, v))
 	}
