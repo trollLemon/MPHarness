@@ -63,8 +63,8 @@
      "type": "loki",
      "uid": "mph-loki"
     },
-    "query": "label_values({instance=\"$run\"}, instance)",
-    "definition": "label_values({instance=\"$run\"}, instance)",
+    "query": "label_values({instance=\"$run\", instance!=\"\"}, instance)",
+    "definition": "label_values({instance=\"$run\", instance!=\"\"}, instance)",
     "regex": "/^(.*):[^:]*$/",
     "refresh": 1,
     "sort": 1,

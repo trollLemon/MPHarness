@@ -115,7 +115,7 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "  output:               # optional, captured command output\n")
 	_, _ = fmt.Fprintf(w, "    enabled: true\n")
 	_, _ = fmt.Fprintf(w, "    mode: auto          # auto|always\n")
-	_, _ = fmt.Fprintf(w, "    inline_max_size: \"0\"   # 0 = derive from tool-result budget\n")
+	_, _ = fmt.Fprintf(w, "    inline_max_size: 0     # 0 = derive from tool-result budget\n")
 	_, _ = fmt.Fprintf(w, "    max_command_size: \"%dMiB\"\n", config.DefaultOutputMaxCommandBytes/(1<<20))
 	_, _ = fmt.Fprintf(w, "    max_total_size: \"%dMiB\"\n", config.DefaultOutputMaxTotalBytes/(1<<20))
 	_, _ = fmt.Fprintf(w, "    search_max_matches: %d\n", config.DefaultOutputSearchMatches)

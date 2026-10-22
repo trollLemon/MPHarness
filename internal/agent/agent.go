@@ -475,7 +475,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 		result, err := Call(ctx, cli, cfg, a.store, tc.Function.Name, tc.Function.Arguments)
 		duration := time.Since(start)
 
-		status := "SUCCESS"
+		status := toolStatusSuccess
 		resultSize := len(result)
 		var content string
 		var failure error
@@ -484,7 +484,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 		env, isEnvelope := parseToolEnvelope(result)
 		switch {
 		case err != nil:
-			status = "FAILED"
+			status = toolStatusFailed
 			failure = err
 			content = buildToolErrorContent(err)
 			resultSize = len(content)
@@ -512,8 +512,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 
 		if a.toolResultBudget > 0 && resultSize > a.toolResultBudget {
 			content = buildContextOverflowContent(tc.Function.Name, resultSize, a.toolResultBudget, a.store != nil)
-			if status == "SUCCESS" {
-				status = "FAILED"
+			if status == toolStatusSuccess {
 				failure = fmt.Errorf("tool result too large: %d bytes over the %d-byte context budget", resultSize, a.toolResultBudget)
 				a.totals.ToolFailures++
 			}
