@@ -748,7 +748,7 @@ func TestAssistantMessageShapeLogged(t *testing.T) {
 		Model:  "m",
 		Prompt: "task",
 	}
-	if err := agt.Execute(context.Background(), conf, newTestClient(t)); err != nil {
+	if _, err := agt.Execute(context.Background(), conf, newTestClient(t)); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	found := false
@@ -790,7 +790,7 @@ func TestExecuteReportsNoOutputWithoutError(t *testing.T) {
 		Prompt: "task",
 	}
 
-	if err := agt.Execute(context.Background(), conf, newTestClient(t)); err != nil {
+	if _, err := agt.Execute(context.Background(), conf, newTestClient(t)); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 }
@@ -890,7 +890,7 @@ func TestExecute(t *testing.T) {
 			}
 			conf := config.Config{VM: vm, Prompt: prompt}
 			cli := newTestClient(t)
-			err := agent.Execute(context.Background(), conf, cli)
+			_, err := agent.Execute(context.Background(), conf, cli)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err %v wantErr %v", err, tt.wantErr)
 			}
@@ -901,6 +901,94 @@ func TestExecute(t *testing.T) {
 				tt.verifyReq(t, tt.mock.captured)
 			}
 		})
+	}
+}
+
+func TestExecuteReturnsTaskStatus(t *testing.T) {
+	tests := []struct {
+		name   string
+		status string
+		reason string
+	}{
+		{"completed", "Completed", "kernel string verified"},
+		{"failed", "Failed", "cli lacks the required flag"},
+		{"error", "Error", "permission denied"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tc := model.ResponseToolCall{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{
+				Name:      "task_status",
+				Arguments: model.ToolCallArguments{"status": tt.status, "reason": tt.reason},
+			}}
+			mock := &mockKronk{responses: []model.ChatResponse{
+				chatResp("summary", "", model.FinishReasonTool, []model.ResponseToolCall{tc}, &model.Usage{TotalTokens: 100}),
+			}}
+			agt := NewAgent(zerolog.Nop(), mock, Options{
+				MaxIterations: 5,
+				ChatTimeout:   time.Second,
+				TotalTimeout:  5 * time.Second,
+				LLM:           defaultLLMConfig(),
+				RunID:         "run-status",
+			})
+			conf := config.Config{
+				VM:     config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
+				Model:  "m",
+				Prompt: "task",
+			}
+
+			got, err := agt.Execute(context.Background(), conf, newTestClient(t))
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			want := TaskStatusOutcome{CompletedStatus: tt.status, Reason: tt.reason}
+			if got == nil || *got != want {
+				t.Fatalf("status = %+v, want %+v", got, want)
+			}
+			if !agt.done {
+				t.Error("agent must stop after task_status")
+			}
+			if mock.calls != 1 {
+				t.Errorf("chat calls = %d, want 1: task_status must end the run", mock.calls)
+			}
+		})
+	}
+}
+
+func TestExecuteRetriesAfterInvalidTaskStatus(t *testing.T) {
+	bad := model.ResponseToolCall{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{
+		Name:      "task_status",
+		Arguments: model.ToolCallArguments{"status": "Done", "reason": "x"},
+	}}
+	good := model.ResponseToolCall{ID: "c2", Type: "function", Function: model.ResponseToolCallFunction{
+		Name:      "task_status",
+		Arguments: model.ToolCallArguments{"status": "Completed", "reason": "all checks passed"},
+	}}
+	mock := &mockKronk{responses: []model.ChatResponse{
+		chatResp("", "", model.FinishReasonTool, []model.ResponseToolCall{bad}, &model.Usage{TotalTokens: 100}),
+		chatResp("", "", model.FinishReasonTool, []model.ResponseToolCall{good}, &model.Usage{TotalTokens: 100}),
+	}}
+	agt := NewAgent(zerolog.Nop(), mock, Options{
+		MaxIterations: 5,
+		ChatTimeout:   time.Second,
+		TotalTimeout:  5 * time.Second,
+		LLM:           defaultLLMConfig(),
+		RunID:         "run-status-retry",
+	})
+	conf := config.Config{
+		VM:     config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
+		Model:  "m",
+		Prompt: "task",
+	}
+
+	got, err := agt.Execute(context.Background(), conf, newTestClient(t))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got == nil || got.CompletedStatus != "Completed" || got.Reason != "all checks passed" {
+		t.Fatalf("status = %+v, want the retried Completed status", got)
+	}
+	if mock.calls != 2 {
+		t.Errorf("chat calls = %d, want 2: an invalid status must not end the run", mock.calls)
 	}
 }
 
@@ -948,7 +1036,7 @@ func TestExecuteLogsTokenUsageAndIterationEvents(t *testing.T) {
 	})
 	conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
 	ctx := context.Background()
-	if err := agent.Execute(ctx, conf, newTestClient(t)); err != nil {
+	if _, err := agent.Execute(ctx, conf, newTestClient(t)); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 
@@ -1191,7 +1279,7 @@ func TestRunOutcomeDistinguishesCleanFinishFromExhaustion(t *testing.T) {
 				RunID:         "01J9",
 			})
 			conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
-			if err := a.Execute(t.Context(), conf, newTestClient(t)); err != nil {
+			if _, err := a.Execute(t.Context(), conf, newTestClient(t)); err != nil {
 				t.Fatalf("Execute: %v", err)
 			}
 

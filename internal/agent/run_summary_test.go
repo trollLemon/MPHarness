@@ -125,7 +125,7 @@ func TestExecuteAccumulatesRunTotals(t *testing.T) {
 				LLM: defaultLLMConfig(), RunID: "01J9",
 			})
 			conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
-			if err := a.Execute(t.Context(), conf, newTestClient(t)); err != nil {
+			if _, err := a.Execute(t.Context(), conf, newTestClient(t)); err != nil {
 				t.Fatalf("Execute: %v", err)
 			}
 
@@ -159,7 +159,7 @@ func TestExecuteAccumulatesReclaimedTokens(t *testing.T) {
 		Prompt:     "task",
 		Compaction: enabledCompaction(),
 	}
-	if err := a.Execute(t.Context(), conf, newTestClient(t)); err != nil {
+	if _, err := a.Execute(t.Context(), conf, newTestClient(t)); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 
@@ -191,7 +191,7 @@ func TestExecuteCountsAbortedIteration(t *testing.T) {
 		LLM: defaultLLMConfig(), RunID: "01J9",
 	})
 	conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
-	if err := a.Execute(t.Context(), conf, newTestClient(t)); err == nil {
+	if _, err := a.Execute(t.Context(), conf, newTestClient(t)); err == nil {
 		t.Fatal("Execute succeeded against a failing backend; test setup is wrong")
 	}
 
