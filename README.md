@@ -2,7 +2,7 @@
 
 Local harness for running agent-driven tasks inside an LXD VM, without the worry of an agent damaging your host.
 
-You describe a task, an LLM, and a VM in a single YAML file. `mph` (Multi-Purpose Harness) downloads the model, creates the VM, lets the LLM drive a tool-calling loop to complete the task, then hands the results back and tears the VM down.
+`mph` lets an LLM drive a tool-calling loop to complete a task within an Ubuntu VM, then hands the results back and tears the VM down.
 
 ## How it works
 
@@ -17,7 +17,7 @@ Every command the agent tries to run is parsed as shell AST and checked against 
 ## Prerequisites
 
 - [LXD](https://linuxcontainers.org/lxd/) 5.x LTS or newer installed (deb or snap) with a running daemon
-- VM images must include the LXD agent (official Ubuntu 20.04+ images do; 18.04 images require a manual agent install)
+- VM images must include the LXD agent (official Ubuntu 20.04+ images do; 18.04 images require a manual LXD agent install)
 - Access to the LXD socket, typically by being in the `lxd` group
 - A working default profile from `lxd init` (a root disk on a storage pool, plus a network)
 - Go 1.27.2+ (only needed to build from source)
@@ -26,10 +26,6 @@ Every command the agent tries to run is parsed as shell AST and checked against 
 
 
 ## Install
-
-Releases are cut manually; each GitHub release attaches `linux-amd64`/`linux-arm64`
-tarballs, and its tag makes the module installable at that version:
-
 ```bash
 go install github.com/trollLemon/MPHarness/mph@latest
 ```
