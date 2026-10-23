@@ -39,7 +39,7 @@ llm:
 
 ### If the model forgets to call tools
 
-If `tool_choice` is left as `auto` and the model constantly answers without acting, forcing it can help:
+A model that finishes without calling `task_status` gets one automatic nudge to call it. If the model also ignores other tools, forcing tool calls can help:
 
 ```yaml
 llm:
