@@ -32,6 +32,8 @@ For `vm_exec`, the `command` string can be several commands at once (such as `ca
 
 A command that ran is not automatically a success. The system prompt tells the agent to inspect each tool result's status, output, stderr, and error text, and to report `Failed` or `Error` instead of `Completed` when a command failed or its output shows an error.
 
+The system prompt also states that the agent operates inside the VM and must run every requested command with `vm_exec`, subject to the configured allowlist. It must not ask the user to run commands, refuse before trying, or claim a command is not allowed without a tool result. If the task predicts a failure, the agent still runs the command and reports what happened.
+
 ### How the tools are described to the model
 
 The model needs a description of each tool's *shape*. `mph` builds an OpenAI-style JSON-schema document for each one: name, description, and parameters, and sends these as the `tools` field of the chat request (`buildToolDocuments` in `internal/agent`). For `vm_exec` that document looks roughly like:

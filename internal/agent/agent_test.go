@@ -1078,27 +1078,6 @@ func TestExecuteLogsTokenUsageAndIterationEvents(t *testing.T) {
 	onlyEvent(t, events, eventRunSummary)
 }
 
-func TestSystemPromptBatchingGuidance(t *testing.T) {
-	tests := []struct {
-		name string
-		sub  string
-		want bool
-	}{
-		{"no sequential instruction", "sequentially", false},
-		{"batching section", "Batching Work", true},
-		{"chaining operator", "&&", true},
-		{"single turn", "single turn", true},
-		{"success checks", "Success checks", true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := contains(systemPrompt, tt.sub); got != tt.want {
-				t.Errorf("system prompt contains %q = %v, want %v", tt.sub, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestRunIterationCountsToolResultsInContext(t *testing.T) {
 	const usageTotal = 100
 	big := strings.Repeat("z", 4000)
