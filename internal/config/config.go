@@ -226,7 +226,6 @@ type LLMConfig struct {
 	Temperature     float64 `yaml:"temperature"`
 	TopP            float64 `yaml:"top_p"`
 	TopK            int     `yaml:"top_k"`
-	ToolChoice      string  `yaml:"tool_choice"`
 	ContextWindow   int     `yaml:"context_window"`
 	MaxOutputTokens int     `yaml:"max_output_tokens"`
 }
@@ -234,9 +233,6 @@ type LLMConfig struct {
 // WithDefaults fills the LLM settings that have a fixed fallback. It is
 // idempotent, so each layer can apply it without duplicating the literals.
 func (l LLMConfig) WithDefaults() LLMConfig {
-	if l.ToolChoice == "" {
-		l.ToolChoice = "auto"
-	}
 	if l.MaxOutputTokens == 0 {
 		l.MaxOutputTokens = DefaultLLMMaxOutputTokens
 	}

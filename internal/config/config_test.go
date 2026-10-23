@@ -881,7 +881,6 @@ llm:
   temperature: 0.2
   top_p: 0.9
   top_k: 40
-  tool_choice: required
   context_window: 8192
   max_output_tokens: 512
 agent:
@@ -927,7 +926,6 @@ compaction:
 		{"llm.temperature", cfg.LLM.Temperature, 0.2},
 		{"llm.top_p", cfg.LLM.TopP, 0.9},
 		{"llm.top_k", cfg.LLM.TopK, 40},
-		{"llm.tool_choice", cfg.LLM.ToolChoice, "required"},
 		{"llm.context_window", cfg.LLM.ContextWindow, 8192},
 		{"llm.max_output_tokens", cfg.LLM.MaxOutputTokens, 512},
 		{"agent.max_iterations", cfg.Agent.MaxIterations, 7},
