@@ -128,10 +128,21 @@ func (c *Client) resolveImage(image string) (lxd.ImageServer, api.Image, error) 
 	return server, *img, nil
 }
 
+func validateName(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("instance name is required")
+	}
+	return nil
+}
+
+func (c *Client) runRoot(ctx context.Context, name, command string) (string, int, error) {
+	return c.run(ctx, name, command, rootIdentity)
+}
+
 // Info returns the LXD instance record as JSON.
 func (c *Client) Info(ctx context.Context, name string) (string, error) {
-	if strings.TrimSpace(name) == "" {
-		return "", fmt.Errorf("instance name is required")
+	if err := validateName(name); err != nil {
+		return "", err
 	}
 
 	c.log.Info().Str("vm", name).Msg("fetching VM info")
@@ -272,8 +283,8 @@ func (c *Client) Launch(ctx context.Context, vm config.VMConfig) error {
 
 // Delete removes the VM; purge maps to the LXD delete force flag.
 func (c *Client) Delete(ctx context.Context, name string, purge bool) error {
-	if strings.TrimSpace(name) == "" {
-		return fmt.Errorf("instance name is required")
+	if err := validateName(name); err != nil {
+		return err
 	}
 
 	c.log.Info().Msgf("Deleting VM %s", name)
@@ -296,8 +307,8 @@ func (c *Client) Delete(ctx context.Context, name string, purge bool) error {
 
 // Exec runs a command in the VM and returns the combined stdout and stderr.
 func (c *Client) Exec(ctx context.Context, name string, command string) (string, error) {
-	if strings.TrimSpace(name) == "" {
-		return "", fmt.Errorf("instance name is required")
+	if err := validateName(name); err != nil {
+		return "", err
 	}
 	if strings.TrimSpace(command) == "" {
 		return "", fmt.Errorf("command is required")
@@ -405,7 +416,7 @@ func (c *Client) identityFor(ctx context.Context, name string) (vmIdentity, erro
 func (c *Client) ensureGuestUser(ctx context.Context, name string) (string, error) {
 	c.log.Debug().Str("vm", name).Msg("waiting for cloud-init")
 	initCtx, cancel := context.WithTimeout(ctx, cloudInitTimeout)
-	_, exit, err := c.run(initCtx, name, "cloud-init status --wait", rootIdentity)
+	_, exit, err := c.runRoot(initCtx, name, "cloud-init status --wait")
 	cancel()
 	if err != nil {
 		if ctx.Err() != nil {
@@ -420,12 +431,12 @@ func (c *Client) ensureGuestUser(ctx context.Context, name string) (string, erro
 		c.log.Debug().Str("vm", name).Int("exit", exit).Msg("cloud-init reported an error; continuing")
 	}
 
-	uidOut, exit, err := c.run(ctx, name, "id -u ubuntu", rootIdentity)
+	uidOut, exit, err := c.runRoot(ctx, name, "id -u ubuntu")
 	if err != nil {
 		return "", fmt.Errorf("check ubuntu user: %w", err)
 	}
 	if exit == 0 {
-		_, exit, err = c.run(ctx, name, "sudo -u ubuntu sudo -n true", rootIdentity)
+		_, exit, err = c.runRoot(ctx, name, "sudo -u ubuntu sudo -n true")
 		if err != nil {
 			return "", fmt.Errorf("check passwordless sudo: %w", err)
 		}
@@ -438,7 +449,7 @@ func (c *Client) ensureGuestUser(ctx context.Context, name string) (string, erro
 	}
 
 	c.log.Info().Str("vm", name).Msg("setting up ubuntu user with passwordless sudo")
-	out, exit, err := c.run(ctx, name, guestUserSetup, rootIdentity)
+	out, exit, err := c.runRoot(ctx, name, guestUserSetup)
 	if err != nil {
 		return "", fmt.Errorf("set up ubuntu user: %w", err)
 	}
@@ -456,7 +467,7 @@ func (c *Client) resolveIdentity(ctx context.Context, name string) (vmIdentity, 
 
 	if strings.TrimSpace(uidOut) == "" {
 		var exit int
-		uidOut, exit, err = c.run(ctx, name, "id -u ubuntu", rootIdentity)
+		uidOut, exit, err = c.runRoot(ctx, name, "id -u ubuntu")
 		if err != nil {
 			return vmIdentity{}, err
 		}
@@ -469,7 +480,7 @@ func (c *Client) resolveIdentity(ctx context.Context, name string) (vmIdentity, 
 		return vmIdentity{}, fmt.Errorf("parse ubuntu uid %q: %w", strings.TrimSpace(uidOut), err)
 	}
 
-	gidOut, exit, err := c.run(ctx, name, "id -g ubuntu", rootIdentity)
+	gidOut, exit, err := c.runRoot(ctx, name, "id -g ubuntu")
 	if err != nil {
 		return vmIdentity{}, fmt.Errorf("look up ubuntu gid: %w", err)
 	}
@@ -481,7 +492,7 @@ func (c *Client) resolveIdentity(ctx context.Context, name string) (vmIdentity, 
 		return vmIdentity{}, fmt.Errorf("parse ubuntu gid %q: %w", strings.TrimSpace(gidOut), err)
 	}
 
-	homeOut, exit, err := c.run(ctx, name, "getent passwd ubuntu", rootIdentity)
+	homeOut, exit, err := c.runRoot(ctx, name, "getent passwd ubuntu")
 	if err != nil {
 		return vmIdentity{}, fmt.Errorf("look up ubuntu home: %w", err)
 	}
@@ -498,8 +509,8 @@ func (c *Client) resolveIdentity(ctx context.Context, name string) (vmIdentity, 
 
 // Transfer copies a host directory recursively into the VM under vmDest.
 func (c *Client) Transfer(ctx context.Context, vmName, hostPath, vmDest string) error {
-	if strings.TrimSpace(vmName) == "" {
-		return fmt.Errorf("instance name is required")
+	if err := validateName(vmName); err != nil {
+		return err
 	}
 	if strings.TrimSpace(hostPath) == "" {
 		return fmt.Errorf("host path is required")
@@ -680,7 +691,7 @@ func (c *Client) waitForVMReady(ctx context.Context, name string) error {
 		default:
 		}
 
-		_, exit, err := c.run(ctx, name, "echo ready", rootIdentity)
+		_, exit, err := c.runRoot(ctx, name, "echo ready")
 		if err == nil && exit == 0 {
 			return nil
 		}
