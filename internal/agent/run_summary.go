@@ -17,12 +17,13 @@ type runOutcome string
 
 const (
 	outcomeOK              runOutcome = "ok"
+	outcomeFailed          runOutcome = "failed"
 	outcomeError           runOutcome = "error"
 	outcomeBudgetExhausted runOutcome = "budget_exhausted"
 	outcomeTimeout         runOutcome = "timeout"
 )
 
-func classifyOutcome(ctx context.Context, err error, exhausted bool) runOutcome {
+func classifyOutcome(ctx context.Context, err error, exhausted bool, status TaskStatusOutcome) runOutcome {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return outcomeTimeout
 	}
@@ -32,7 +33,14 @@ func classifyOutcome(ctx context.Context, err error, exhausted bool) runOutcome 
 	if exhausted {
 		return outcomeBudgetExhausted
 	}
-	return outcomeOK
+	switch status.CompletedStatus {
+	case TaskStatusCompleted:
+		return outcomeOK
+	case TaskStatusFailed:
+		return outcomeFailed
+	default:
+		return outcomeError
+	}
 }
 
 // runTotals is the per-run aggregate reported once by the run_summary event.
@@ -62,6 +70,8 @@ func (a *Agent) logRunSummary(ctx context.Context, outcome runOutcome, elapsed t
 		"reclaimed_tokens":  a.totals.ReclaimedTokens,
 		"tool_calls":        a.totals.ToolCalls,
 		"tool_failures":     a.totals.ToolFailures,
+		"status":            a.finalRunStatus.CompletedStatus,
+		"reason":            a.finalRunStatus.Reason,
 	}
 	if a.krn != nil {
 		if window := a.krn.ModelConfig().ContextWindow(); window > 0 {

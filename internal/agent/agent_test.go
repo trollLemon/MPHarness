@@ -122,7 +122,7 @@ func chatResp(content, reasoning, finishReason string, toolCalls []model.Respons
 }
 
 func defaultLLMConfig() config.LLMConfig {
-	return config.LLMConfig{Temperature: 0.0, TopP: 0.1, TopK: 1, ToolChoice: "auto"}
+	return config.LLMConfig{Temperature: 0.0, TopP: 0.1, TopK: 1}
 }
 
 func TestLLMConfig(t *testing.T) {
@@ -134,12 +134,12 @@ func TestLLMConfig(t *testing.T) {
 		{
 			name: "defaults when empty",
 			cfg:  config.LLMConfig{},
-			want: config.LLMConfig{ToolChoice: "auto"},
+			want: config.LLMConfig{MaxOutputTokens: config.DefaultLLMMaxOutputTokens},
 		},
 		{
 			name: "passthrough preserves values",
-			cfg:  config.LLMConfig{Temperature: 0.7, TopP: 0.9, TopK: 5, ToolChoice: "required"},
-			want: config.LLMConfig{Temperature: 0.7, TopP: 0.9, TopK: 5, ToolChoice: "required"},
+			cfg:  config.LLMConfig{Temperature: 0.7, TopP: 0.9, TopK: 5, MaxOutputTokens: 512},
+			want: config.LLMConfig{Temperature: 0.7, TopP: 0.9, TopK: 5, MaxOutputTokens: 512},
 		},
 	}
 	for _, tt := range tests {
@@ -151,7 +151,7 @@ func TestLLMConfig(t *testing.T) {
 				LLM:           tt.cfg,
 				RunID:         "",
 			})
-			if a.llmConfig.Temperature != tt.want.Temperature || a.llmConfig.TopP != tt.want.TopP || a.llmConfig.TopK != tt.want.TopK || a.llmConfig.ToolChoice != tt.want.ToolChoice {
+			if a.llmConfig != tt.want {
 				t.Fatalf("got %+v want %+v", a.llmConfig, tt.want)
 			}
 		})
@@ -476,7 +476,7 @@ func TestBuildAssistantMessageAndAppend(t *testing.T) {
 			if am["reasoning_content"] != tt.wantReasoning {
 				t.Errorf("reasoning %v want %v", am["reasoning_content"], tt.wantReasoning)
 			}
-			conv2 := appendToConversation([]model.D{{"role": "system"}}, am)
+			conv2 := append([]model.D{{"role": "system"}}, am)
 			if len(conv2) != 2 {
 				t.Fatalf("append len %d", len(conv2))
 			}
@@ -523,16 +523,15 @@ func TestBuildChatRequest(t *testing.T) {
 		llm           config.LLMConfig
 		wantTopK      any
 		wantMaxTokens int
-		wantChoice    string
 		wantTemp      float64
 		wantTopP      float64
 	}{
-		{"greedy defaults", config.LLMConfig{ToolChoice: "auto"}, 1, config.DefaultLLMMaxOutputTokens, "auto", 0, 0},
-		{"config values pass through", config.LLMConfig{Temperature: 0.7, TopP: 0.9, TopK: 5, ToolChoice: "required"}, 5, config.DefaultLLMMaxOutputTokens, "required", 0.7, 0.9},
-		{"explicit top_k wins over greedy default", config.LLMConfig{Temperature: 0, TopK: 40}, 40, config.DefaultLLMMaxOutputTokens, "", 0, 0},
-		{"top_k omitted when sampling without top_k", config.LLMConfig{Temperature: 0.8}, nil, config.DefaultLLMMaxOutputTokens, "", 0.8, 0},
-		{"explicit top_k kept when sampling", config.LLMConfig{Temperature: 0.8, TopK: 20}, 20, config.DefaultLLMMaxOutputTokens, "", 0.8, 0},
-		{"explicit max tokens win", config.LLMConfig{MaxOutputTokens: 512}, 1, 512, "", 0, 0},
+		{"greedy defaults", config.LLMConfig{}, 1, config.DefaultLLMMaxOutputTokens, 0, 0},
+		{"config values pass through", config.LLMConfig{Temperature: 0.7, TopP: 0.9, TopK: 5}, 5, config.DefaultLLMMaxOutputTokens, 0.7, 0.9},
+		{"explicit top_k wins over greedy default", config.LLMConfig{Temperature: 0, TopK: 40}, 40, config.DefaultLLMMaxOutputTokens, 0, 0},
+		{"top_k omitted when sampling without top_k", config.LLMConfig{Temperature: 0.8}, nil, config.DefaultLLMMaxOutputTokens, 0.8, 0},
+		{"explicit top_k kept when sampling", config.LLMConfig{Temperature: 0.8, TopK: 20}, 20, config.DefaultLLMMaxOutputTokens, 0.8, 0},
+		{"explicit max tokens win", config.LLMConfig{MaxOutputTokens: 512}, 1, 512, 0, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -543,8 +542,8 @@ func TestBuildChatRequest(t *testing.T) {
 			if req["max_tokens"] != tt.wantMaxTokens {
 				t.Errorf("max_tokens %v want %d", req["max_tokens"], tt.wantMaxTokens)
 			}
-			if tt.wantChoice != "" && req["tool_choice"] != tt.wantChoice {
-				t.Errorf("tool_choice %v want %v", req["tool_choice"], tt.wantChoice)
+			if _, ok := req["tool_choice"]; ok {
+				t.Error("tool_choice must not be sent: the model decides when to call tools")
 			}
 			if req["temperature"] != tt.wantTemp {
 				t.Errorf("temperature %v want %v", req["temperature"], tt.wantTemp)
@@ -628,7 +627,7 @@ func TestBuildLengthNudgeMessages(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msgs := buildLengthNudgeMessages(tt.msg, config.DefaultNudgeBytes)
+			msgs := buildNudgeMessages(tt.msg, config.DefaultNudgeBytes, lengthNudge)
 			if len(msgs) != tt.wantLen {
 				t.Fatalf("msgs len %d want %d: %v", len(msgs), tt.wantLen, msgs)
 			}
@@ -748,7 +747,7 @@ func TestAssistantMessageShapeLogged(t *testing.T) {
 		Model:  "m",
 		Prompt: "task",
 	}
-	if err := agt.Execute(context.Background(), conf, newTestClient(t)); err != nil {
+	if _, err := agt.Execute(context.Background(), conf, newTestClient(t)); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	found := false
@@ -790,7 +789,7 @@ func TestExecuteReportsNoOutputWithoutError(t *testing.T) {
 		Prompt: "task",
 	}
 
-	if err := agt.Execute(context.Background(), conf, newTestClient(t)); err != nil {
+	if _, err := agt.Execute(context.Background(), conf, newTestClient(t)); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 }
@@ -808,9 +807,9 @@ func TestExecute(t *testing.T) {
 		verifyReq func(t *testing.T, reqs []model.D)
 	}{
 		{
-			name:    "no tool calls success",
+			name:    "no tool calls gets a task_status nudge",
 			mock:    &mockKronk{responses: []model.ChatResponse{chatResp("final answer", "thinking", model.FinishReasonStop, nil, &model.Usage{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3, TokensPerSecond: 10})}},
-			maxIter: 5, wantCalls: 1,
+			maxIter: 5, wantCalls: 2,
 			vm:     config.VMConfig{Name: "test-vm", CPU: 2, RAM: "4G", Disk: "20G"},
 			prompt: "do nothing",
 			verifyReq: func(t *testing.T, reqs []model.D) {
@@ -820,16 +819,27 @@ func TestExecute(t *testing.T) {
 				if reqs[0]["top_p"] != 0.1 {
 					t.Errorf("top_p %v", reqs[0]["top_p"])
 				}
-				if reqs[0]["tool_choice"] != "auto" {
-					t.Errorf("tool_choice %v", reqs[0]["tool_choice"])
+				if len(reqs) < 2 {
+					t.Fatal("no nudge request after a finish without task_status")
+				}
+				msgs, _ := reqs[1]["messages"].([]model.D)
+				if len(msgs) == 0 {
+					t.Fatal("nudge request has no messages")
+				}
+				last := msgs[len(msgs)-1]
+				if last["role"] != "user" {
+					t.Errorf("nudge role %v want user", last["role"])
+				}
+				if content, _ := last["content"].(string); !strings.Contains(content, "task_status") {
+					t.Errorf("nudge %q does not mention task_status", content)
 				}
 			},
 		},
 		{
 			name:    "uses LLMConfig",
 			mock:    &mockKronk{responses: []model.ChatResponse{chatResp("ok", "", model.FinishReasonStop, nil, nil)}},
-			maxIter: 3, wantCalls: 1,
-			llmCfg: &config.LLMConfig{Temperature: 0.7, TopP: 0.9, TopK: 5, ToolChoice: "required"},
+			maxIter: 3, wantCalls: 2,
+			llmCfg: &config.LLMConfig{Temperature: 0.7, TopP: 0.9, TopK: 5},
 			verifyReq: func(t *testing.T, reqs []model.D) {
 				if reqs[0]["temperature"] != 0.7 {
 					t.Errorf("temperature %v want 0.7", reqs[0]["temperature"])
@@ -839,9 +849,6 @@ func TestExecute(t *testing.T) {
 				}
 				if reqs[0]["top_k"] != 5 {
 					t.Errorf("top_k %v want 5", reqs[0]["top_k"])
-				}
-				if reqs[0]["tool_choice"] != "required" {
-					t.Errorf("tool_choice %v want required", reqs[0]["tool_choice"])
 				}
 			},
 		},
@@ -890,7 +897,7 @@ func TestExecute(t *testing.T) {
 			}
 			conf := config.Config{VM: vm, Prompt: prompt}
 			cli := newTestClient(t)
-			err := agent.Execute(context.Background(), conf, cli)
+			_, err := agent.Execute(context.Background(), conf, cli)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err %v wantErr %v", err, tt.wantErr)
 			}
@@ -901,6 +908,167 @@ func TestExecute(t *testing.T) {
 				tt.verifyReq(t, tt.mock.captured)
 			}
 		})
+	}
+}
+
+func TestExecuteReturnsTaskStatus(t *testing.T) {
+	tests := []struct {
+		name        string
+		status      string
+		reason      string
+		wantOutcome runOutcome
+	}{
+		{"completed", "Completed", "kernel string verified", outcomeOK},
+		{"failed", "Failed", "cli lacks the required flag", outcomeFailed},
+		{"error", "Error", "permission denied", outcomeError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tc := model.ResponseToolCall{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{
+				Name:      "task_status",
+				Arguments: model.ToolCallArguments{"status": tt.status, "reason": tt.reason},
+			}}
+			mock := &mockKronk{responses: []model.ChatResponse{
+				chatResp("summary", "", model.FinishReasonTool, []model.ResponseToolCall{tc}, &model.Usage{TotalTokens: 100}),
+			}}
+			var buf bytes.Buffer
+			agt := NewAgent(zerolog.New(&buf), mock, Options{
+				MaxIterations: 5,
+				ChatTimeout:   time.Second,
+				TotalTimeout:  5 * time.Second,
+				LLM:           defaultLLMConfig(),
+				RunID:         "run-status",
+			})
+			conf := config.Config{
+				VM:     config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
+				Model:  "m",
+				Prompt: "task",
+			}
+
+			got, err := agt.Execute(context.Background(), conf, newTestClient(t))
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			want := TaskStatusOutcome{CompletedStatus: tt.status, Reason: tt.reason}
+			if got == nil || *got != want {
+				t.Fatalf("status = %+v, want %+v", got, want)
+			}
+			if !agt.done {
+				t.Error("agent must stop after task_status")
+			}
+			if mock.calls != 1 {
+				t.Errorf("chat calls = %d, want 1: task_status must end the run", mock.calls)
+			}
+
+			summary := onlyEvent(t, decodeEvents(t, &buf), eventRunSummary)
+			if summary["status"] != tt.status {
+				t.Errorf("run_summary status = %v, want %q", summary["status"], tt.status)
+			}
+			if summary["reason"] != tt.reason {
+				t.Errorf("run_summary reason = %v, want %q", summary["reason"], tt.reason)
+			}
+			if summary["outcome"] != string(tt.wantOutcome) {
+				t.Errorf("run_summary outcome = %v, want %q", summary["outcome"], tt.wantOutcome)
+			}
+		})
+	}
+}
+
+func TestExecuteStopsAtTaskStatusInBatch(t *testing.T) {
+	completed := model.ResponseToolCall{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{
+		Name:      "task_status",
+		Arguments: model.ToolCallArguments{"status": "Completed", "reason": "first status wins"},
+	}}
+	tests := []struct {
+		name  string
+		later model.ResponseToolCall
+	}{
+		{
+			name: "later task_status ignored",
+			later: model.ResponseToolCall{ID: "c2", Type: "function", Function: model.ResponseToolCallFunction{
+				Name:      "task_status",
+				Arguments: model.ToolCallArguments{"status": "Failed", "reason": "second status must not win"},
+			}},
+		},
+		{
+			name: "later tool call not executed",
+			later: model.ResponseToolCall{ID: "c3", Type: "function", Function: model.ResponseToolCallFunction{
+				Name:      "vm_info",
+				Arguments: model.ToolCallArguments{},
+			}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockKronk{responses: []model.ChatResponse{
+				chatResp("summary", "", model.FinishReasonTool, []model.ResponseToolCall{completed, tt.later}, &model.Usage{TotalTokens: 100}),
+			}}
+			agt := NewAgent(zerolog.Nop(), mock, Options{
+				MaxIterations: 5,
+				ChatTimeout:   time.Second,
+				TotalTimeout:  5 * time.Second,
+				LLM:           defaultLLMConfig(),
+				RunID:         "run-status-batch",
+			})
+			conf := config.Config{
+				VM:     config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
+				Model:  "m",
+				Prompt: "task",
+			}
+
+			got, err := agt.Execute(context.Background(), conf, newTestClient(t))
+			if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			want := TaskStatusOutcome{CompletedStatus: "Completed", Reason: "first status wins"}
+			if got == nil || *got != want {
+				t.Fatalf("status = %+v, want %+v", got, want)
+			}
+			if agt.totals.ToolCalls != 1 {
+				t.Errorf("tool calls = %d, want 1: nothing after task_status may run", agt.totals.ToolCalls)
+			}
+			if mock.calls != 1 {
+				t.Errorf("chat calls = %d, want 1: task_status must end the run", mock.calls)
+			}
+		})
+	}
+}
+
+func TestExecuteRetriesAfterInvalidTaskStatus(t *testing.T) {
+	bad := model.ResponseToolCall{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{
+		Name:      "task_status",
+		Arguments: model.ToolCallArguments{"status": "Done", "reason": "x"},
+	}}
+	good := model.ResponseToolCall{ID: "c2", Type: "function", Function: model.ResponseToolCallFunction{
+		Name:      "task_status",
+		Arguments: model.ToolCallArguments{"status": "Completed", "reason": "all checks passed"},
+	}}
+	mock := &mockKronk{responses: []model.ChatResponse{
+		chatResp("", "", model.FinishReasonTool, []model.ResponseToolCall{bad}, &model.Usage{TotalTokens: 100}),
+		chatResp("", "", model.FinishReasonTool, []model.ResponseToolCall{good}, &model.Usage{TotalTokens: 100}),
+	}}
+	agt := NewAgent(zerolog.Nop(), mock, Options{
+		MaxIterations: 5,
+		ChatTimeout:   time.Second,
+		TotalTimeout:  5 * time.Second,
+		LLM:           defaultLLMConfig(),
+		RunID:         "run-status-retry",
+	})
+	conf := config.Config{
+		VM:     config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
+		Model:  "m",
+		Prompt: "task",
+	}
+
+	got, err := agt.Execute(context.Background(), conf, newTestClient(t))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got == nil || got.CompletedStatus != "Completed" || got.Reason != "all checks passed" {
+		t.Fatalf("status = %+v, want the retried Completed status", got)
+	}
+	if mock.calls != 2 {
+		t.Errorf("chat calls = %d, want 2: an invalid status must not end the run", mock.calls)
 	}
 }
 
@@ -940,7 +1108,7 @@ func TestExecuteLogsTokenUsageAndIterationEvents(t *testing.T) {
 			&model.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120, TokensPerSecond: 8.5})},
 	}
 	agent := NewAgent(zerolog.New(&buf), mock, Options{
-		MaxIterations: 2,
+		MaxIterations: 1,
 		ChatTimeout:   time.Second,
 		TotalTimeout:  5 * time.Second,
 		LLM:           defaultLLMConfig(),
@@ -948,7 +1116,7 @@ func TestExecuteLogsTokenUsageAndIterationEvents(t *testing.T) {
 	})
 	conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
 	ctx := context.Background()
-	if err := agent.Execute(ctx, conf, newTestClient(t)); err != nil {
+	if _, err := agent.Execute(ctx, conf, newTestClient(t)); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 
@@ -974,56 +1142,6 @@ func TestExecuteLogsTokenUsageAndIterationEvents(t *testing.T) {
 	}
 
 	onlyEvent(t, events, eventRunSummary)
-}
-
-func TestFinalCommandOutput(t *testing.T) {
-	tests := []struct {
-		name    string
-		outputs []string
-		want    string
-	}{
-		{"no outputs", nil, ""},
-		{"single output", []string{"out"}, "out"},
-		{"joined with separator", []string{"a", "b"}, "a\n---\nb"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := finalCommandOutput(tt.outputs); got != tt.want {
-				t.Errorf("got %q want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestFinalCommandOutputIsCapped(t *testing.T) {
-	outputs := []string{strings.Repeat("a", 40000), strings.Repeat("b", 40000)}
-	got := finalCommandOutput(outputs)
-	if len(got) > finalOutputBytes+64 {
-		t.Errorf("len %d exceeds cap %d plus marker", len(got), finalOutputBytes)
-	}
-	if !strings.Contains(got, "truncated") {
-		t.Errorf("missing truncation marker")
-	}
-}
-
-func TestSystemPromptBatchingGuidance(t *testing.T) {
-	tests := []struct {
-		name string
-		sub  string
-		want bool
-	}{
-		{"no sequential instruction", "sequentially", false},
-		{"batching section", "Batching Work", true},
-		{"chaining operator", "&&", true},
-		{"single turn", "single turn", true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := contains(systemPrompt, tt.sub); got != tt.want {
-				t.Errorf("system prompt contains %q = %v, want %v", tt.sub, got, tt.want)
-			}
-		})
-	}
 }
 
 func TestRunIterationCountsToolResultsInContext(t *testing.T) {
@@ -1162,6 +1280,36 @@ func TestRecordTokenUsageKeepsZeroCachedTokens(t *testing.T) {
 // A run that stops early has a lower a.iteration than the cap, so it must not
 // be labelled budget_exhausted even though the cap was reached in the sense of
 // "the loop would have run again".
+func TestFinalCommandOutput(t *testing.T) {
+	tests := []struct {
+		name    string
+		outputs []string
+		want    string
+	}{
+		{"no outputs", nil, ""},
+		{"single output", []string{"out"}, "out"},
+		{"joined with separator", []string{"a", "b"}, "a\n---\nb"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := finalCommandOutput(tt.outputs); got != tt.want {
+				t.Errorf("got %q want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFinalCommandOutputIsCapped(t *testing.T) {
+	outputs := []string{strings.Repeat("a", 40000), strings.Repeat("b", 40000)}
+	got := finalCommandOutput(outputs)
+	if len(got) > finalOutputBytes+64 {
+		t.Errorf("len %d exceeds cap %d plus marker", len(got), finalOutputBytes)
+	}
+	if !strings.Contains(got, "truncated") {
+		t.Errorf("missing truncation marker")
+	}
+}
+
 func TestRunOutcomeDistinguishesCleanFinishFromExhaustion(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -1170,8 +1318,18 @@ func TestRunOutcomeDistinguishesCleanFinishFromExhaustion(t *testing.T) {
 		toolCalls    []model.ResponseToolCall
 		want         runOutcome
 	}{
-		{"clean finish below the cap", 5, model.FinishReasonStop, nil, outcomeOK},
-		{"clean finish on the last permitted iteration", 1, model.FinishReasonStop, nil, outcomeOK},
+		{"clean finish below the cap", 5, model.FinishReasonTool, []model.ResponseToolCall{
+			{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{
+				Name:      "task_status",
+				Arguments: model.ToolCallArguments{"status": "Completed", "reason": "done"},
+			}},
+		}, outcomeOK},
+		{"clean finish on the last permitted iteration", 1, model.FinishReasonTool, []model.ResponseToolCall{
+			{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{
+				Name:      "task_status",
+				Arguments: model.ToolCallArguments{"status": "Completed", "reason": "done"},
+			}},
+		}, outcomeOK},
 		{"cap reached while still calling tools", 1, model.FinishReasonTool, []model.ResponseToolCall{
 			{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{Name: "vm_info", Arguments: model.ToolCallArguments{}}},
 		}, outcomeBudgetExhausted},
@@ -1191,7 +1349,7 @@ func TestRunOutcomeDistinguishesCleanFinishFromExhaustion(t *testing.T) {
 				RunID:         "01J9",
 			})
 			conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
-			if err := a.Execute(t.Context(), conf, newTestClient(t)); err != nil {
+			if _, err := a.Execute(t.Context(), conf, newTestClient(t)); err != nil {
 				t.Fatalf("Execute: %v", err)
 			}
 

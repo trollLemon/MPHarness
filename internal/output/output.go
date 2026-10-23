@@ -108,16 +108,6 @@ func decideInline(mode string, size, cutoff int64) bool {
 	return size < cutoff
 }
 
-// effectiveCutoff returns the cutoff size for output, given the derived budget,
-// and the given configuration. It prefers cfg.InlineMaxSize; if that is 0 it
-// returns derivedBudget.
-func effectiveCutoff(cfg config.OutputConfig, derivedBudget int64) int64 {
-	if cfg.InlineMaxSize > 0 {
-		return int64(cfg.InlineMaxSize)
-	}
-	return derivedBudget
-}
-
 // ValidatePattern validates a regex search pattern.
 func ValidatePattern(pattern string) error {
 	if strings.TrimSpace(pattern) == "" {
@@ -277,10 +267,6 @@ func (s *Store) checkCaps(size int64) error {
 	return nil
 }
 
-func (s *Store) shouldInline(mode string, size int64) bool {
-	return decideInline(mode, size, effectiveCutoff(s.cfg, s.inlineCutoff))
-}
-
 func (s *Store) materializeInline(ctx context.Context, subdir, raw string, size int64, exit int) (Result, error) {
 	inline := ""
 	if size > 0 {
@@ -332,6 +318,10 @@ func (s *Store) Capture(ctx context.Context, command string, force bool) (Result
 		return Result{}, err
 	}
 	cleanup := func() { s.removeSubdir(ctx, subdir) }
+	fail := func(err error) (Result, error) {
+		cleanup()
+		return Result{}, err
+	}
 	marker := "__MPH_EXIT_" + strings.ReplaceAll(oid, "-", "") + ":"
 	exit, err := s.runRedirect(ctx, command, raw, marker)
 	// Once the command's context is done, follow-up work must not reuse it or
@@ -340,8 +330,7 @@ func (s *Store) Capture(ctx context.Context, command string, force bool) (Result
 	workCtx := ctx
 	if err != nil {
 		if ctx.Err() == nil {
-			cleanup()
-			return Result{}, err
+			return fail(err)
 		}
 		// Timed out mid-write: keep the partial file as-is and report 124,
 		// the `timeout(1)` convention for a timed-out command.
@@ -350,25 +339,25 @@ func (s *Store) Capture(ctx context.Context, command string, force bool) (Result
 	}
 	size, err := s.rawSize(workCtx, raw)
 	if err != nil {
-		cleanup()
-		return Result{}, err
+		return fail(err)
 	}
 	if err := s.checkCaps(size); err != nil {
-		cleanup()
-		return Result{}, err
+		return fail(err)
 	}
-	if s.shouldInline(mode, size) {
+	cutoff := s.inlineCutoff
+	if s.cfg.InlineMaxSize > 0 {
+		cutoff = int64(s.cfg.InlineMaxSize)
+	}
+	if decideInline(mode, size, cutoff) {
 		res, err := s.materializeInline(workCtx, subdir, raw, size, exit)
 		if err != nil {
-			cleanup()
-			return Result{}, err
+			return fail(err)
 		}
 		return res, nil
 	}
 	res, err := s.materializeHandle(workCtx, command, oid, raw, size, exit)
 	if err != nil {
-		cleanup()
-		return Result{}, err
+		return fail(err)
 	}
 	return res, nil
 }

@@ -71,6 +71,104 @@ func TestToolSpecs(t *testing.T) {
 	}
 }
 
+func TestTaskStatusSpec(t *testing.T) {
+	var found *Spec
+	for _, s := range Specs(config.Config{}) {
+		if s.Name == "task_status" {
+			s := s
+			found = &s
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("missing task_status")
+	}
+
+	props, _ := found.Parameters["properties"].(map[string]any)
+	status, _ := props["status"].(map[string]any)
+	enum, _ := status["enum"].([]string)
+	wantEnum := []string{"Completed", "Failed", "Error"}
+	if len(enum) != len(wantEnum) {
+		t.Fatalf("status enum = %v, want %v", enum, wantEnum)
+	}
+	for i, want := range wantEnum {
+		if enum[i] != want {
+			t.Errorf("status enum[%d] = %q, want %q", i, enum[i], want)
+		}
+	}
+
+	reason, _ := props["reason"].(map[string]any)
+	if reason["type"] != "string" {
+		t.Errorf("reason type = %v, want string", reason["type"])
+	}
+
+	required, _ := found.Parameters["required"].([]string)
+	if len(required) != 2 || required[0] != "status" || required[1] != "reason" {
+		t.Errorf("required = %v, want [status reason]", required)
+	}
+}
+
+func TestParseTaskStatus(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    map[string]any
+		want    TaskStatusOutcome
+		wantErr bool
+	}{
+		{
+			name: "completed",
+			args: map[string]any{"status": "Completed", "reason": "kernel string verified"},
+			want: TaskStatusOutcome{CompletedStatus: "Completed", Reason: "kernel string verified"},
+		},
+		{
+			name: "failed",
+			args: map[string]any{"status": "Failed", "reason": "cli lacks the required flag"},
+			want: TaskStatusOutcome{CompletedStatus: "Failed", Reason: "cli lacks the required flag"},
+		},
+		{
+			name: "error",
+			args: map[string]any{"status": "Error", "reason": "permission denied"},
+			want: TaskStatusOutcome{CompletedStatus: "Error", Reason: "permission denied"},
+		},
+		{
+			name: "trims reason",
+			args: map[string]any{"status": "Completed", "reason": "  done  "},
+			want: TaskStatusOutcome{CompletedStatus: "Completed", Reason: "done"},
+		},
+		{
+			name:    "unknown status",
+			args:    map[string]any{"status": "Done", "reason": "x"},
+			wantErr: true,
+		},
+		{
+			name:    "missing status",
+			args:    map[string]any{"reason": "x"},
+			wantErr: true,
+		},
+		{
+			name:    "missing reason",
+			args:    map[string]any{"status": "Completed"},
+			wantErr: true,
+		},
+		{
+			name:    "blank reason",
+			args:    map[string]any{"status": "Completed", "reason": "   "},
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseTaskStatus(tt.args)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("got %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCallVMExecCapture(t *testing.T) {
 	tests := []struct {
 		name        string

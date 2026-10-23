@@ -29,7 +29,6 @@ llm:
   temperature: 0.0
   top_p: 0.1
   top_k: 1
-  tool_choice: auto
   context_window: 4096
 model: unsloth/Qwen3-0.6B-Q8_0
 vm:
@@ -51,7 +50,6 @@ llm:
   temperature: 0.8
   top_p: 0.95
   top_k: 100
-  tool_choice: auto
   context_window: 0   # auto-tune
 model: unsloth/Qwen3-0.6B-Q8_0
 vm:
@@ -150,7 +148,6 @@ llm:
   temperature: 0.2
   top_p: 0.95
   top_k: 40
-  tool_choice: auto   # auto | required | none
   context_window: 169216  # 0 = auto-tune
 
 agent:

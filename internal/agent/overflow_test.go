@@ -193,8 +193,8 @@ func TestRunIterationRecoversFromContextOverflow(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("chat calls = %d, want 2 (overflow then retry)", calls)
 	}
-	if !agt.done {
-		t.Fatal("successful retry must let the iteration finish")
+	if agt.done {
+		t.Fatal("a finish without task_status must not end the run before the nudge")
 	}
 
 	second, _ := json.Marshal(requests[1])

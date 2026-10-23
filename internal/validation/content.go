@@ -1,6 +1,7 @@
 package validation
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"io/fs"
@@ -30,28 +31,6 @@ type ContentFinding struct {
 	File    string
 	Pattern string
 	Snippet string
-}
-
-func isTextFile(fsys fs.FS, name string) bool {
-	f, err := fsys.Open(name)
-	if err != nil {
-		return false
-	}
-	defer func() { _ = f.Close() }()
-	buf := make([]byte, 512)
-	n, err := f.Read(buf)
-	if err != nil && err != io.EOF {
-		return false
-	}
-	if n == 0 {
-		return true
-	}
-	for _, b := range buf[:n] {
-		if b == 0 {
-			return false
-		}
-	}
-	return true
 }
 
 // ContentDirPath normalizes a content directory and checks that it exists.
@@ -94,18 +73,21 @@ func ScanContentDir(dir string) ([]ContentFinding, error) {
 		if d.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
-		if !isTextFile(fsys, name) {
-			return nil
-		}
 		f, err := fsys.Open(name)
 		if err != nil {
 			return nil
 		}
-		defer func() { _ = f.Close() }()
 		const maxRead = 1024 * 1024
-		limited := io.LimitReader(f, maxRead+1)
-		data, err := io.ReadAll(limited)
+		data, err := io.ReadAll(io.LimitReader(f, maxRead+1))
+		_ = f.Close()
 		if err != nil {
+			return nil
+		}
+		probe := data
+		if len(probe) > 512 {
+			probe = probe[:512]
+		}
+		if bytes.IndexByte(probe, 0) >= 0 {
 			return nil
 		}
 		if len(data) > maxRead {

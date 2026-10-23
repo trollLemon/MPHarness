@@ -37,7 +37,7 @@ flowchart LR
 Your prompt only needs to describe the task. There is nothing to write about creating, starting, stopping, or deleting the VM, because the agent cannot do any of those.
 
 The harness will prompt for confirmation to continue if a VM with the same name already exists (unless you pass the `-i` flag to ignore and reuse it). A stopped instance is started and awaited before the run. An existing instance that is not a virtual machine is rejected with a clear error.
-If you don't pass the `-k` flag, the harness will delete the VM once the task has finished successfully. On a run that fails (timeout, agent error), the harness exits before the delete step, so the VM is left running for inspection.
+If you don't pass the `-k` flag, the harness deletes the VM after the agent run finishes, whether the agent reports `Completed`, `Failed`, or `Error`. If the harness itself fails (for example a timeout or an LXD error), it exits before the delete step, leaving the VM running for inspection.
 
 - [How tool calling works](../explaination/tool_calling.md)
 - [Software architecture](../reference/arch.md)

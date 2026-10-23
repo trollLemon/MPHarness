@@ -17,7 +17,6 @@ llm:
   temperature: 0.2
   top_p: 0.95
   top_k: 40
-  tool_choice: auto   # auto | required | none
   max_output_tokens: 2048
   context_window: 0   # 0 = auto-tune
 ```
@@ -27,7 +26,6 @@ llm:
 | `temperature` | `0.0` | `0.2` | Randomness of sampling. Lower is more deterministic. |
 | `top_p` | `0.0` | `0.95` | Nucleus sampling threshold (`0` = disabled). |
 | `top_k` | `0` | `40` | Only sample from top-k tokens. `0` means greedy (`1`) when `temperature` is `0`, and is left unset when `temperature` samples, so a non-zero `temperature` is never silently overridden. |
-| `tool_choice` | `auto` | `auto` | `auto` lets model decide; `required` forces tool call; `none` disables. |
 | `max_output_tokens` | `2048` | `4096` | Caps one model turn. Prevents a runaway completion from decoding until it exhausts the context window. |
 | `context_window` | `0` (auto-tune) | `8192` | Max context tokens. `0` = auto-tune from model metadata. |
 
@@ -39,16 +37,7 @@ llm:
 
 ### If the model forgets to call tools
 
-If `tool_choice` is left as `auto` and the model constantly answers without acting, forcing it can help:
-
-```yaml
-llm:
-  tool_choice: required
-```
-
-With `required` the model must emit a tool call on every turn, so it cannot finish without a summary-free tool call. Pair this with a prompt that tells it to finish with a plain summary message.
-
-This can be helpful if you are using a smaller model that doesn't do well with tool calls.
+A model that finishes without calling `task_status` gets one automatic nudge to call it. There is no setting that forces tool calls; if a model ignores both the tools and the nudge, use a model that handles tool calling more reliably or make the prompt more explicit about the steps to run.
 
 ## Agent loop timeouts
 

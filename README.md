@@ -9,7 +9,7 @@ Local harness for running agent-driven tasks inside an LXD VM, without the worry
 1. **Config load**: YAML, environment, and flags are merged, validated, and defaulted (`mph-vm`, `max_iterations: 10`, timeouts, …).
 2. **Model init**: llama.cpp runtimes + model (e.g. `unsloth/Qwen3-0.6B-Q8_0`) are downloaded once and cached, then loaded locally.
 3. **VM lifecycle**: the named LXD VM is launched (or reused with `-i`), optional `content_dir` is copied to `/home/ubuntu/content`.
-4. **Agent loop**: the LLM reasons, calls tools, reads results, and repeats until it answers with a final summary or hits `max_iterations`.
+4. **Agent loop**: the LLM reasons, calls tools, reads results, and repeats until it calls `task_status` or hits `max_iterations`.
 5. **Teardown**: combined command output is printed (`---`-separated) and the VM is deleted unless `-k` was passed.
 
 Every command the agent tries to run is parsed as shell AST and checked against `allowed_commands` (fail-closed), so anything outside the allowlist never reaches the VM. See [Restrict commands](docs/how-to/restrict_commands.md).
@@ -96,7 +96,6 @@ llm:                      # optional sampling params
   temperature: 0.2
   top_p: 0.95
   top_k: 40
-  tool_choice: auto       # auto|required|none
   context_window: 0       # 0 = auto-tune
 
 agent:                    # optional loop bounds
@@ -130,6 +129,14 @@ mph [flags] <config.yaml>
 ```
 
 Note: `-i` and `-k` have no long forms.
+
+## Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | The agent reported `Completed`. |
+| `1` | The agent reported `Failed`, the run ended without a `task_status` outcome, or `mph` itself failed. |
+| `2` | The agent reported `Error`: an execution problem prevented completing or evaluating the task. |
 
 ## Observability
 

@@ -11,36 +11,22 @@ import (
 	"github.com/trollLemon/MPHarness/internal/textutil"
 )
 
-const compactionSystemPrompt = `You are summarising an autonomous VM-operator agent's conversation so it can continue with a smaller context.
+const compactionSystemPrompt = `You are summarising an autonomous VM agent's conversation so it can continue with a smaller context.
 
-Return a handover using exactly these three headings, in this order:
-
+Return a handover with exactly these headings, in order:
 ## Done
-- Every task or step attempted, whether it passed or failed.
-- For each one, include the observed result with enough concrete detail to verify or continue the work. Preserve exact values from the command output, for example HTTP status codes, file paths, counts, version strings, or error text; never paraphrase or round them.
-- Keep any other facts the next turn needs, such as decisions made, assumptions, and blockers.
-
+- Every attempted step, passed or failed, with the observed result. Preserve exact values from command output (status codes, paths, counts, versions, error text); never paraphrase or round them. Include decisions, assumptions, and blockers.
 ## In progress
-- Work that was started but not finished, and the exact point it stopped at.
-
+- Work started but not finished, and the exact point it stopped.
 ## Not started
-- Work from the original task that has not been attempted yet.
+- Original tasks not yet attempted.
 
 Rules:
-- Every handover must include all three headings, even when a section is empty. Under an empty heading write "- None." instead of omitting the heading.
-- Never rename, merge, or reorder the headings. Use the exact text "## Done", "## In progress", and "## Not started".
-- Before replying, check that all three headings are present.
-- This summary is the only record of prior work. Anything you leave out cannot be recovered.
-- Do not reply with only a heading, a single word, or an empty section.
-- Captured output handles are referenced by their output_id. Copy every output_id verbatim, character for character, and say what each one contains. Never invent, shorten, or reformat an id.
-- Do not invent results, and do not claim work succeeded that the log shows failing.
-- Summarize inlined command outputs so their result is articulated without including the whole payload.
-- Plain prose and bullets.
-
-Make sure the handover is formatted clearly so an agent can continue without confusion.
+- Use the exact heading text, in order, even when a section is empty; write "- None." under an empty heading. Before replying, check that all three are present, and do not reply with only a heading, a single word, or an empty section.
+- This summary is the only record of prior work; anything omitted cannot be recovered. Do not invent results or claim failed work succeeded.
+- Copy every captured output_id verbatim and say what it contains. Do not invent, shorten, or reformat ids.
+- Summarize inline command output; do not copy the full payload.
 `
-
-const standingInstructions = `Operate asynchronously without user interaction. Prior messages are your own execution logs. Stop immediately on any permission or policy denial without workarounds. Inspect every result's status field. Always finish with a tool-call-free completion summary.`
 
 type summarizer interface {
 	Summarize(ctx context.Context, systemPrompt, renderedHistory string, maxTokens int) (string, error)
@@ -142,7 +128,6 @@ func truncateHead(s string, n int) string {
 func buildUserMessage(task, summary, recentResults string, handles []handleInfo, compactionsApplied int) string {
 	var b strings.Builder
 	b.WriteString("## Task\n" + strings.TrimSpace(task) + "\n\n")
-	b.WriteString("## Standing instructions\n" + standingInstructions + "\n\n")
 	if compactionsApplied == 1 {
 		b.WriteString("## Work completed so far (after 1 compaction)\n")
 	} else {

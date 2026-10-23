@@ -5,8 +5,30 @@ import (
 	"testing"
 	"uuid"
 
+	"github.com/trollLemon/MPHarness/internal/agent"
 	"github.com/trollLemon/MPHarness/internal/config"
 )
+
+func TestExitCode(t *testing.T) {
+	tests := []struct {
+		name    string
+		outcome *agent.TaskStatusOutcome
+		want    int
+	}{
+		{"completed", &agent.TaskStatusOutcome{CompletedStatus: "Completed", Reason: "checks passed"}, 0},
+		{"failed", &agent.TaskStatusOutcome{CompletedStatus: "Failed", Reason: "outcome not reached"}, 1},
+		{"error", &agent.TaskStatusOutcome{CompletedStatus: "Error", Reason: "permission denied"}, 2},
+		{"missing outcome", nil, 1},
+		{"unknown status", &agent.TaskStatusOutcome{CompletedStatus: "Unknown", Reason: "unexpected"}, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := exitCode(tt.outcome); got != tt.want {
+				t.Errorf("exitCode(%+v) = %d, want %d", tt.outcome, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestResolveOtelConfig(t *testing.T) {
 	tests := []struct {

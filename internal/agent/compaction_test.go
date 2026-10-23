@@ -117,8 +117,8 @@ func TestExecuteCompaction(t *testing.T) {
 			},
 			maxIter: 3,
 			check: func(t *testing.T, mock *mockKronk, _ string) {
-				if mock.calls != 1 {
-					t.Fatalf("disabled compaction must not add chat calls, got %d", mock.calls)
+				if got := countHandovers(mock); got != 0 {
+					t.Fatalf("disabled compaction must not add handover calls, got %d", got)
 				}
 			},
 		},
@@ -180,7 +180,7 @@ func TestExecuteCompaction(t *testing.T) {
 				Prompt:     "task",
 				Compaction: tt.compaction,
 			}
-			if err := agt.Execute(context.Background(), conf, newTestClient(t)); err != nil {
+			if _, err := agt.Execute(context.Background(), conf, newTestClient(t)); err != nil {
 				t.Fatalf("compaction failure must not end the run: %v", err)
 			}
 			tt.check(t, mock, buf.String())
@@ -212,7 +212,7 @@ func TestCompactionEventReportsContextDrop(t *testing.T) {
 		Prompt:     "task",
 		Compaction: enabledCompaction(),
 	}
-	if err := agt.Execute(context.Background(), conf, newTestClient(t)); err != nil {
+	if _, err := agt.Execute(context.Background(), conf, newTestClient(t)); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	if countHandovers(mock) == 0 {
@@ -439,7 +439,7 @@ func TestCompactionAppliesBeforeWindowIsExceeded(t *testing.T) {
 			"1. Run uname -a and note the kernel release field.\n" +
 			"2. Write that release string into /tmp/steps.txt.\n" +
 			"3. Append the output of hostname as a second line.\n",
-		LLM: config.LLMConfig{Temperature: 0.0, ToolChoice: "auto"},
+		LLM: config.LLMConfig{Temperature: 0.0},
 		Output: config.OutputConfig{
 			Enabled: true, Mode: "auto", InlineMaxSize: 0,
 			MaxCommandSize: 64 << 20, MaxTotalSize: 512 << 20, SearchMaxMatches: 200,
@@ -476,7 +476,7 @@ func TestCompactionAppliesBeforeWindowIsExceeded(t *testing.T) {
 				MaxIterations: tt.steps + 4, ChatTimeout: time.Second, TotalTimeout: 30 * time.Second,
 				LLM: cfg.LLM, RunID: "run-window",
 			})
-			if err := agt.Execute(context.Background(), cfg, newTestClient(t)); err != nil {
+			if _, err := agt.Execute(context.Background(), cfg, newTestClient(t)); err != nil {
 				t.Fatalf("run grew past the window without compacting: %v (handovers=%d)", err, countHandovers(mock.mockKronk))
 			}
 			if agt.compactionsApplied == 0 {
@@ -521,7 +521,7 @@ func TestCompactionDurationIsLoggedInMilliseconds(t *testing.T) {
 		Prompt:     "task",
 		Compaction: enabledCompaction(),
 	}
-	if err := agent.Execute(context.Background(), conf, newTestClient(t)); err != nil {
+	if _, err := agent.Execute(context.Background(), conf, newTestClient(t)); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 

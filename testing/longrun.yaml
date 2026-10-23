@@ -24,8 +24,6 @@ allowed_commands:
   - file
   - date
   - whoami
-llm:
-  tool_choice: auto
 agent:
   max_iterations: 60
   chat_timeout: 60m
@@ -77,9 +75,6 @@ prompt: |
   28. Run `cat /proc/mounts`.
   29. Run `cat /proc/cmdline`.
   30. Run `ls /tmp`.
-
-  When every item is done, state that the checklist is complete and give a
-  one-paragraph summary of the machine.
 otel:
   enabled: true
   endpoint: localhost:4317

@@ -224,18 +224,25 @@ func Validate(input string, r Resolver) error {
 		return fmt.Errorf("%w: %s", ErrUnknownName, names[0])
 	}
 	for _, name := range names {
-		secret, err := r.Lookup(name)
-		if err != nil {
+		if _, err := resolveChecked(r, name); err != nil {
 			return err
-		}
-		if secret == "" {
-			return fmt.Errorf("%w: %s", ErrUnknownName, name)
-		}
-		if !config.IsSafeValue(secret) {
-			return fmt.Errorf("%w: %s", ErrUnsafeValue, name)
 		}
 	}
 	return nil
+}
+
+func resolveChecked(r Resolver, name string) (string, error) {
+	secret, err := r.Lookup(name)
+	if err != nil {
+		return "", err
+	}
+	if secret == "" {
+		return "", fmt.Errorf("%w: %s", ErrUnknownName, name)
+	}
+	if !config.IsSafeValue(secret) {
+		return "", fmt.Errorf("%w: %s", ErrUnsafeValue, name)
+	}
+	return secret, nil
 }
 
 // Redact substitutes every marker in input with the secret r looks up for it.
@@ -254,15 +261,9 @@ func Redact(input string, r Resolver) (string, map[string]string, error) {
 		if _, ok := values[m.name]; ok {
 			continue
 		}
-		secret, err := r.Lookup(m.name)
+		secret, err := resolveChecked(r, m.name)
 		if err != nil {
 			return "", nil, err
-		}
-		if secret == "" {
-			return "", nil, fmt.Errorf("%w: %s", ErrUnknownName, m.name)
-		}
-		if !config.IsSafeValue(secret) {
-			return "", nil, fmt.Errorf("%w: %s", ErrUnsafeValue, m.name)
 		}
 		values[m.name] = secret
 	}

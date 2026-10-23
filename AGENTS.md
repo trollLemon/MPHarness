@@ -40,6 +40,8 @@ golangci-lint run
 - Run `go vet ./...` and `golangci-lint run` before committing
 - Follow Go idioms and effective Go guidelines
 - Keep functions small and focused
+- Avoid turning one cohesive function into a chain of single-use helpers; extract only for reuse or materially simpler control flow
+- Do not open or read the same file twice in one operation; reuse the first read
 - Use meaningful variable and function names
 - Minimal comments - code should be self-documenting
 - Only add comments for non-obvious workarounds or constraints

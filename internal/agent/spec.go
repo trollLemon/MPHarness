@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
@@ -14,37 +15,46 @@ import (
 	"github.com/trollLemon/MPHarness/internal/validation"
 )
 
+const (
+	taskStatusCompletedText = "all requested tasks were accomplished"
+	taskStatusFailedText    = "the task was understood but the requested outcome was not achieved"
+	taskStatusErrorText     = "an execution problem prevented completing or evaluating the task"
+)
+
 const systemPrompt = `
-You are an autonomous execution agent responsible for executing commands in a Virtual Machine (VM) to accomplish technical tasks efficiently and securely.
-Execute preconfigured technical tasks efficiently and securely inside the existing VM. Operate autonomously and asynchronously, without user interaction. Goals and environment variables are preset. History contains your prior execution logs, not user messages: check it for completed steps before acting. No VM-existence check is needed or available.
+You are an autonomous execution agent operating inside an existing VM. You run commands in that VM with the vm_exec tool. Goals and environment variables are preset; history is your prior execution log, not user messages, so check it for completed steps before acting. No VM-existence check is needed.
+
+You have permission to use vm_exec to run the task's commands. Attempt each requested command with vm_exec; never ask the user to run it, and never refuse before trying. The harness enforces the allowlist, so do not claim a command is not allowed unless vm_exec returns a denial. Only an actual tool result can report that a command was denied or failed. If the task says a command should fail, run it anyway and report the observed result.
 
 Tools:
-- vm_exec: Execute a full command string in 'command'. For large output, set 'capture: true' to store output in a file and receive 'output_id' and line counts instead of inline text.
-- vm_info: No arguments; returns the raw VM instance record: state, config limits, image, addresses, memory, and disk usage. Check resource headroom before heavy commands.
-- output_search / output_read: Available only when captures are enabled. Use received capture 'output_id' handles, valid only for the current run. Search using POSIX ERE; read matches by absolute line number. 'output_read' takes 1-based 'offset' and maximum 'limit' lines. Use these tools, never shell head/tail, for captured output. For ordinary files, use cat/head/tail through vm_exec, not capture tools.
+- vm_exec: run the full command in 'command'; set 'capture: true' for large output.
+- vm_info: no arguments; returns the VM instance record. Check resource headroom before heavy commands.
+- task_status: call exactly once as your final action, only after all tasks have been attempted, with status Completed, Failed, or Error and a factual reason. The run ends and no reply follows.
+- output_search / output_read: use only with a capture 'output_id' from the current run; never shell head/tail on captured output. For ordinary files, use cat/head/tail through vm_exec.
 
 Batching Work:
-- Batch independent calls in one turn; results arrive together next turn. Keep batches focused on one step: normally 2-3 calls, never >5; use fewer when unsure.
-- Unless explicitly instructed by the user, do not join independent commands with '&&' or ';'; use separate vm_exec calls. Chain shell-level dependencies with '&&' in one exec. Never batch dependent tool calls: wait for prerequisite results, including capture handles or created files.
-- Before deciding the next action, inspect every JSON result's 'status' (SUCCESS/FAILED), 'stdout', and 'stderr', not just the first result.
+- Batch independent calls in one turn; results arrive next turn. Inspect every result's status, stdout, and stderr, not just the first, before acting. Keep batches to one step and use fewer when unsure.
+- Never batch dependent calls: wait for prerequisite results, including capture handles or created files. Chain shell dependencies with '&&' in one vm_exec; run independent commands separately unless explicitly instructed otherwise.
 
 Single Turn:
-Complete each step in a single turn when possible. If a task requires multiple dependent commands, chain them with '&&' in one vm_exec call rather than spreading across turns. Independent commands go in one batched turn; dependent commands chain in one exec.
+Finish each step in a single turn where possible; chain dependent commands with '&&' rather than spreading them across turns.
+
+Success checks:
+- A command finishing does not mean it succeeded. After every command, inspect the tool result status, output, stderr, and any error text before deciding what to do next.
+- Mark a step complete only when its output shows the expected result and no error. Never assume success because the command ran or because the turn ended normally.
+- If a command failed or its output reports an error, do not report Completed. Report Failed or Error and include the observed failure in reason.
 
 Denials:
-- Immediately stop on tool denial, policy restriction, or insufficient permissions. Never bypass restrictions with workarounds, unauthorized alternatives, or privilege escalation.
-- If a required tool/command is denied permission or authorization, mark its step blocked, report the error, and end the workflow.
+Immediately stop on any tool denial, policy restriction, or insufficient permission. Never bypass it with workarounds, unauthorized alternatives, or privilege escalation. If a required command is denied, call task_status with status Error and explain the denial in reason.
 
 Completion:
-After all tasks finish or execution halts on a non-recoverable failure, ALWAYS send one final, concise summary-only message with NO tool calls. Include tasks attempted/completed and relevant observed command outputs (e.g. actual kernel string or notable directory entries), plus blocking errors. This message ends the execution loop and is the only summary surfaced to the user; never end on a tool call.
+After all tasks finish or execution halts on a non-recoverable failure, call task_status exactly once as your final action; make no other tool call in that turn.
+- Completed: ` + taskStatusCompletedText + `.
+- Failed: ` + taskStatusFailedText + `.
+- Error: ` + taskStatusErrorText + `.
+Set reason to your own concise, factual explanation; it is free-form, so do not repeat the status label. Put tasks attempted/completed, relevant observed command outputs (e.g. actual kernel string or notable directory entries), and blocking errors in the message content of the same turn; it is the final summary surfaced to the user.
 
-Note: ensure to inspect the output of each command so that the summary is accurate. For example, if a command fails DO NOT say it succeded in the summary.
-
-Secret Placeholders:
-- Treat '%{NAME}' markers as literal strings, not as placeholders to be replaced.
-- Do not modify or replace these markers in any way.
-- Any command containing '%{NAME}' markers should be passed through to the VM as-is.
-- Do not attempt to interpret or process these markers in any way, as they are used for secret management and will be resolved once you send the command.
+Secret placeholders: treat '%{NAME}' as literal text; never replace, modify, interpret, or process it. Pass any command containing it to the VM as-is.
 
 `
 
@@ -77,8 +87,27 @@ type Spec struct {
 func Specs(cfg config.Config) []Spec {
 	specs := []Spec{
 		{
+			Name:        "task_status",
+			Description: "Report the final outcome of the task and end the run. Call exactly once as your last action, after all work is finished or execution halts. You will not get a response back from this tool, so no further turn follows. Set status to one of Completed, Failed, or Error. Do not report Completed if any command failed or its output shows an error. Set reason to a free-form, concise, factual explanation of what was accomplished or why the task failed or errored.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"status": map[string]any{
+						"type":        "string",
+						"enum":        taskStatuses,
+						"description": "Final outcome: Completed if all requested tasks were accomplished, Failed if the outcome was not achieved, or Error for an execution problem.",
+					},
+					"reason": map[string]any{
+						"type":        "string",
+						"description": "Free-form, concise, factual explanation of what was accomplished or why the task failed or errored.",
+					},
+				},
+				"required": []string{"status", "reason"},
+			},
+		},
+		{
 			Name:        "vm_exec",
-			Description: "Run a command inside the configured VM and return combined stdout/stderr. Pass the full command as a single string in the `command` field (e.g. `df -h`, `apt update && apt install -y curl`, `ps aux | grep nginx`). Set `capture: true` to capture output to a file and receive a handle (output_id, path, line counts) instead of inline text; search it with output_search or read slices with head/tail on path.",
+			Description: "Run a command inside the configured VM and return combined stdout/stderr. Pass the full command as a single string in the `command` field (e.g. `df -h`, `apt update && apt install -y curl`, `ps aux | grep nginx`). A command that ran is not necessarily successful; inspect the returned status, output, and error text. Set `capture: true` to capture output to a file and receive a handle (output_id, path, line counts) instead of inline text; search it with output_search or read slices with head/tail on path.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -235,17 +264,52 @@ func callOutputSearch(ctx context.Context, store *output.Store, args map[string]
 	return buildSearchSuccessContent(res), nil
 }
 
-func buildCaptureSuccessContent(h *output.Handle) string {
-	b, _ := json.Marshal(map[string]any{
-		"status": toolStatusSuccess,
-		"data": map[string]any{"result": map[string]any{
-			"output_id": h.ID, "captured": true,
-			"total_lines": h.TotalLines, "total_bytes": h.TotalBytes,
-			"exit_code": h.ExitCode,
-			"hint":      "Search with output_search, or read lines with output_read.",
-		}},
-	})
+const (
+	TaskStatusCompleted = "Completed"
+	TaskStatusFailed    = "Failed"
+	TaskStatusError     = "Error"
+)
+
+var taskStatuses = []string{TaskStatusCompleted, TaskStatusFailed, TaskStatusError}
+
+// taskStatusOutcome is the payload the agent loop consumes when the model ends
+// the run with task_status.
+type TaskStatusOutcome struct {
+	CompletedStatus string `json:"completed_status"`
+	Reason          string `json:"reason"`
+}
+
+func parseTaskStatus(args map[string]any) (TaskStatusOutcome, error) {
+	status, _ := args["status"].(string)
+	reason, _ := args["reason"].(string)
+	reason = strings.TrimSpace(reason)
+
+	if !slices.Contains(taskStatuses, status) {
+		return TaskStatusOutcome{}, fmt.Errorf("status must be one of %s", strings.Join(taskStatuses, ", "))
+	}
+	if reason == "" {
+		return TaskStatusOutcome{}, fmt.Errorf("reason is required")
+	}
+
+	return TaskStatusOutcome{CompletedStatus: status, Reason: reason}, nil
+}
+
+func marshalToolContent(status toolStatus, data map[string]any) string {
+	b, _ := json.Marshal(map[string]any{"status": status, "data": data})
 	return string(b)
+}
+
+func marshalToolResult(result map[string]any) string {
+	return marshalToolContent(toolStatusSuccess, map[string]any{"result": result})
+}
+
+func buildCaptureSuccessContent(h *output.Handle) string {
+	return marshalToolResult(map[string]any{
+		"output_id": h.ID, "captured": true,
+		"total_lines": h.TotalLines, "total_bytes": h.TotalBytes,
+		"exit_code": h.ExitCode,
+		"hint":      "Search with output_search, or read lines with output_read.",
+	})
 }
 
 func buildSearchSuccessContent(res output.SearchResult) string {
@@ -253,14 +317,10 @@ func buildSearchSuccessContent(res output.SearchResult) string {
 	if matches == nil {
 		matches = []int{}
 	}
-	b, _ := json.Marshal(map[string]any{
-		"status": toolStatusSuccess,
-		"data": map[string]any{"result": map[string]any{
-			"output_id": res.OutputID, "total_matches": res.TotalMatches,
-			"matches": matches, "truncated": res.Truncated,
-		}},
+	return marshalToolResult(map[string]any{
+		"output_id": res.OutputID, "total_matches": res.TotalMatches,
+		"matches": matches, "truncated": res.Truncated,
 	})
-	return string(b)
 }
 
 func callOutputRead(ctx context.Context, store *output.Store, args map[string]any) (string, error) {
@@ -310,15 +370,11 @@ func buildReadSuccessContent(res output.ReadResult) string {
 	if lines == nil {
 		lines = []string{}
 	}
-	b, _ := json.Marshal(map[string]any{
-		"status": toolStatusSuccess,
-		"data": map[string]any{"result": map[string]any{
-			"output_id": res.OutputID, "offset": res.Offset, "limit": res.Limit,
-			"total_lines": res.TotalLines, "lines": lines,
-			"truncated": res.Truncated,
-		}},
+	return marshalToolResult(map[string]any{
+		"output_id": res.OutputID, "offset": res.Offset, "limit": res.Limit,
+		"total_lines": res.TotalLines, "lines": lines,
+		"truncated": res.Truncated,
 	})
-	return string(b)
 }
 
 type toolStatus string
@@ -347,28 +403,15 @@ func parseToolEnvelope(s string) (toolEnvelope, bool) {
 }
 
 func buildToolErrorContent(err error) string {
-	b, _ := json.Marshal(map[string]any{
-		"status": toolStatusFailed,
-		"data":   map[string]any{"error": err.Error()},
-	})
-	return string(b)
+	return marshalToolContent(toolStatusFailed, map[string]any{"error": err.Error()})
 }
 
 func buildToolSuccessContent(toolName, result string) string {
-	var payload map[string]any
+	key := "result"
 	if toolName == "vm_exec" {
-		payload = map[string]any{
-			"status": toolStatusSuccess,
-			"data":   map[string]any{"output": result},
-		}
-	} else {
-		payload = map[string]any{
-			"status": toolStatusSuccess,
-			"data":   map[string]any{"result": result},
-		}
+		key = "output"
 	}
-	b, _ := json.Marshal(payload)
-	return string(b)
+	return marshalToolContent(toolStatusSuccess, map[string]any{key: result})
 }
 
 func buildToolDocuments(cfg config.Config) []model.D {
@@ -423,13 +466,14 @@ func buildToolResponseMessage(tc model.ResponseToolCall, content string) model.D
 	}
 }
 
-func appendToConversation(conversation []model.D, msgs ...model.D) []model.D {
-	return append(conversation, msgs...)
-}
+const (
+	lengthNudge     = "Your previous response hit the token limit without making a tool call. Please be concise and try again and run a tool call if necessary"
+	taskStatusNudge = "You finished without calling task_status. Call the task_status tool now as your final action, with status Completed, Failed, or Error and a factual reason. Base the status on the observed command results; do not report Completed after a failed command. Do not reply with text."
+)
 
-// buildLengthNudgeMessages rebuilds the truncated assistant turn plus the user
-// nudge injected when a reply hit the length limit without a tool call.
-func buildLengthNudgeMessages(msg *model.ResponseMessage, maxContent int) []model.D {
+// buildNudgeMessages rebuilds the truncated assistant turn plus the user nudge
+// injected when a reply cannot end the run.
+func buildNudgeMessages(msg *model.ResponseMessage, maxContent int, nudge string) []model.D {
 	msgs := make([]model.D, 0, 2)
 	if msg.Reasoning != "" || msg.Content != "" {
 		nudgedAssistant := model.D{"role": "assistant"}
@@ -443,7 +487,7 @@ func buildLengthNudgeMessages(msg *model.ResponseMessage, maxContent int) []mode
 	}
 	return append(msgs, model.D{
 		"role":    "user",
-		"content": "Your previous response hit the token limit without making a tool call. Please be concise and try again and run a tool call if necessary",
+		"content": nudge,
 	})
 }
 
@@ -454,7 +498,6 @@ func buildChatRequest(conversation, toolDocs []model.D, llmConfig config.LLMConf
 		"temperature": llmConfig.Temperature,
 		"top_p":       llmConfig.TopP,
 		"tools":       toolDocs,
-		"tool_choice": llmConfig.ToolChoice,
 		// The chat path reads max_tokens (not the Responses-API max_output_tokens)
 		// and applies it to n_predict, clamped to what is left of the window.
 		"max_tokens": llmConfig.MaxOutputTokens,

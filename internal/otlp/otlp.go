@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 
@@ -149,40 +148,46 @@ func LogEvent(ctx context.Context, logger zerolog.Logger, level zerolog.Level, m
 	skipCtx := context.WithValue(ctx, skipHookKey, true)
 	// A filtered level makes WithLevel return a nil *Event, whose zerolog
 	// methods are nil-safe, so the OTel emit below still has to happen.
-	if evt := logger.WithLevel(level).Ctx(skipCtx); evt != nil {
-		evt.CallerSkipFrame(1)
-		for _, k := range orderedFieldKeys(fields) {
-			evt = appendField(evt, k, fields[k])
-		}
-		evt.Msg(msg)
-	}
+	evt := logger.WithLevel(level).Ctx(skipCtx).CallerSkipFrame(1)
 	rec := newRecord(level, msg)
-	for k, v := range fields {
-		rec.AddAttributes(fieldAttribute(k, v))
+	for _, k := range orderedFieldKeys(fields) {
+		evt = addField(evt, &rec, k, fields[k])
+	}
+	if evt != nil {
+		evt.Msg(msg)
 	}
 	runLogger.Emit(ctx, rec)
 }
 
-func fieldAttribute(k string, v any) attribute.KeyValue {
+func addField(evt *zerolog.Event, rec *otellog.Record, k string, v any) *zerolog.Event {
 	switch val := v.(type) {
 	case string:
-		return attribute.String(k, val)
+		rec.AddAttributes(attribute.String(k, val))
+		return evt.Str(k, val)
 	case int:
-		return attribute.Int(k, val)
+		rec.AddAttributes(attribute.Int(k, val))
+		return evt.Int(k, val)
 	case int64:
-		return attribute.Int64(k, val)
+		rec.AddAttributes(attribute.Int64(k, val))
+		return evt.Int64(k, val)
 	case bool:
-		return attribute.Bool(k, val)
+		rec.AddAttributes(attribute.Bool(k, val))
+		return evt.Bool(k, val)
 	case float64:
-		return attribute.Float64(k, val)
+		rec.AddAttributes(attribute.Float64(k, val))
+		return evt.Float64(k, val)
 	case json.RawMessage:
-		return attribute.String(k, string(val))
+		rec.AddAttributes(attribute.String(k, string(val)))
+		return evt.RawJSON(k, val)
 	case []byte:
-		return attribute.String(k, string(val))
+		rec.AddAttributes(attribute.String(k, string(val)))
+		return evt.Bytes(k, val)
 	case error:
-		return attribute.String(k, val.Error())
+		rec.AddAttributes(attribute.String(k, val.Error()))
+		return evt.AnErr(k, val)
 	default:
-		return attribute.String(k, fmt.Sprint(v))
+		rec.AddAttributes(attribute.String(k, fmt.Sprint(v)))
+		return evt.Interface(k, v)
 	}
 }
 
@@ -196,82 +201,48 @@ var runLogger = otel.Logger("mph")
 // adding a speculative one makes the list look authoritative when it is not.
 var payloadKeyOrder = []string{"args", "text", "out", "command_output"}
 
+var eventFieldOrder = []string{"event", "iter", "iteration", "tool", "id", "part", "finish", "finish_reason", "outcome"}
+
 // orderedFieldKeys puts the event kind and identity fields first so a log line reads who and what
 // before the payload blobs. Blob fields always sort last in payloadKeyOrder so
 // the large payload closes the line. Middle fields sort alphabetically so the
 // field order is stable across runs.
 func orderedFieldKeys(fields map[string]any) []string {
-	keys := make([]string, 0, len(fields))
-	seen := map[string]bool{}
-	for _, k := range []string{"event", "iter", "iteration", "tool", "id", "part", "finish", "finish_reason", "outcome"} {
-		if _, ok := fields[k]; ok {
-			keys = append(keys, k)
-			seen[k] = true
-		}
-	}
-	var middle []string
+	keys := appendPresent(make([]string, 0, len(fields)), fields, eventFieldOrder)
+	middle := make([]string, 0, len(fields)-len(keys))
 	for k := range fields {
-		if seen[k] || slices.Contains(payloadKeyOrder, k) {
+		if slices.Contains(eventFieldOrder, k) || slices.Contains(payloadKeyOrder, k) {
 			continue
 		}
 		middle = append(middle, k)
 	}
-	sort.Strings(middle)
+	slices.Sort(middle)
 	keys = append(keys, middle...)
-	for _, k := range payloadKeyOrder {
-		if _, ok := fields[k]; ok && !seen[k] {
-			keys = append(keys, k)
-			seen[k] = true
-		}
-	}
-	for k := range fields {
-		if !seen[k] {
+	return appendPresent(keys, fields, payloadKeyOrder)
+}
+
+func appendPresent(keys []string, fields map[string]any, order []string) []string {
+	for _, k := range order {
+		if _, ok := fields[k]; ok {
 			keys = append(keys, k)
 		}
 	}
 	return keys
 }
 
-func appendField(evt *zerolog.Event, k string, v any) *zerolog.Event {
-	switch val := v.(type) {
-	case string:
-		return evt.Str(k, val)
-	case int:
-		return evt.Int(k, val)
-	case int64:
-		return evt.Int64(k, val)
-	case bool:
-		return evt.Bool(k, val)
-	case float64:
-		return evt.Float64(k, val)
-	case json.RawMessage:
-		return evt.RawJSON(k, val)
-	case []byte:
-		return evt.Bytes(k, val)
-	case error:
-		return evt.AnErr(k, val)
-	default:
-		return evt.Interface(k, v)
-	}
+var severityByLevel = map[zerolog.Level]otellog.Severity{
+	zerolog.TraceLevel: otellog.SeverityTrace,
+	zerolog.DebugLevel: otellog.SeverityDebug,
+	zerolog.InfoLevel:  otellog.SeverityInfo,
+	zerolog.WarnLevel:  otellog.SeverityWarn,
+	zerolog.ErrorLevel: otellog.SeverityError,
+	zerolog.FatalLevel: otellog.SeverityFatal,
+	zerolog.PanicLevel: otellog.SeverityFatal2,
 }
 
 func convertLevel(level zerolog.Level) otellog.Severity {
-	switch level {
-	case zerolog.TraceLevel:
-		return otellog.SeverityTrace
-	case zerolog.DebugLevel:
-		return otellog.SeverityDebug
-	case zerolog.InfoLevel:
-		return otellog.SeverityInfo
-	case zerolog.WarnLevel:
-		return otellog.SeverityWarn
-	case zerolog.ErrorLevel:
-		return otellog.SeverityError
-	case zerolog.FatalLevel:
-		return otellog.SeverityFatal
-	case zerolog.PanicLevel:
-		return otellog.SeverityFatal2
-	default:
-		return otellog.SeverityUndefined
+	if severity, ok := severityByLevel[level]; ok {
+		return severity
 	}
+	return otellog.SeverityUndefined
 }

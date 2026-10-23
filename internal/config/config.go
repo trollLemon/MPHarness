@@ -226,7 +226,6 @@ type LLMConfig struct {
 	Temperature     float64 `yaml:"temperature"`
 	TopP            float64 `yaml:"top_p"`
 	TopK            int     `yaml:"top_k"`
-	ToolChoice      string  `yaml:"tool_choice"`
 	ContextWindow   int     `yaml:"context_window"`
 	MaxOutputTokens int     `yaml:"max_output_tokens"`
 }
@@ -234,9 +233,6 @@ type LLMConfig struct {
 // WithDefaults fills the LLM settings that have a fixed fallback. It is
 // idempotent, so each layer can apply it without duplicating the literals.
 func (l LLMConfig) WithDefaults() LLMConfig {
-	if l.ToolChoice == "" {
-		l.ToolChoice = "auto"
-	}
 	if l.MaxOutputTokens == 0 {
 		l.MaxOutputTokens = DefaultLLMMaxOutputTokens
 	}
@@ -707,41 +703,38 @@ func transformFlag(key, value string) (string, any) {
 	return "otel.enabled", enabled
 }
 
-func applyDefaults(k *koanf.Koanf, cfg *Config) {
-	if cfg.VM.Name == "" {
-		cfg.VM.Name = "mph-vm"
+func defaultIfZero[T comparable](value *T, def T) {
+	var zero T
+	if *value == zero {
+		*value = def
 	}
+}
+
+func defaultIfNotPositive(value *int, def int) {
+	if *value <= 0 {
+		*value = def
+	}
+}
+
+func applyDefaults(k *koanf.Koanf, cfg *Config) {
+	defaultIfZero(&cfg.VM.Name, "mph-vm")
 
 	// Otel endpoint and service name are defaulted later, in
 	// mph.resolveOtelConfig.
 
 	cfg.LLM = cfg.LLM.WithDefaults()
-	if cfg.Agent.MaxIterations == 0 {
-		cfg.Agent.MaxIterations = DefaultMaxIterations
-	}
-	if time.Duration(cfg.Agent.ChatTimeout) == 0 {
-		cfg.Agent.ChatTimeout = Duration(DefaultChatTimeout)
-	}
-	if time.Duration(cfg.Agent.TotalTimeout) == 0 {
-		cfg.Agent.TotalTimeout = Duration(DefaultTotalTimeout)
-	}
+	defaultIfZero(&cfg.Agent.MaxIterations, DefaultMaxIterations)
+	defaultIfZero(&cfg.Agent.ChatTimeout, Duration(DefaultChatTimeout))
+	defaultIfZero(&cfg.Agent.TotalTimeout, Duration(DefaultTotalTimeout))
 	// Agent.MaxOutputBytes is deliberately left at 0 when unset. The agent reads
 	// that as "derive a cap from the live context window"; defaulting it here
 	// would make an explicit user value indistinguishable from the absence of
 	// one, and the window is not known until the model has loaded.
 
-	if cfg.Truncation.CommandOutput <= 0 {
-		cfg.Truncation.CommandOutput = DefaultCommandOutputBytes
-	}
-	if cfg.Truncation.LogContent <= 0 {
-		cfg.Truncation.LogContent = DefaultLogContentBytes
-	}
-	if cfg.Truncation.ToolResult <= 0 {
-		cfg.Truncation.ToolResult = DefaultToolResultBytes
-	}
-	if cfg.Truncation.Nudge <= 0 {
-		cfg.Truncation.Nudge = DefaultNudgeBytes
-	}
+	defaultIfNotPositive(&cfg.Truncation.CommandOutput, DefaultCommandOutputBytes)
+	defaultIfNotPositive(&cfg.Truncation.LogContent, DefaultLogContentBytes)
+	defaultIfNotPositive(&cfg.Truncation.ToolResult, DefaultToolResultBytes)
+	defaultIfNotPositive(&cfg.Truncation.Nudge, DefaultNudgeBytes)
 
 	if !k.Exists("output") {
 		cfg.Output = OutputConfig{
@@ -755,18 +748,16 @@ func applyDefaults(k *koanf.Koanf, cfg *Config) {
 		if !k.Exists("output.enabled") {
 			cfg.Output.Enabled = true
 		}
-		if cfg.Output.Mode == "" {
-			cfg.Output.Mode = "auto"
+		defaultIfZero(&cfg.Output.Mode, "auto")
+		if !k.Exists("output.max_command_size") {
+			defaultIfZero(&cfg.Output.MaxCommandSize, DefaultOutputMaxCommandBytes)
 		}
-		if cfg.Output.MaxCommandSize == 0 && !k.Exists("output.max_command_size") {
-			cfg.Output.MaxCommandSize = DefaultOutputMaxCommandBytes
-		}
-		if cfg.Output.MaxTotalSize == 0 && !k.Exists("output.max_total_size") {
-			cfg.Output.MaxTotalSize = DefaultOutputMaxTotalBytes
+		if !k.Exists("output.max_total_size") {
+			defaultIfZero(&cfg.Output.MaxTotalSize, DefaultOutputMaxTotalBytes)
 		}
 		// An explicit 0 disables the cap, so only default an absent key.
-		if cfg.Output.SearchMaxMatches == 0 && !k.Exists("output.search_max_matches") {
-			cfg.Output.SearchMaxMatches = DefaultOutputSearchMatches
+		if !k.Exists("output.search_max_matches") {
+			defaultIfZero(&cfg.Output.SearchMaxMatches, DefaultOutputSearchMatches)
 		}
 	}
 
@@ -780,14 +771,8 @@ func applyDefaults(k *koanf.Koanf, cfg *Config) {
 		if !k.Exists("compaction.enabled") {
 			cfg.Compaction.Enabled = true
 		}
-		if cfg.Compaction.Threshold == 0 {
-			cfg.Compaction.Threshold = DefaultCompactionThreshold
-		}
-		if cfg.Compaction.MaxSummaryTokens == 0 {
-			cfg.Compaction.MaxSummaryTokens = DefaultCompactionMaxTokens
-		}
-		if cfg.Compaction.MaxAttempts == 0 {
-			cfg.Compaction.MaxAttempts = DefaultCompactionMaxAttempts
-		}
+		defaultIfZero(&cfg.Compaction.Threshold, DefaultCompactionThreshold)
+		defaultIfZero(&cfg.Compaction.MaxSummaryTokens, DefaultCompactionMaxTokens)
+		defaultIfZero(&cfg.Compaction.MaxAttempts, DefaultCompactionMaxAttempts)
 	}
 }

@@ -15,22 +15,29 @@ import (
 )
 
 func TestClassifyOutcome(t *testing.T) {
+	status := func(s string) TaskStatusOutcome {
+		return TaskStatusOutcome{CompletedStatus: s, Reason: "test"}
+	}
 	tests := []struct {
 		name    string
 		err     error
 		exhaust bool
+		status  TaskStatusOutcome
 		want    runOutcome
 	}{
-		{"clean finish", nil, false, outcomeOK},
-		{"budget exhausted", nil, true, outcomeBudgetExhausted},
-		{"error", errors.New("boom"), false, outcomeError},
-		{"timeout wins over budget", context.DeadlineExceeded, true, outcomeTimeout},
-		{"deadline error", context.DeadlineExceeded, false, outcomeTimeout},
+		{"completed status", nil, false, status(TaskStatusCompleted), outcomeOK},
+		{"failed status", nil, false, status(TaskStatusFailed), outcomeFailed},
+		{"error status", nil, false, status(TaskStatusError), outcomeError},
+		{"missing status", nil, false, TaskStatusOutcome{}, outcomeError},
+		{"budget exhausted", nil, true, TaskStatusOutcome{}, outcomeBudgetExhausted},
+		{"error", errors.New("boom"), false, TaskStatusOutcome{}, outcomeError},
+		{"timeout wins over budget", context.DeadlineExceeded, true, TaskStatusOutcome{}, outcomeTimeout},
+		{"deadline error", context.DeadlineExceeded, false, TaskStatusOutcome{}, outcomeTimeout},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := classifyOutcome(context.Background(), tt.err, tt.exhaust); got != tt.want {
+			if got := classifyOutcome(context.Background(), tt.err, tt.exhaust, tt.status); got != tt.want {
 				t.Errorf("classifyOutcome() = %q, want %q", got, tt.want)
 			}
 		})
@@ -45,6 +52,7 @@ func TestLogRunSummaryEmitsEveryField(t *testing.T) {
 		log:                zerolog.New(&buf),
 		krn:                &mockKronk{contextWidth: 8192},
 		compactionsApplied: 3,
+		finalRunStatus:     TaskStatusOutcome{CompletedStatus: TaskStatusFailed, Reason: "kernel version mismatch"},
 		totals: runTotals{
 			Iterations:       12,
 			PromptTokens:     40000,
@@ -60,6 +68,12 @@ func TestLogRunSummaryEmitsEveryField(t *testing.T) {
 	summary := onlyEvent(t, decodeEvents(t, &buf), eventRunSummary)
 	if summary["outcome"] != string(outcomeOK) {
 		t.Errorf("outcome = %v, want %q", summary["outcome"], outcomeOK)
+	}
+	if summary["status"] != TaskStatusFailed {
+		t.Errorf("status = %v, want %q", summary["status"], TaskStatusFailed)
+	}
+	if summary["reason"] != "kernel version mismatch" {
+		t.Errorf("reason = %v, want %q", summary["reason"], "kernel version mismatch")
 	}
 	for key, want := range map[string]float64{
 		"iterations": 12, "compactions": 3, "dur_ms": 90000, "avg_iter_ms": 7500,
@@ -101,7 +115,7 @@ func TestExecuteAccumulatesRunTotals(t *testing.T) {
 			name: "single turn, no tools",
 			responses: []model.ChatResponse{chatResp("done", "", model.FinishReasonStop, nil,
 				&model.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120})},
-			wantIterations: 1,
+			wantIterations: 2,
 			wantPrompt:     100,
 		},
 		{
@@ -110,7 +124,7 @@ func TestExecuteAccumulatesRunTotals(t *testing.T) {
 				chatResp("", "", model.FinishReasonTool, toolCall, &model.Usage{PromptTokens: 100, TotalTokens: 110}),
 				chatResp("done", "", model.FinishReasonStop, nil, &model.Usage{PromptTokens: 150, TotalTokens: 160}),
 			},
-			wantIterations: 2,
+			wantIterations: 3,
 			wantPrompt:     250,
 			wantToolCalls:  1,
 		},
@@ -125,7 +139,7 @@ func TestExecuteAccumulatesRunTotals(t *testing.T) {
 				LLM: defaultLLMConfig(), RunID: "01J9",
 			})
 			conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
-			if err := a.Execute(t.Context(), conf, newTestClient(t)); err != nil {
+			if _, err := a.Execute(t.Context(), conf, newTestClient(t)); err != nil {
 				t.Fatalf("Execute: %v", err)
 			}
 
@@ -159,7 +173,7 @@ func TestExecuteAccumulatesReclaimedTokens(t *testing.T) {
 		Prompt:     "task",
 		Compaction: enabledCompaction(),
 	}
-	if err := a.Execute(t.Context(), conf, newTestClient(t)); err != nil {
+	if _, err := a.Execute(t.Context(), conf, newTestClient(t)); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 
@@ -191,7 +205,7 @@ func TestExecuteCountsAbortedIteration(t *testing.T) {
 		LLM: defaultLLMConfig(), RunID: "01J9",
 	})
 	conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
-	if err := a.Execute(t.Context(), conf, newTestClient(t)); err == nil {
+	if _, err := a.Execute(t.Context(), conf, newTestClient(t)); err == nil {
 		t.Fatal("Execute succeeded against a failing backend; test setup is wrong")
 	}
 
