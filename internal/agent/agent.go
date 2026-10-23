@@ -178,7 +178,7 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *lxd.Client
 	start := time.Now()
 	defer func() {
 		exhausted := a.iteration >= a.maxIterations && !a.done
-		a.logRunSummary(ctx, classifyOutcome(ctx, err, exhausted), time.Since(start))
+		a.logRunSummary(ctx, classifyOutcome(ctx, err, exhausted, a.finalRunStatus), time.Since(start))
 	}()
 
 	ctx, cancel := context.WithTimeout(ctx, a.totalTimeout)
@@ -572,6 +572,10 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 		}
 
 		toolResponses = append(toolResponses, buildToolResponseMessage(tc, content))
+
+		if a.done {
+			break
+		}
 	}
 
 	return toolResponses, commandOutputs

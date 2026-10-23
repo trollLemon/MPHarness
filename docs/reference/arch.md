@@ -44,7 +44,7 @@ Tool dispatch (`Call`, plus `callExec`, `callOutputSearch`, `callOutputRead`; `v
 
 ## Runtime flow
 
-1. **Config load.** `config.LoadFileWithSources` merges YAML, environment, and explicit flags via koanf, then applies defaults (VM name `mph-vm`, `vm.image` `ubuntu:24.04`, `tool_choice: auto`, `max_iterations: 10`, `chat_timeout: 300s`, `total_timeout: 30m`) and validates required fields (`vm.disk`, `vm.ram`, `vm.cpu > 0`, `model`, `prompt`). `vm.name` must follow DNS hostname rules, so underscores are rejected. `content_dir` when set must be an existing local directory. OTel `enabled` defaults to `false`; `otel.endpoint`/`otel.service_name` are filled in later by `mph.resolveOtelConfig` (`localhost:4317`/`mph`).
+1. **Config load.** `config.LoadFileWithSources` merges YAML, environment, and explicit flags via koanf, then applies defaults (VM name `mph-vm`, `vm.image` `ubuntu:24.04`, `max_iterations: 10`, `chat_timeout: 300s`, `total_timeout: 30m`) and validates required fields (`vm.disk`, `vm.ram`, `vm.cpu > 0`, `model`, `prompt`). `vm.name` must follow DNS hostname rules, so underscores are rejected. `content_dir` when set must be an existing local directory. OTel `enabled` defaults to `false`; `otel.endpoint`/`otel.service_name` are filled in later by `mph.resolveOtelConfig` (`localhost:4317`/`mph`).
 
 2. **OTel setup (if enabled).** `mph` calls `otlp.Setup` with the resolved config (OTLP/gRPC log exporter + `LoggerProvider` + `resource`) and installs the zerolog `Hook` on `log.Logger` so every later `log` line is also exported.
 
@@ -82,7 +82,7 @@ Tool dispatch (`Call`, plus `callExec`, `callOutputSearch`, `callOutputRead`; `v
 
 ```mermaid
 flowchart TD
-    A[Model] -->|tool_choice| B[Agent]
+    A[Model] -->|tool call| B[Agent]
     B -->|"vm_exec: { command: apt update }"| C[Call]
     C --> D[validation.ValidateShellCommand]
     D -->|No| E[FAILED JSON to model]

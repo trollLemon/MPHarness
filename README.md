@@ -96,7 +96,6 @@ llm:                      # optional sampling params
   temperature: 0.2
   top_p: 0.95
   top_k: 40
-  tool_choice: auto       # auto|required|none
   context_window: 0       # 0 = auto-tune
 
 agent:                    # optional loop bounds
@@ -130,6 +129,14 @@ mph [flags] <config.yaml>
 ```
 
 Note: `-i` and `-k` have no long forms.
+
+## Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | The agent reported `Completed`. |
+| `1` | The agent reported `Failed`, the run ended without a `task_status` outcome, or `mph` itself failed. |
+| `2` | The agent reported `Error`: an execution problem prevented completing or evaluating the task. |
 
 ## Observability
 

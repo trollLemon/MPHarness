@@ -102,15 +102,9 @@ The loop normally ends when the model calls `task_status`; the harness reads the
 
 **Length-limit recovery.** If the model's reply exhausts its token budget without a tool call (finish_reason = "length"), the harness appends a nudge ("Your previous response hit the token limit without making a tool call. Please be concise and try again and run a tool call if necessary") and retries rather than dying.
 
-## Forcing and forbidding tool calls
+## Keeping the loop stable
 
-The `llm.tool_choice` setting controls nudging:
-
-- `auto`: the model decides on its own.
-- `required`: the model must emit a tool call every turn, so it cannot "finish" prematurely; useful when the model keeps talking instead of acting, or for one-off commands.
-- `none`: tool calling is disabled; the model can only reply with text.
-
-Three details keep the loop stable:
+Two details keep the loop stable:
 
 - **Status nudge.** If the model finishes with text but no tool call, the harness appends the summary plus a user nudge that tells it to call `task_status`, then continues for one more turn.
 - **Length-limit recovery.** If the model's reply exhausts its token budget without a tool call, the harness appends a nudge ("be concise and run a tool call") and retries rather than dying.

@@ -117,7 +117,6 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "    temperature: 0.2\n")
 	_, _ = fmt.Fprintf(w, "    top_p: 0.95\n")
 	_, _ = fmt.Fprintf(w, "    top_k: 40\n")
-	_, _ = fmt.Fprintf(w, "    tool_choice: auto   # auto|required|none\n")
 	_, _ = fmt.Fprintf(w, "    max_output_tokens: %d\n", config.DefaultLLMMaxOutputTokens)
 	_, _ = fmt.Fprintf(w, "    context_window: 8192 # 0 = auto-tune\n")
 	_, _ = fmt.Fprintf(w, "  agent:                # optional, agent loop params\n")
@@ -262,7 +261,6 @@ func run() int {
 		Float64("temp", cfg.LLM.Temperature).
 		Float64("top_p", cfg.LLM.TopP).
 		Int("top_k", cfg.LLM.TopK).
-		Str("tools", cfg.LLM.ToolChoice).
 		Int("ctx_win", cfg.LLM.ContextWindow).
 		Int("iters", cfg.Agent.MaxIterations).
 		Str("chat_to", time.Duration(cfg.Agent.ChatTimeout).String()).

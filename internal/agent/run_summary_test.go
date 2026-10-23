@@ -15,22 +15,29 @@ import (
 )
 
 func TestClassifyOutcome(t *testing.T) {
+	status := func(s string) TaskStatusOutcome {
+		return TaskStatusOutcome{CompletedStatus: s, Reason: "test"}
+	}
 	tests := []struct {
 		name    string
 		err     error
 		exhaust bool
+		status  TaskStatusOutcome
 		want    runOutcome
 	}{
-		{"clean finish", nil, false, outcomeOK},
-		{"budget exhausted", nil, true, outcomeBudgetExhausted},
-		{"error", errors.New("boom"), false, outcomeError},
-		{"timeout wins over budget", context.DeadlineExceeded, true, outcomeTimeout},
-		{"deadline error", context.DeadlineExceeded, false, outcomeTimeout},
+		{"completed status", nil, false, status(TaskStatusCompleted), outcomeOK},
+		{"failed status", nil, false, status(TaskStatusFailed), outcomeFailed},
+		{"error status", nil, false, status(TaskStatusError), outcomeError},
+		{"missing status", nil, false, TaskStatusOutcome{}, outcomeError},
+		{"budget exhausted", nil, true, TaskStatusOutcome{}, outcomeBudgetExhausted},
+		{"error", errors.New("boom"), false, TaskStatusOutcome{}, outcomeError},
+		{"timeout wins over budget", context.DeadlineExceeded, true, TaskStatusOutcome{}, outcomeTimeout},
+		{"deadline error", context.DeadlineExceeded, false, TaskStatusOutcome{}, outcomeTimeout},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := classifyOutcome(context.Background(), tt.err, tt.exhaust); got != tt.want {
+			if got := classifyOutcome(context.Background(), tt.err, tt.exhaust, tt.status); got != tt.want {
 				t.Errorf("classifyOutcome() = %q, want %q", got, tt.want)
 			}
 		})
@@ -45,6 +52,7 @@ func TestLogRunSummaryEmitsEveryField(t *testing.T) {
 		log:                zerolog.New(&buf),
 		krn:                &mockKronk{contextWidth: 8192},
 		compactionsApplied: 3,
+		finalRunStatus:     TaskStatusOutcome{CompletedStatus: TaskStatusFailed, Reason: "kernel version mismatch"},
 		totals: runTotals{
 			Iterations:       12,
 			PromptTokens:     40000,
@@ -60,6 +68,12 @@ func TestLogRunSummaryEmitsEveryField(t *testing.T) {
 	summary := onlyEvent(t, decodeEvents(t, &buf), eventRunSummary)
 	if summary["outcome"] != string(outcomeOK) {
 		t.Errorf("outcome = %v, want %q", summary["outcome"], outcomeOK)
+	}
+	if summary["status"] != TaskStatusFailed {
+		t.Errorf("status = %v, want %q", summary["status"], TaskStatusFailed)
+	}
+	if summary["reason"] != "kernel version mismatch" {
+		t.Errorf("reason = %v, want %q", summary["reason"], "kernel version mismatch")
 	}
 	for key, want := range map[string]float64{
 		"iterations": 12, "compactions": 3, "dur_ms": 90000, "avg_iter_ms": 7500,

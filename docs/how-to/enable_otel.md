@@ -107,7 +107,9 @@ Every run panel is a LogQL query over structured log events. Each dashboard-faci
 | `context_overflow` | `iter`, `outcome`, `replaced`, `reclaimed_bytes`, `prompt_tokens`, `ctx_window`, `error` |
 | `context_compaction` | `iter`, `outcome`, `tok_before`, `tok_after`, `reclaimed`, `thr`, `summary`, `handles`, `compacted`, `try`, `dur_ms`, and `error` on failure |
 | `context_compaction_applied` | `iter`, `compacted` (the rewritten conversation) |
-| `run_summary` | `outcome`, `iterations`, `compactions`, `dur_ms`, `avg_iter_ms`, `prompt_tokens`, `completion_tokens`, `reclaimed_tokens`, `tool_calls`, `tool_failures`, `ctx_window` |
+| `run_summary` | `outcome`, `status`, `reason`, `iterations`, `compactions`, `dur_ms`, `avg_iter_ms`, `prompt_tokens`, `completion_tokens`, `reclaimed_tokens`, `tool_calls`, `tool_failures`, `ctx_window` |
+
+`outcome` is one of `ok`, `failed`, `error`, `budget_exhausted`, or `timeout`. `status` and `reason` are the agent's terminal `task_status` values.
 
 For example, prompt tokens per iteration of one run:
 

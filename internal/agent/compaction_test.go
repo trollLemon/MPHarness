@@ -439,7 +439,7 @@ func TestCompactionAppliesBeforeWindowIsExceeded(t *testing.T) {
 			"1. Run uname -a and note the kernel release field.\n" +
 			"2. Write that release string into /tmp/steps.txt.\n" +
 			"3. Append the output of hostname as a second line.\n",
-		LLM: config.LLMConfig{Temperature: 0.0, ToolChoice: "auto"},
+		LLM: config.LLMConfig{Temperature: 0.0},
 		Output: config.OutputConfig{
 			Enabled: true, Mode: "auto", InlineMaxSize: 0,
 			MaxCommandSize: 64 << 20, MaxTotalSize: 512 << 20, SearchMaxMatches: 200,

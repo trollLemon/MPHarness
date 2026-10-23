@@ -498,7 +498,6 @@ func buildChatRequest(conversation, toolDocs []model.D, llmConfig config.LLMConf
 		"temperature": llmConfig.Temperature,
 		"top_p":       llmConfig.TopP,
 		"tools":       toolDocs,
-		"tool_choice": llmConfig.ToolChoice,
 		// The chat path reads max_tokens (not the Responses-API max_output_tokens)
 		// and applies it to n_predict, clamped to what is left of the window.
 		"max_tokens": llmConfig.MaxOutputTokens,

@@ -13,7 +13,6 @@ llm:
   temperature: 0.0
   top_p: 0.95
   top_k: 40
-  tool_choice: auto
 agent:
   max_iterations: 10
   chat_timeout: 300s
