@@ -59,22 +59,22 @@ type Options struct {
 	RunID          string
 }
 
-func Start(ctx context.Context, agt *agent.Agent, client *lxd.Client, cfg config.Config, opts Options) error {
+func Start(ctx context.Context, agt *agent.Agent, client *lxd.Client, cfg config.Config, opts Options) (*agent.TaskStatusOutcome, error) {
 	_, infoErr := client.Info(ctx, cfg.VM.Name)
 	existing := infoErr == nil
 	switch {
 	case errors.Is(infoErr, lxd.ErrInstanceNotFound):
 		if err := client.Launch(ctx, cfg.VM); err != nil {
-			return err
+			return nil, err
 		}
 
 		if strings.TrimSpace(cfg.VM.Kernel) != "" {
 			if err := client.InstallKernel(ctx, cfg.VM.Name, cfg.VM.Kernel); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	case infoErr != nil:
-		return fmt.Errorf("failed to check if VM exists: %w", infoErr)
+		return nil, fmt.Errorf("failed to check if VM exists: %w", infoErr)
 	case !opts.IgnoreExisting:
 		reader := bufio.NewReader(os.Stdin)
 		for {
@@ -87,25 +87,25 @@ func Start(ctx context.Context, agt *agent.Agent, client *lxd.Client, cfg config
 				continue
 			}
 
-			return err
+			return nil, err
 		}
 	}
 
 	if existing {
 		if err := client.EnsureRunning(ctx, cfg.VM.Name); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	if rid := strings.TrimSpace(opts.RunID); rid != "" {
 		if _, err := client.Exec(ctx, cfg.VM.Name, outputRunDirCommand(rid)); err != nil {
-			return fmt.Errorf("output run dir setup failed: %w", err)
+			return nil, fmt.Errorf("output run dir setup failed: %w", err)
 		}
 	}
 
 	if strings.TrimSpace(cfg.ContentDir) != "" {
 		if findings, scanErr := validation.ScanContentDir(cfg.ContentDir); scanErr != nil {
-			return fmt.Errorf("content_dir scan failed: %w", scanErr)
+			return nil, fmt.Errorf("content_dir scan failed: %w", scanErr)
 		} else if len(findings) > 0 {
 			for _, f := range findings {
 				log.Warn().Str("file", f.File).Str("pattern", f.Pattern).Str("snippet", f.Snippet).Msg("content_dir prompt injection scan: suspicious pattern detected")
@@ -113,22 +113,23 @@ func Start(ctx context.Context, agt *agent.Agent, client *lxd.Client, cfg config
 		}
 
 		if _, err := client.Exec(ctx, cfg.VM.Name, fmt.Sprintf("mkdir -p %q", config.VMContentDir)); err != nil {
-			return err
+			return nil, err
 		}
 		if err := client.Transfer(ctx, cfg.VM.Name, cfg.ContentDir, config.VMContentDir); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	if err := agt.Execute(ctx, cfg, client); err != nil {
-		return err
+	outcome, err := agt.Execute(ctx, cfg, client)
+	if err != nil {
+		return nil, err
 	}
 
 	if !opts.Keep {
 		if err := client.Delete(ctx, cfg.VM.Name, true); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	return nil
+	return outcome, nil
 }
