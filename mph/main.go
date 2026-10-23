@@ -60,10 +60,35 @@ func Version() string {
 	return version
 }
 
+const (
+	exitSuccess = 0
+	exitFailure = 1
+	exitError   = 2
+)
+
 func main() {
-	if err := run(); err != nil {
-		log.Error().Err(err).Msg("mph failed")
-		os.Exit(1)
+	os.Exit(run())
+}
+
+func fail(err error) int {
+	log.Error().Err(err).Msg("mph failed")
+	return exitFailure
+}
+
+func exitCode(outcome *agent.TaskStatusOutcome) int {
+	if outcome == nil {
+		return exitFailure
+	}
+
+	switch outcome.CompletedStatus {
+	case agent.TaskStatusCompleted:
+		return exitSuccess
+	case agent.TaskStatusFailed:
+		return exitFailure
+	case agent.TaskStatusError:
+		return exitError
+	default:
+		return exitFailure
 	}
 }
 
@@ -132,7 +157,7 @@ func printUsage(w io.Writer) {
 
 }
 
-func run() error {
+func run() int {
 	var (
 		configPath     string
 		showVersion    bool
@@ -161,14 +186,14 @@ func run() error {
 
 	if needHelp {
 		printUsage(os.Stdout)
-		return nil
+		return exitSuccess
 	}
 
 	setupLogger(verbose, pretty)
 
 	if showVersion {
 		fmt.Printf("mph %s\n", Version())
-		return nil
+		return exitSuccess
 	}
 
 	if configPath == "" && flag.NArg() > 0 {
@@ -176,7 +201,7 @@ func run() error {
 	}
 	if configPath == "" {
 		printUsage(os.Stderr)
-		return errors.New("config file required")
+		return fail(errors.New("config file required"))
 	}
 
 	cfg, err := config.LoadFileWithSources(configPath, config.Sources{
@@ -184,12 +209,12 @@ func run() error {
 		Flags:   flag.CommandLine,
 	})
 	if err != nil {
-		return err
+		return fail(err)
 	}
 
 	resolver, err := secrets.New(cfg.Secrets)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 
 	// Fail fast when the prompt names a secret the configured source cannot
@@ -197,7 +222,7 @@ func run() error {
 	// than part-way through the run. The prompt itself is never substituted:
 	// that would put the secret into the model's context.
 	if err := secrets.Validate(cfg.Prompt, resolver); err != nil {
-		return err
+		return fail(err)
 	}
 
 	ctx := context.Background()
@@ -208,7 +233,7 @@ func run() error {
 	if otelCfg.Enabled {
 		shutdown, err := otlp.Setup(ctx, otelCfg)
 		if err != nil {
-			return fmt.Errorf("otel setup: %w", err)
+			return fail(fmt.Errorf("otel setup: %w", err))
 		}
 		defer func() {
 			shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -225,7 +250,7 @@ func run() error {
 
 	client, err := lxd.New(log.Logger, resolver)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 
 	log.Info().
@@ -252,12 +277,12 @@ func run() error {
 
 	mp, err := agent.InitializeModelFiles(ctx, log.Logger, cfg.Model)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 
 	krn, err := agent.NewKronk(mp, log.Logger, cfg.LLM.ContextWindow)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	defer func() {
 		if err := krn.Unload(ctx); err != nil {
@@ -273,11 +298,20 @@ func run() error {
 		RunID:         ident.ID,
 	})
 
-	return harness.Start(ctx, agt, client, cfg, harness.Options{
+	outcome, err := harness.Start(ctx, agt, client, cfg, harness.Options{
 		IgnoreExisting: ignoreExisting,
 		Keep:           keep,
 		RunID:          ident.ID,
 	})
+	if err != nil {
+		return fail(err)
+	}
+
+	if outcome != nil {
+		log.Info().Str("status", outcome.CompletedStatus).Str("reason", outcome.Reason).Msg("run finished")
+	}
+
+	return exitCode(outcome)
 }
 
 func setupLogger(verbose, pretty bool) {
