@@ -117,8 +117,8 @@ func TestExecuteCompaction(t *testing.T) {
 			},
 			maxIter: 3,
 			check: func(t *testing.T, mock *mockKronk, _ string) {
-				if mock.calls != 1 {
-					t.Fatalf("disabled compaction must not add chat calls, got %d", mock.calls)
+				if got := countHandovers(mock); got != 0 {
+					t.Fatalf("disabled compaction must not add handover calls, got %d", got)
 				}
 			},
 		},

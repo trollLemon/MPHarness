@@ -101,7 +101,7 @@ func TestExecuteAccumulatesRunTotals(t *testing.T) {
 			name: "single turn, no tools",
 			responses: []model.ChatResponse{chatResp("done", "", model.FinishReasonStop, nil,
 				&model.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120})},
-			wantIterations: 1,
+			wantIterations: 2,
 			wantPrompt:     100,
 		},
 		{
@@ -110,7 +110,7 @@ func TestExecuteAccumulatesRunTotals(t *testing.T) {
 				chatResp("", "", model.FinishReasonTool, toolCall, &model.Usage{PromptTokens: 100, TotalTokens: 110}),
 				chatResp("done", "", model.FinishReasonStop, nil, &model.Usage{PromptTokens: 150, TotalTokens: 160}),
 			},
-			wantIterations: 2,
+			wantIterations: 3,
 			wantPrompt:     250,
 			wantToolCalls:  1,
 		},

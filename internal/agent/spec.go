@@ -15,6 +15,12 @@ import (
 	"github.com/trollLemon/MPHarness/internal/validation"
 )
 
+const (
+	taskStatusCompletedText = "all requested tasks were accomplished"
+	taskStatusFailedText    = "the task was understood but the requested outcome was not achieved"
+	taskStatusErrorText     = "an execution problem prevented completing or evaluating the task"
+)
+
 const systemPrompt = `
 You are an autonomous execution agent running commands in an existing VM. Goals and environment variables are preset; history is your prior execution log, not user messages, so check it for completed steps before acting. No VM-existence check is needed.
 
@@ -36,10 +42,10 @@ Immediately stop on any tool denial, policy restriction, or insufficient permiss
 
 Completion:
 After all tasks finish or execution halts on a non-recoverable failure, call task_status exactly once as your final action; make no other tool call in that turn.
-- Completed: the requested tasks were accomplished.
-- Failed: the task was understood but the requested outcome could not be achieved, for example the CLI does not provide the expected behavior or the observed result does not meet the requirement.
-- Error: an execution problem (tool failure, denial, timeout, or unexpected error) prevented completing or evaluating the task.
-Set reason to a concise, factual explanation. Put tasks attempted/completed, relevant observed command outputs (e.g. actual kernel string or notable directory entries), and blocking errors in the message content of the same turn; it is the final summary surfaced to the user.
+- Completed: ` + taskStatusCompletedText + `.
+- Failed: ` + taskStatusFailedText + `.
+- Error: ` + taskStatusErrorText + `.
+Set reason to your own concise, factual explanation; it is free-form, so do not repeat the status label. Put tasks attempted/completed, relevant observed command outputs (e.g. actual kernel string or notable directory entries), and blocking errors in the message content of the same turn; it is the final summary surfaced to the user.
 
 Secret placeholders: treat '%{NAME}' as literal text; never replace, modify, interpret, or process it. Pass any command containing it to the VM as-is.
 
@@ -75,18 +81,18 @@ func Specs(cfg config.Config) []Spec {
 	specs := []Spec{
 		{
 			Name:        "task_status",
-			Description: "Report the final outcome of the task and end the run. Call exactly once as your last action, after all work is finished or execution halts. You will not get a response back from this tool, so no further turn follows. Completed: the requested tasks were accomplished. Failed: the task was understood but the requested outcome could not be achieved, for example the CLI does not provide the expected behavior. Error: an execution problem (tool failure, denial, timeout, or unexpected error) prevented completing or evaluating the task. Always include a concise, factual reason.",
+			Description: "Report the final outcome of the task and end the run. Call exactly once as your last action, after all work is finished or execution halts. You will not get a response back from this tool, so no further turn follows. Set status to one of Completed, Failed, or Error. Set reason to a free-form, concise, factual explanation of what was accomplished or why the task failed or errored.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"status": map[string]any{
 						"type":        "string",
 						"enum":        taskStatuses,
-						"description": "Final outcome of the task.",
+						"description": "Final outcome: Completed if all requested tasks were accomplished, Failed if the outcome was not achieved, or Error for an execution problem.",
 					},
 					"reason": map[string]any{
 						"type":        "string",
-						"description": "Concise, factual explanation of what was accomplished or why the task failed or errored.",
+						"description": "Free-form, concise, factual explanation of what was accomplished or why the task failed or errored.",
 					},
 				},
 				"required": []string{"status", "reason"},
@@ -251,7 +257,13 @@ func callOutputSearch(ctx context.Context, store *output.Store, args map[string]
 	return buildSearchSuccessContent(res), nil
 }
 
-var taskStatuses = []string{"Completed", "Failed", "Error"}
+const (
+	TaskStatusCompleted = "Completed"
+	TaskStatusFailed    = "Failed"
+	TaskStatusError     = "Error"
+)
+
+var taskStatuses = []string{TaskStatusCompleted, TaskStatusFailed, TaskStatusError}
 
 // taskStatusOutcome is the payload the agent loop consumes when the model ends
 // the run with task_status.
@@ -275,17 +287,22 @@ func parseTaskStatus(args map[string]any) (TaskStatusOutcome, error) {
 	return TaskStatusOutcome{CompletedStatus: status, Reason: reason}, nil
 }
 
-func buildCaptureSuccessContent(h *output.Handle) string {
-	b, _ := json.Marshal(map[string]any{
-		"status": toolStatusSuccess,
-		"data": map[string]any{"result": map[string]any{
-			"output_id": h.ID, "captured": true,
-			"total_lines": h.TotalLines, "total_bytes": h.TotalBytes,
-			"exit_code": h.ExitCode,
-			"hint":      "Search with output_search, or read lines with output_read.",
-		}},
-	})
+func marshalToolContent(status toolStatus, data map[string]any) string {
+	b, _ := json.Marshal(map[string]any{"status": status, "data": data})
 	return string(b)
+}
+
+func marshalToolResult(result map[string]any) string {
+	return marshalToolContent(toolStatusSuccess, map[string]any{"result": result})
+}
+
+func buildCaptureSuccessContent(h *output.Handle) string {
+	return marshalToolResult(map[string]any{
+		"output_id": h.ID, "captured": true,
+		"total_lines": h.TotalLines, "total_bytes": h.TotalBytes,
+		"exit_code": h.ExitCode,
+		"hint":      "Search with output_search, or read lines with output_read.",
+	})
 }
 
 func buildSearchSuccessContent(res output.SearchResult) string {
@@ -293,14 +310,10 @@ func buildSearchSuccessContent(res output.SearchResult) string {
 	if matches == nil {
 		matches = []int{}
 	}
-	b, _ := json.Marshal(map[string]any{
-		"status": toolStatusSuccess,
-		"data": map[string]any{"result": map[string]any{
-			"output_id": res.OutputID, "total_matches": res.TotalMatches,
-			"matches": matches, "truncated": res.Truncated,
-		}},
+	return marshalToolResult(map[string]any{
+		"output_id": res.OutputID, "total_matches": res.TotalMatches,
+		"matches": matches, "truncated": res.Truncated,
 	})
-	return string(b)
 }
 
 func callOutputRead(ctx context.Context, store *output.Store, args map[string]any) (string, error) {
@@ -350,15 +363,11 @@ func buildReadSuccessContent(res output.ReadResult) string {
 	if lines == nil {
 		lines = []string{}
 	}
-	b, _ := json.Marshal(map[string]any{
-		"status": toolStatusSuccess,
-		"data": map[string]any{"result": map[string]any{
-			"output_id": res.OutputID, "offset": res.Offset, "limit": res.Limit,
-			"total_lines": res.TotalLines, "lines": lines,
-			"truncated": res.Truncated,
-		}},
+	return marshalToolResult(map[string]any{
+		"output_id": res.OutputID, "offset": res.Offset, "limit": res.Limit,
+		"total_lines": res.TotalLines, "lines": lines,
+		"truncated": res.Truncated,
 	})
-	return string(b)
 }
 
 type toolStatus string
@@ -387,28 +396,15 @@ func parseToolEnvelope(s string) (toolEnvelope, bool) {
 }
 
 func buildToolErrorContent(err error) string {
-	b, _ := json.Marshal(map[string]any{
-		"status": toolStatusFailed,
-		"data":   map[string]any{"error": err.Error()},
-	})
-	return string(b)
+	return marshalToolContent(toolStatusFailed, map[string]any{"error": err.Error()})
 }
 
 func buildToolSuccessContent(toolName, result string) string {
-	var payload map[string]any
+	key := "result"
 	if toolName == "vm_exec" {
-		payload = map[string]any{
-			"status": toolStatusSuccess,
-			"data":   map[string]any{"output": result},
-		}
-	} else {
-		payload = map[string]any{
-			"status": toolStatusSuccess,
-			"data":   map[string]any{"result": result},
-		}
+		key = "output"
 	}
-	b, _ := json.Marshal(payload)
-	return string(b)
+	return marshalToolContent(toolStatusSuccess, map[string]any{key: result})
 }
 
 func buildToolDocuments(cfg config.Config) []model.D {
@@ -463,13 +459,14 @@ func buildToolResponseMessage(tc model.ResponseToolCall, content string) model.D
 	}
 }
 
-func appendToConversation(conversation []model.D, msgs ...model.D) []model.D {
-	return append(conversation, msgs...)
-}
+const (
+	lengthNudge     = "Your previous response hit the token limit without making a tool call. Please be concise and try again and run a tool call if necessary"
+	taskStatusNudge = "You finished without calling task_status. Call the task_status tool now as your final action, with status Completed, Failed, or Error and a factual reason. Do not reply with text."
+)
 
-// buildLengthNudgeMessages rebuilds the truncated assistant turn plus the user
-// nudge injected when a reply hit the length limit without a tool call.
-func buildLengthNudgeMessages(msg *model.ResponseMessage, maxContent int) []model.D {
+// buildNudgeMessages rebuilds the truncated assistant turn plus the user nudge
+// injected when a reply cannot end the run.
+func buildNudgeMessages(msg *model.ResponseMessage, maxContent int, nudge string) []model.D {
 	msgs := make([]model.D, 0, 2)
 	if msg.Reasoning != "" || msg.Content != "" {
 		nudgedAssistant := model.D{"role": "assistant"}
@@ -483,7 +480,7 @@ func buildLengthNudgeMessages(msg *model.ResponseMessage, maxContent int) []mode
 	}
 	return append(msgs, model.D{
 		"role":    "user",
-		"content": "Your previous response hit the token limit without making a tool call. Please be concise and try again and run a tool call if necessary",
+		"content": nudge,
 	})
 }
 

@@ -41,9 +41,9 @@ const (
 	// budget is still bounded rather than falling back to an unbounded payload.
 	assumedContextWindow = 8192
 
-	// finalOutputBytes bounds the stdout dump of every command result. The log
-	// line is truncated separately, but stdout is consumed by whatever runs the
-	// harness, so an unbounded join becomes that consumer's token cost.
+	// finalOutputBytes bounds the stdout dump of every command result. Stdout is
+	// consumed by whatever runs the harness, so an unbounded join becomes that
+	// consumer's token cost.
 	finalOutputBytes = 64 * 1024
 
 	heartbeatInterval = 5 * time.Second
@@ -140,6 +140,7 @@ type Agent struct {
 	compactionsApplied int           // Compactions that succeeded this run.
 	toolResultBudget   int           // Byte cutoff between inline output and a handle.
 	done               bool          // Set when the agent should stop looping.
+	taskStatusNudged   bool          // Set after prompting a model that stopped without task_status.
 	totals             runTotals     // Per-run aggregate for the run_summary event.
 
 	finalRunStatus TaskStatusOutcome // final status of the run.
@@ -172,8 +173,7 @@ func NewAgent(log zerolog.Logger, krn Kronk, opts Options) *Agent {
 
 // Execute runs the agent to completion, bounded by totalTimeout and
 // maxIterations, and returns the first error that aborts the run. It owns the
-// iteration loop, compacting the context before each round, and prints the
-// final command output or assistant answer when the loop ends.
+// iteration loop, compacting the context before each round.
 func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *lxd.Client) (_ *TaskStatusOutcome, err error) {
 	start := time.Now()
 	defer func() {
@@ -206,11 +206,7 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *lxd.Client
 	}
 
 	if len(a.commandOutputs) > 0 {
-		final := finalCommandOutput(a.commandOutputs)
-		a.log.Info().Str("out", textutil.Truncate(final, conf.Truncation.CommandOutput)).Msg("final command output")
-		fmt.Println(final)
-	} else {
-		a.log.Info().Msg("agent completed with no command output or final answer")
+		fmt.Println(finalCommandOutput(a.commandOutputs))
 	}
 
 	contextUsedPercent := 0.0
@@ -297,7 +293,17 @@ func (a *Agent) runIteration(ctx context.Context, cli *lxd.Client, conf config.C
 			"iter":   iter + 1,
 			"finish": finishReason,
 		})
-		a.conversation = appendToConversation(a.conversation, buildLengthNudgeMessages(msg, conf.Truncation.Nudge)...)
+		a.conversation = append(a.conversation, buildNudgeMessages(msg, conf.Truncation.Nudge, lengthNudge)...)
+		return nil
+	}
+
+	if len(toolCalls) == 0 && a.iteration+1 < a.maxIterations && !a.taskStatusNudged && a.finalRunStatus == (TaskStatusOutcome{}) {
+		a.taskStatusNudged = true
+		otlp.LogEvent(iterCtx, iterLog, zerolog.WarnLevel, "finished without task_status, injecting nudge and continuing", map[string]any{
+			"iter":   iter + 1,
+			"finish": finishReason,
+		})
+		a.conversation = append(a.conversation, buildNudgeMessages(msg, conf.Truncation.Nudge, taskStatusNudge)...)
 		return nil
 	}
 
@@ -307,13 +313,13 @@ func (a *Agent) runIteration(ctx context.Context, cli *lxd.Client, conf config.C
 	}
 
 	toolCallDocs := a.buildToolCallDocsWithContext(iterCtx, toolCalls, argsJSON, iter)
-	a.conversation = appendToConversation(a.conversation, buildAssistantMessage(msg, toolCallDocs, conf.Agent.Reasoning()))
+	a.conversation = append(a.conversation, buildAssistantMessage(msg, toolCallDocs, conf.Agent.Reasoning()))
 
 	toolStart := time.Now()
 	toolResponses, newOutputs := a.executeToolCalls(iterCtx, cli, conf, toolCalls)
 	toolDur = time.Since(toolStart)
 	a.commandOutputs = append(a.commandOutputs, newOutputs...)
-	a.conversation = appendToConversation(a.conversation, toolResponses...)
+	a.conversation = append(a.conversation, toolResponses...)
 	a.addToolTokens(iterCtx, toolResponses)
 
 	if len(a.commandOutputs) > 0 {
@@ -686,17 +692,7 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
 		a.contextTokens = after
 	}
 	compLog := a.log.With().Ctx(compCtx).Logger()
-	fields := map[string]any{
-		"event": eventContextCompaction,
-		"iter":  a.iteration + 1, "outcome": outcome, "tok_before": before, "tok_after": after,
-		"reclaimed": before - after, "thr": cc.Threshold, "summary": summaryBytes, "handles": len(infos),
-		"compacted": a.compactionsApplied,
-		"try":       a.compactionAttempts + 1, "dur_ms": duration.Milliseconds(),
-	}
-	if compactErr != nil {
-		fields["error"] = compactErr
-	}
-	otlp.LogEvent(compCtx, compLog, zerolog.WarnLevel, "context compaction", fields)
+	a.logCompaction(compCtx, compLog, cc, before, after, summaryBytes, len(infos), duration, outcome, compactErr)
 
 	switch outcome {
 	case "applied":
@@ -723,4 +719,18 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
 		a.compactionAttempts++
 		return
 	}
+}
+
+func (a *Agent) logCompaction(ctx context.Context, log zerolog.Logger, cc config.CompactionConfig, before, after int64, summaryBytes, handles int, duration time.Duration, outcome string, compactErr error) {
+	fields := map[string]any{
+		"event": eventContextCompaction,
+		"iter":  a.iteration + 1, "outcome": outcome, "tok_before": before, "tok_after": after,
+		"reclaimed": before - after, "thr": cc.Threshold, "summary": summaryBytes, "handles": handles,
+		"compacted": a.compactionsApplied,
+		"try":       a.compactionAttempts + 1, "dur_ms": duration.Milliseconds(),
+	}
+	if compactErr != nil {
+		fields["error"] = compactErr
+	}
+	otlp.LogEvent(ctx, log, zerolog.WarnLevel, "context compaction", fields)
 }

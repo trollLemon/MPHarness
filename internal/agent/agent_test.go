@@ -476,7 +476,7 @@ func TestBuildAssistantMessageAndAppend(t *testing.T) {
 			if am["reasoning_content"] != tt.wantReasoning {
 				t.Errorf("reasoning %v want %v", am["reasoning_content"], tt.wantReasoning)
 			}
-			conv2 := appendToConversation([]model.D{{"role": "system"}}, am)
+			conv2 := append([]model.D{{"role": "system"}}, am)
 			if len(conv2) != 2 {
 				t.Fatalf("append len %d", len(conv2))
 			}
@@ -628,7 +628,7 @@ func TestBuildLengthNudgeMessages(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msgs := buildLengthNudgeMessages(tt.msg, config.DefaultNudgeBytes)
+			msgs := buildNudgeMessages(tt.msg, config.DefaultNudgeBytes, lengthNudge)
 			if len(msgs) != tt.wantLen {
 				t.Fatalf("msgs len %d want %d: %v", len(msgs), tt.wantLen, msgs)
 			}
@@ -808,9 +808,9 @@ func TestExecute(t *testing.T) {
 		verifyReq func(t *testing.T, reqs []model.D)
 	}{
 		{
-			name:    "no tool calls success",
+			name:    "no tool calls gets a task_status nudge",
 			mock:    &mockKronk{responses: []model.ChatResponse{chatResp("final answer", "thinking", model.FinishReasonStop, nil, &model.Usage{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3, TokensPerSecond: 10})}},
-			maxIter: 5, wantCalls: 1,
+			maxIter: 5, wantCalls: 2,
 			vm:     config.VMConfig{Name: "test-vm", CPU: 2, RAM: "4G", Disk: "20G"},
 			prompt: "do nothing",
 			verifyReq: func(t *testing.T, reqs []model.D) {
@@ -823,12 +823,26 @@ func TestExecute(t *testing.T) {
 				if reqs[0]["tool_choice"] != "auto" {
 					t.Errorf("tool_choice %v", reqs[0]["tool_choice"])
 				}
+				if len(reqs) < 2 {
+					t.Fatal("no nudge request after a finish without task_status")
+				}
+				msgs, _ := reqs[1]["messages"].([]model.D)
+				if len(msgs) == 0 {
+					t.Fatal("nudge request has no messages")
+				}
+				last := msgs[len(msgs)-1]
+				if last["role"] != "user" {
+					t.Errorf("nudge role %v want user", last["role"])
+				}
+				if content, _ := last["content"].(string); !strings.Contains(content, "task_status") {
+					t.Errorf("nudge %q does not mention task_status", content)
+				}
 			},
 		},
 		{
 			name:    "uses LLMConfig",
 			mock:    &mockKronk{responses: []model.ChatResponse{chatResp("ok", "", model.FinishReasonStop, nil, nil)}},
-			maxIter: 3, wantCalls: 1,
+			maxIter: 3, wantCalls: 2,
 			llmCfg: &config.LLMConfig{Temperature: 0.7, TopP: 0.9, TopK: 5, ToolChoice: "required"},
 			verifyReq: func(t *testing.T, reqs []model.D) {
 				if reqs[0]["temperature"] != 0.7 {
@@ -1028,7 +1042,7 @@ func TestExecuteLogsTokenUsageAndIterationEvents(t *testing.T) {
 			&model.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120, TokensPerSecond: 8.5})},
 	}
 	agent := NewAgent(zerolog.New(&buf), mock, Options{
-		MaxIterations: 2,
+		MaxIterations: 1,
 		ChatTimeout:   time.Second,
 		TotalTimeout:  5 * time.Second,
 		LLM:           defaultLLMConfig(),
@@ -1062,36 +1076,6 @@ func TestExecuteLogsTokenUsageAndIterationEvents(t *testing.T) {
 	}
 
 	onlyEvent(t, events, eventRunSummary)
-}
-
-func TestFinalCommandOutput(t *testing.T) {
-	tests := []struct {
-		name    string
-		outputs []string
-		want    string
-	}{
-		{"no outputs", nil, ""},
-		{"single output", []string{"out"}, "out"},
-		{"joined with separator", []string{"a", "b"}, "a\n---\nb"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := finalCommandOutput(tt.outputs); got != tt.want {
-				t.Errorf("got %q want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestFinalCommandOutputIsCapped(t *testing.T) {
-	outputs := []string{strings.Repeat("a", 40000), strings.Repeat("b", 40000)}
-	got := finalCommandOutput(outputs)
-	if len(got) > finalOutputBytes+64 {
-		t.Errorf("len %d exceeds cap %d plus marker", len(got), finalOutputBytes)
-	}
-	if !strings.Contains(got, "truncated") {
-		t.Errorf("missing truncation marker")
-	}
 }
 
 func TestSystemPromptBatchingGuidance(t *testing.T) {
@@ -1250,6 +1234,36 @@ func TestRecordTokenUsageKeepsZeroCachedTokens(t *testing.T) {
 // A run that stops early has a lower a.iteration than the cap, so it must not
 // be labelled budget_exhausted even though the cap was reached in the sense of
 // "the loop would have run again".
+func TestFinalCommandOutput(t *testing.T) {
+	tests := []struct {
+		name    string
+		outputs []string
+		want    string
+	}{
+		{"no outputs", nil, ""},
+		{"single output", []string{"out"}, "out"},
+		{"joined with separator", []string{"a", "b"}, "a\n---\nb"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := finalCommandOutput(tt.outputs); got != tt.want {
+				t.Errorf("got %q want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFinalCommandOutputIsCapped(t *testing.T) {
+	outputs := []string{strings.Repeat("a", 40000), strings.Repeat("b", 40000)}
+	got := finalCommandOutput(outputs)
+	if len(got) > finalOutputBytes+64 {
+		t.Errorf("len %d exceeds cap %d plus marker", len(got), finalOutputBytes)
+	}
+	if !strings.Contains(got, "truncated") {
+		t.Errorf("missing truncation marker")
+	}
+}
+
 func TestRunOutcomeDistinguishesCleanFinishFromExhaustion(t *testing.T) {
 	tests := []struct {
 		name         string
