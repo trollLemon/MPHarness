@@ -37,6 +37,11 @@ Batching Work:
 Single Turn:
 Finish each step in a single turn where possible; chain dependent commands with '&&' rather than spreading them across turns.
 
+Success checks:
+- A command finishing does not mean it succeeded. After every command, inspect the tool result status, output, stderr, and any error text before deciding what to do next.
+- Mark a step complete only when its output shows the expected result and no error. Never assume success because the command ran or because the turn ended normally.
+- If a command failed or its output reports an error, do not report Completed. Report Failed or Error and include the observed failure in reason.
+
 Denials:
 Immediately stop on any tool denial, policy restriction, or insufficient permission. Never bypass it with workarounds, unauthorized alternatives, or privilege escalation. If a required command is denied, call task_status with status Error and explain the denial in reason.
 
@@ -81,7 +86,7 @@ func Specs(cfg config.Config) []Spec {
 	specs := []Spec{
 		{
 			Name:        "task_status",
-			Description: "Report the final outcome of the task and end the run. Call exactly once as your last action, after all work is finished or execution halts. You will not get a response back from this tool, so no further turn follows. Set status to one of Completed, Failed, or Error. Set reason to a free-form, concise, factual explanation of what was accomplished or why the task failed or errored.",
+			Description: "Report the final outcome of the task and end the run. Call exactly once as your last action, after all work is finished or execution halts. You will not get a response back from this tool, so no further turn follows. Set status to one of Completed, Failed, or Error. Do not report Completed if any command failed or its output shows an error. Set reason to a free-form, concise, factual explanation of what was accomplished or why the task failed or errored.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -100,7 +105,7 @@ func Specs(cfg config.Config) []Spec {
 		},
 		{
 			Name:        "vm_exec",
-			Description: "Run a command inside the configured VM and return combined stdout/stderr. Pass the full command as a single string in the `command` field (e.g. `df -h`, `apt update && apt install -y curl`, `ps aux | grep nginx`). Set `capture: true` to capture output to a file and receive a handle (output_id, path, line counts) instead of inline text; search it with output_search or read slices with head/tail on path.",
+			Description: "Run a command inside the configured VM and return combined stdout/stderr. Pass the full command as a single string in the `command` field (e.g. `df -h`, `apt update && apt install -y curl`, `ps aux | grep nginx`). A command that ran is not necessarily successful; inspect the returned status, output, and error text. Set `capture: true` to capture output to a file and receive a handle (output_id, path, line counts) instead of inline text; search it with output_search or read slices with head/tail on path.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -461,7 +466,7 @@ func buildToolResponseMessage(tc model.ResponseToolCall, content string) model.D
 
 const (
 	lengthNudge     = "Your previous response hit the token limit without making a tool call. Please be concise and try again and run a tool call if necessary"
-	taskStatusNudge = "You finished without calling task_status. Call the task_status tool now as your final action, with status Completed, Failed, or Error and a factual reason. Do not reply with text."
+	taskStatusNudge = "You finished without calling task_status. Call the task_status tool now as your final action, with status Completed, Failed, or Error and a factual reason. Base the status on the observed command results; do not report Completed after a failed command. Do not reply with text."
 )
 
 // buildNudgeMessages rebuilds the truncated assistant turn plus the user nudge

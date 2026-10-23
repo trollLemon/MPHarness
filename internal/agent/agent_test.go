@@ -1088,6 +1088,7 @@ func TestSystemPromptBatchingGuidance(t *testing.T) {
 		{"batching section", "Batching Work", true},
 		{"chaining operator", "&&", true},
 		{"single turn", "single turn", true},
+		{"success checks", "Success checks", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

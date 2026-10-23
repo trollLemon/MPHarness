@@ -30,6 +30,8 @@ For `vm_exec`, the `command` string can be several commands at once (such as `ca
 
 `reason` is required for every status and is free-form: a concise, factual explanation written by the agent. If a required command is denied, the agent reports `Error` rather than working around the restriction.
 
+A command that ran is not automatically a success. The system prompt tells the agent to inspect each tool result's status, output, stderr, and error text, and to report `Failed` or `Error` instead of `Completed` when a command failed or its output shows an error.
+
 ### How the tools are described to the model
 
 The model needs a description of each tool's *shape*. `mph` builds an OpenAI-style JSON-schema document for each one: name, description, and parameters, and sends these as the `tools` field of the chat request (`buildToolDocuments` in `internal/agent`). For `vm_exec` that document looks roughly like:
