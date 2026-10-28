@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog/log"
 
@@ -16,6 +17,8 @@ import (
 	"github.com/trollLemon/MPHarness/internal/lxd"
 	"github.com/trollLemon/MPHarness/internal/validation"
 )
+
+const commandHistoryFlushTimeout = 30 * time.Second
 
 var (
 	errInvalidInput      = errors.New("invalid input")
@@ -57,6 +60,22 @@ type Options struct {
 	IgnoreExisting bool
 	Keep           bool
 	RunID          string
+	CmdOutput      io.Writer // optional JSONL command history destination
+}
+
+type commandHistoryWriter interface {
+	WriteCommandHistory(ctx context.Context, w io.Writer) error
+}
+
+// writeCommandHistory writes tracked commands to w using a bounded context
+// detached from the run context, so a timed-out run still flushes.
+func writeCommandHistory(ctx context.Context, hist commandHistoryWriter, w io.Writer) error {
+	if w == nil {
+		return nil
+	}
+	flushCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), commandHistoryFlushTimeout)
+	defer cancel()
+	return hist.WriteCommandHistory(flushCtx, w)
 }
 
 func Start(ctx context.Context, agt *agent.Agent, client *lxd.Client, cfg config.Config, opts Options) (*agent.TaskStatusOutcome, error) {
@@ -121,6 +140,11 @@ func Start(ctx context.Context, agt *agent.Agent, client *lxd.Client, cfg config
 	}
 
 	outcome, err := agt.Execute(ctx, cfg, client)
+	if opts.CmdOutput != nil {
+		if err := writeCommandHistory(ctx, client, opts.CmdOutput); err != nil {
+			log.Warn().Err(err).Msg("write command history failed")
+		}
+	}
 	if err != nil {
 		return nil, err
 	}

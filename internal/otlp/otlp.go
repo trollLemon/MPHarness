@@ -199,7 +199,7 @@ var runLogger = otel.Logger("mph")
 // payloadKeyOrder lists the blob fields that must close a log line, in the
 // order they should appear. Every entry is a key the codebase actually emits;
 // adding a speculative one makes the list look authoritative when it is not.
-var payloadKeyOrder = []string{"args", "text", "out", "command_output"}
+var payloadKeyOrder = []string{"args", "text", "command_output"}
 
 var eventFieldOrder = []string{"event", "iter", "iteration", "tool", "id", "part", "finish", "finish_reason", "outcome"}
 

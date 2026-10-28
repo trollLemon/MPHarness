@@ -165,6 +165,7 @@ func run() int {
 		needHelp       bool
 		ignoreExisting bool
 		keep           bool
+		cmdOutputFile  string
 	)
 
 	flag.StringVar(&configPath, "config", "", "path to yaml config file (or positional arg)")
@@ -177,6 +178,7 @@ func run() int {
 	flag.BoolVar(&needHelp, "h", false, "show help (shorthand)")
 	flag.BoolVar(&ignoreExisting, "i", false, "ignore that a VM with the given name exists already and run against that VM")
 	flag.BoolVar(&keep, "k", false, "keep the VM after execution rather than deleting it")
+	flag.StringVar(&cmdOutputFile, "cmd-output-file", "", "write a JSONL transcript of vm_exec commands and outputs to this file")
 	flag.Bool("otel", false, "enable or disable OpenTelemetry logging (default: YAML otel.enabled or MPH_OTEL)")
 
 	flag.Usage = func() { printUsage(os.Stderr) }
@@ -209,6 +211,20 @@ func run() int {
 	})
 	if err != nil {
 		return fail(err)
+	}
+
+	var cmdOutput io.Writer
+	if cmdOutputFile != "" {
+		f, err := os.Create(cmdOutputFile)
+		if err != nil {
+			return fail(fmt.Errorf("open cmd output file: %w", err))
+		}
+		defer func() {
+			if err := f.Close(); err != nil {
+				log.Warn().Err(err).Str("path", cmdOutputFile).Msg("close cmd output file failed")
+			}
+		}()
+		cmdOutput = f
 	}
 
 	resolver, err := secrets.New(cfg.Secrets)
@@ -300,6 +316,7 @@ func run() int {
 		IgnoreExisting: ignoreExisting,
 		Keep:           keep,
 		RunID:          ident.ID,
+		CmdOutput:      cmdOutput,
 	})
 	if err != nil {
 		return fail(err)
