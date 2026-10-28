@@ -1,0 +1,23 @@
+# 2026/10/28 00:35:11.729196 [TestVMConfigValidConfigsPass] [rapid] draw disk: "20G"
+# 2026/10/28 00:35:11.729241 [TestVMConfigValidConfigsPass] [rapid] draw ram: "4G"
+# 2026/10/28 00:35:11.729248 [TestVMConfigValidConfigsPass] [rapid] draw cpu: 1
+# 2026/10/28 00:35:11.729258 [TestVMConfigValidConfigsPass] [rapid] draw name: "?"
+# 2026/10/28 00:35:11.729301 [TestVMConfigValidConfigsPass] valid config should pass: vm.name must be a valid LXD instance name: Name can only contain alphanumeric and hyphen characters
+# 
+v0.4.8#3337892731181901532
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x38e38e38e38e4
+0x2
+0x0

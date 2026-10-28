@@ -1,0 +1,11 @@
+# 2026/10/28 00:28:04.625368 [TestValidateShellCommandWhitespaceVariants] [rapid] draw prefix: ""
+# 2026/10/28 00:28:04.625386 [TestValidateShellCommandWhitespaceVariants] [rapid] draw suffix: "A"
+# 2026/10/28 00:28:04.625408 [TestValidateShellCommandWhitespaceVariants] whitespace variant "lsA" should be allowed, got: commands [lsA] not in allowed list
+# 
+v0.4.8#16295914426400356184
+0x0
+0xccccccccccccd
+0x0
+0x0
+0x0
+0x0

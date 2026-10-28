@@ -41,6 +41,7 @@ golangci-lint run
 - Follow Go idioms and effective Go guidelines
 - Keep functions small and focused
 - Avoid turning one cohesive function into a chain of single-use helpers; extract only for reuse or materially simpler control flow
+- All test files use external test packages (`package <name>_test`). Internal symbols needed by tests are re-exported via `export_test.go` files in the same package.
 - Do not open or read the same file twice in one operation; reuse the first read
 - Use meaningful variable and function names
 - Minimal comments - code should be self-documenting

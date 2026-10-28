@@ -1,6 +1,7 @@
-package harness
+package harness_test
 
 import (
+	. "github.com/trollLemon/MPHarness/internal/harness"
 	"bufio"
 	"context"
 	"errors"
@@ -10,7 +11,7 @@ import (
 )
 
 func TestOutputRunDirCommand(t *testing.T) {
-	cmd := outputRunDirCommand("run-123")
+	cmd := OutputRunDirCommand("run-123")
 	if strings.Contains(cmd, "rm ") {
 		t.Fatalf("setup must not delete other runs' captures: %q", cmd)
 	}
@@ -25,10 +26,10 @@ func TestOutputRunDirCommand(t *testing.T) {
 func TestPromptExistingVMReadsEveryAnswer(t *testing.T) {
 	in := bufio.NewReader(strings.NewReader("bogus\ny\n"))
 
-	if err := promptExistingVM(in, io.Discard, "vm"); err != errInvalidInput {
-		t.Fatalf("first pass want errInvalidInput, got %v", err)
+	if err := PromptExistingVM(in, io.Discard, "vm"); err != ErrInvalidInput {
+		t.Fatalf("first pass want ErrInvalidInput, got %v", err)
 	}
-	if err := promptExistingVM(in, io.Discard, "vm"); err != nil {
+	if err := PromptExistingVM(in, io.Discard, "vm"); err != nil {
 		t.Fatalf("second pass want consent, got %v", err)
 	}
 }
@@ -37,11 +38,11 @@ func TestPromptExistingVMReadsEveryAnswer(t *testing.T) {
 func TestPromptExistingVMReadFailureIsNotConsent(t *testing.T) {
 	in := bufio.NewReader(strings.NewReader(""))
 
-	err := promptExistingVM(in, io.Discard, "vm")
+	err := PromptExistingVM(in, io.Discard, "vm")
 	if err == nil {
 		t.Fatal("EOF must not be treated as consent")
 	}
-	if errors.Is(err, errVMShouldNotBeUsed) || errors.Is(err, errInvalidInput) {
+	if errors.Is(err, ErrVMShouldNotBeUsed) || errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("read failure should be its own error, got %v", err)
 	}
 }
@@ -49,8 +50,8 @@ func TestPromptExistingVMReadFailureIsNotConsent(t *testing.T) {
 func TestPromptExistingVMRejection(t *testing.T) {
 	in := bufio.NewReader(strings.NewReader("n\n"))
 
-	if err := promptExistingVM(in, io.Discard, "vm"); !errors.Is(err, errVMShouldNotBeUsed) {
-		t.Fatalf("want errVMShouldNotBeUsed, got %v", err)
+	if err := PromptExistingVM(in, io.Discard, "vm"); !errors.Is(err, ErrVMShouldNotBeUsed) {
+		t.Fatalf("want ErrVMShouldNotBeUsed, got %v", err)
 	}
 }
 
@@ -59,14 +60,14 @@ func TestPromptExistingVMRejection(t *testing.T) {
 func TestPromptExistingVMEmptyLineRetries(t *testing.T) {
 	in := bufio.NewReader(strings.NewReader("\n \n"))
 
-	if err := promptExistingVM(in, io.Discard, "vm"); err != errInvalidInput {
-		t.Fatalf("bare Enter want errInvalidInput, got %v", err)
+	if err := PromptExistingVM(in, io.Discard, "vm"); err != ErrInvalidInput {
+		t.Fatalf("bare Enter want ErrInvalidInput, got %v", err)
 	}
-	if err := promptExistingVM(in, io.Discard, "vm"); err != errInvalidInput {
-		t.Fatalf("whitespace-only want errInvalidInput, got %v", err)
+	if err := PromptExistingVM(in, io.Discard, "vm"); err != ErrInvalidInput {
+		t.Fatalf("whitespace-only want ErrInvalidInput, got %v", err)
 	}
-	if err := promptExistingVM(in, io.Discard, "vm"); !errors.Is(err, errPromptRead) {
-		t.Fatalf("exhausted input want errPromptRead, got %v", err)
+	if err := PromptExistingVM(in, io.Discard, "vm"); !errors.Is(err, ErrPromptRead) {
+		t.Fatalf("exhausted input want ErrPromptRead, got %v", err)
 	}
 }
 
@@ -131,7 +132,7 @@ func TestWriteCommandHistory(t *testing.T) {
 			}
 
 			hist := &fakeCommandHistory{err: tt.histErr}
-			err := writeCommandHistory(ctx, hist, tt.writer)
+			err := WriteCommandHistory(ctx, hist, tt.writer)
 
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {

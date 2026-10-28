@@ -1,6 +1,13 @@
-package validation
+package validation_test
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"pgregory.net/rapid"
+
+	. "github.com/trollLemon/MPHarness/internal/validation"
+)
 
 func TestIsCommandAllowed(t *testing.T) {
 	tests := []struct {
@@ -23,8 +30,8 @@ func TestIsCommandAllowed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isCommandAllowed(tt.allowed, tt.cmd); got != tt.want {
-				t.Fatalf("isCommandAllowed(%q)=%v want %v (set %v)", tt.cmd, got, tt.want, tt.allowed)
+			if got := IsCommandAllowed(tt.allowed, tt.cmd); got != tt.want {
+				t.Fatalf("IsCommandAllowed(%q)=%v want %v (set %v)", tt.cmd, got, tt.want, tt.allowed)
 			}
 		})
 	}
@@ -107,4 +114,146 @@ func TestValidateShellCommand(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Property-based tests for validation using rapid.
+
+// IsCommandAllowed allows everything when allowlist is empty/nil.
+func TestIsCommandAllowedEmptyAllowsAll(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		cmd := rapid.StringN(1, 20, 50).Draw(t, "cmd")
+		// nil allowlist
+		if !IsCommandAllowed(nil, cmd) {
+			t.Fatalf("nil allowlist should allow %q", cmd)
+		}
+		// empty map
+		if !IsCommandAllowed(map[string]bool{}, cmd) {
+			t.Fatalf("empty allowlist should allow %q", cmd)
+		}
+	})
+}
+
+// IsCommandAllowed rejects empty/whitespace commands when allowlist is non-empty.
+func TestIsCommandAllowedEmptyCommandRejected(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		allowed := map[string]bool{"ls": true}
+		emptyCmd := rapid.OneOf(
+			rapid.Just(""),
+			rapid.Just(" "),
+			rapid.Just("\t"),
+			rapid.Just("  \t  "),
+		).Draw(t, "emptyCmd")
+		if IsCommandAllowed(allowed, emptyCmd) {
+			t.Fatalf("empty command %q should be rejected with non-empty allowlist", emptyCmd)
+		}
+	})
+}
+
+// IsCommandAllowed is consistent for whitespace-trimmed commands.
+func TestIsCommandAllowedTrimConsistency(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		// Generate alphanumeric command names only
+		cmd := rapid.StringN(1, 20, 50).Draw(t, "cmd")
+		// Skip commands with whitespace
+		if strings.TrimSpace(cmd) != cmd {
+			return
+		}
+		allowed := map[string]bool{cmd: true}
+		paddedCmd := "   " + cmd + "   "
+		if !IsCommandAllowed(allowed, paddedCmd) {
+			t.Fatalf("padded command %q should match %q", paddedCmd, cmd)
+		}
+	})
+}
+
+// IsCommandAllowed is case-sensitive.
+func TestIsCommandAllowedIsCaseSensitive(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		cmd := "ls"
+		allowed := map[string]bool{"LS": true}
+		if IsCommandAllowed(allowed, cmd) {
+			t.Fatalf("command %q should not match %q (case sensitive)", cmd, "LS")
+		}
+	})
+}
+
+// ValidateShellCommand rejects blocked shells in any context.
+func TestValidateShellCommandBlocksShells(t *testing.T) {
+	blocked := []string{"bash", "sh", "zsh", "fish", "dash", "ksh", "csh", "tcsh"}
+	for _, shell := range blocked {
+		t.Run(shell, func(t *testing.T) {
+			err := ValidateShellCommand(nil, shell+" -c 'echo hi'")
+			if err == nil {
+				t.Fatalf("shell %q should be blocked", shell)
+			}
+		})
+	}
+}
+
+// ValidateShellCommand accepts simple commands when allowlist is empty.
+func TestValidateShellCommandEmptyAllowsSimple(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		cmd := rapid.OneOf(
+			rapid.Just("ls"),
+			rapid.Just("cat /etc/passwd"),
+			rapid.Just("echo hello"),
+			rapid.Just("pwd"),
+		).Draw(t, "cmd")
+		err := ValidateShellCommand(nil, cmd)
+		if err != nil {
+			t.Fatalf("simple command %q should be allowed with empty allowlist, got: %v", cmd, err)
+		}
+	})
+}
+
+// ValidateShellCommand rejects malformed syntax.
+func TestValidateShellCommandRejectsMalformed(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		// Unclosed quote
+		cmd := `echo "unclosed`
+		err := ValidateShellCommand(nil, cmd)
+		if err == nil {
+			t.Fatalf("malformed command %q should be rejected", cmd)
+		}
+	})
+}
+
+// ValidateShellCommand allows commands in allowlist.
+func TestValidateShellCommandAllowsListed(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		cmd := "ls -la"
+		allowed := map[string]bool{"ls": true}
+		err := ValidateShellCommand(allowed, cmd)
+		if err != nil {
+			t.Fatalf("command %q should be allowed with %v, got: %v", cmd, allowed, err)
+		}
+	})
+}
+
+// ValidateShellCommand rejects commands not in allowlist.
+func TestValidateShellCommandRejectsNotListed(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		cmd := "rm -rf /"
+		allowed := map[string]bool{"ls": true, "cat": true}
+		err := ValidateShellCommand(allowed, cmd)
+		if err == nil {
+			t.Fatalf("command %q should be rejected with allowlist %v", cmd, allowed)
+		}
+	})
+}
+
+// ValidateShellCommand handles commands with leading/trailing whitespace.
+func TestValidateShellCommandWhitespaceVariants(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		prefixSpaces := rapid.IntRange(0, 5).Draw(t, "prefixSpaces")
+		suffixSpaces := rapid.IntRange(0, 5).Draw(t, "suffixSpaces")
+		prefix := strings.Repeat(" ", prefixSpaces)
+		suffix := strings.Repeat(" ", suffixSpaces)
+		cmd := prefix + "ls" + suffix
+		allowed := map[string]bool{"ls": true}
+		err := ValidateShellCommand(allowed, cmd)
+		if err != nil {
+			t.Fatalf("padded command %q should be allowed with 'ls' in allowlist, got: %v", cmd, err)
+		}
+	})
 }

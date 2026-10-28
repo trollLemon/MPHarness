@@ -1,0 +1,11 @@
+# 2026/10/28 00:28:04.607859 [TestIsCommandAllowedMatchesBaseCommand] [rapid] draw base: "\v"
+# 2026/10/28 00:28:04.607883 [TestIsCommandAllowedMatchesBaseCommand] [rapid] draw args: ""
+# 2026/10/28 00:28:04.607886 [TestIsCommandAllowedMatchesBaseCommand] command with args "\v " should match base "\v"
+# 
+v0.4.8#1566316353499251906
+0x0
+0x0
+0xe3e05a098777c
+0x23
+0x0
+0x0

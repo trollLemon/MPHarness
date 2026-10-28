@@ -142,8 +142,8 @@ func TestConvertLevel(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := convertLevel(tt.level); got != tt.want {
-				t.Fatalf("convertLevel(%v) = %v want %v", tt.level, got, tt.want)
+			if got := ConvertLevel(tt.level); got != tt.want {
+				t.Fatalf("ConvertLevel(%v) = %v want %v", tt.level, got, tt.want)
 			}
 		})
 	}

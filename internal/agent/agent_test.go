@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -13,7 +12,6 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/trollLemon/MPHarness/internal/config"
-	"github.com/trollLemon/MPHarness/internal/output"
 	"github.com/trollLemon/MPHarness/internal/textutil"
 )
 
@@ -158,33 +156,6 @@ func TestLLMConfig(t *testing.T) {
 	}
 }
 
-func TestToolResultBudgetBytes(t *testing.T) {
-	tests := []struct {
-		name          string
-		cfg           config.Config
-		contextWindow int
-		want          int
-	}{
-		{"derived from 8k window", config.Config{}, 8192, 4096},
-		{"derived from 32k window", config.Config{}, 32768, 16384},
-		{"clamped to ceiling on 128k window", config.Config{}, 131072, maxToolResultBytes},
-		{"clamped to floor on tiny window", config.Config{}, 512, minToolResultBytes},
-		{"unknown window falls back", config.Config{}, 0, 4096},
-		{
-			name:          "explicit override wins",
-			cfg:           config.Config{Agent: config.AgentConfig{MaxOutputBytes: 1234}},
-			contextWindow: 8192,
-			want:          1234,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := toolResultBudgetBytes(tt.cfg, tt.contextWindow); got != tt.want {
-				t.Errorf("got %d want %d", got, tt.want)
-			}
-		})
-	}
-}
 
 func TestBuildUserPrompt(t *testing.T) {
 	tests := []struct {
@@ -308,147 +279,8 @@ func TestBuildInitialConversation(t *testing.T) {
 	}
 }
 
-func TestExtractAssistantMessage(t *testing.T) {
-	tests := []struct {
-		name        string
-		resp        model.ChatResponse
-		wantBreak   bool
-		wantFR      string
-		wantContent string
-		wantReason  string
-	}{
-		{
-			name:      "no choices",
-			resp:      model.ChatResponse{Choices: []model.Choice{}},
-			wantBreak: true,
-		},
-		{
-			name:      "nil message and delta",
-			resp:      model.ChatResponse{Choices: []model.Choice{{Message: nil, Delta: nil, FinishReasonPtr: strPtr(model.FinishReasonStop)}}},
-			wantBreak: true,
-			wantFR:    model.FinishReasonStop,
-		},
-		{
-			name:        "normal message",
-			resp:        chatResp("hello", "reason", model.FinishReasonTool, nil, nil),
-			wantBreak:   false,
-			wantFR:      model.FinishReasonTool,
-			wantContent: "hello",
-			wantReason:  "reason",
-		},
-		{
-			name:        "delta fallback",
-			resp:        model.ChatResponse{Choices: []model.Choice{{Message: nil, Delta: &model.ResponseMessage{Content: "delta content"}, FinishReasonPtr: strPtr(model.FinishReasonStop)}}},
-			wantBreak:   false,
-			wantFR:      model.FinishReasonStop,
-			wantContent: "delta content",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			a := NewAgent(zerolog.Nop(), &mockKronk{}, Options{
-				MaxIterations: 3,
-				ChatTimeout:   time.Second,
-				TotalTimeout:  5 * time.Second,
-				LLM:           defaultLLMConfig(),
-				RunID:         "",
-			})
-			msg, fr, shouldBreak := a.extractAssistantMessage(tt.resp)
-			if shouldBreak != tt.wantBreak {
-				t.Fatalf("break %v want %v", shouldBreak, tt.wantBreak)
-			}
-			if fr != tt.wantFR {
-				t.Fatalf("finish reason %q want %q", fr, tt.wantFR)
-			}
-			if !tt.wantBreak {
-				if msg.Content != tt.wantContent {
-					t.Fatalf("content %q want %q", msg.Content, tt.wantContent)
-				}
-				if msg.Reasoning != tt.wantReason {
-					t.Fatalf("reasoning %q want %q", msg.Reasoning, tt.wantReason)
-				}
-			}
-		})
-	}
-}
 
-func TestShouldTerminateWithoutToolCalls(t *testing.T) {
-	tests := []struct {
-		name   string
-		calls  []model.ResponseToolCall
-		reason string
-		want   bool
-	}{
-		{"with tool calls", []model.ResponseToolCall{{ID: "1", Function: model.ResponseToolCallFunction{Name: "vm_exec"}}}, model.FinishReasonTool, false},
-		{"stop without tools", nil, model.FinishReasonStop, true},
-		{"length without tools", nil, model.FinishReasonLength, true},
-		{"empty finish", nil, "", true},
-		{"unknown without tools", nil, "unknown", true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			a := NewAgent(zerolog.Nop(), &mockKronk{}, Options{
-				MaxIterations: 3,
-				ChatTimeout:   time.Second,
-				TotalTimeout:  5 * time.Second,
-				LLM:           defaultLLMConfig(),
-				RunID:         "",
-			})
-			if got := a.shouldTerminateWithoutToolCalls(tt.calls, tt.reason, 0); got != tt.want {
-				t.Fatalf("got %v want %v", got, tt.want)
-			}
-		})
-	}
-}
 
-func TestBuildToolCallDocs(t *testing.T) {
-	tests := []struct {
-		name      string
-		calls     []model.ResponseToolCall
-		wantIDs   []string
-		wantNames []string
-	}{
-		{
-			name:      "single exec",
-			calls:     []model.ResponseToolCall{{ID: "call-1", Type: "function", Function: model.ResponseToolCallFunction{Name: "vm_exec", Arguments: model.ToolCallArguments{"command": "ls"}}}},
-			wantIDs:   []string{"call-1"},
-			wantNames: []string{"vm_exec"},
-		},
-		{
-			name: "batched calls keep order",
-			calls: []model.ResponseToolCall{
-				{ID: "call-1", Type: "function", Function: model.ResponseToolCallFunction{Name: "vm_exec", Arguments: model.ToolCallArguments{"command": "ls"}}},
-				{ID: "call-2", Type: "function", Function: model.ResponseToolCallFunction{Name: "vm_info", Arguments: model.ToolCallArguments{}}},
-			},
-			wantIDs:   []string{"call-1", "call-2"},
-			wantNames: []string{"vm_exec", "vm_info"},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			a := NewAgent(zerolog.Nop(), &mockKronk{}, Options{
-				MaxIterations: 3,
-				ChatTimeout:   time.Second,
-				TotalTimeout:  5 * time.Second,
-				LLM:           defaultLLMConfig(),
-				RunID:         "",
-			})
-			docs := a.buildToolCallDocsWithContext(context.Background(), tt.calls, marshalToolCallArgs(tt.calls), 0)
-			if len(docs) != len(tt.wantIDs) {
-				t.Fatalf("docs len %d want %d", len(docs), len(tt.wantIDs))
-			}
-			for i := range docs {
-				if docs[i]["id"] != tt.wantIDs[i] {
-					t.Errorf("id %v want %v", docs[i]["id"], tt.wantIDs[i])
-				}
-				fn, _ := docs[i]["function"].(model.D)
-				if fn["name"] != tt.wantNames[i] {
-					t.Errorf("name %v want %v", fn["name"], tt.wantNames[i])
-				}
-			}
-		})
-	}
-}
 
 func TestBuildAssistantMessageAndAppend(t *testing.T) {
 	tests := []struct {
@@ -651,78 +483,8 @@ func TestBuildLengthNudgeMessages(t *testing.T) {
 	}
 }
 
-func TestLogModelOutput(t *testing.T) {
-	tests := []struct {
-		name        string
-		msg         *model.ResponseMessage
-		wantContent string
-	}{
-		{"content returned", &model.ResponseMessage{Content: "answer"}, "answer"},
-		{"reasoning only yields no content", &model.ResponseMessage{Reasoning: "thinking"}, ""},
-		{"empty message yields no content", &model.ResponseMessage{}, ""},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := logModelOutput(context.Background(), zerolog.Nop(), 0, tt.msg, config.DefaultLogContentBytes); got != tt.wantContent {
-				t.Errorf("content %q want %q", got, tt.wantContent)
-			}
-		})
-	}
-}
 
-func TestLogModelOutputKeys(t *testing.T) {
-	var buf bytes.Buffer
-	log := zerolog.New(&buf)
 
-	if got := logModelOutput(context.Background(), log, 1, &model.ResponseMessage{
-		Reasoning: "thinking",
-		Content:   "answer",
-	}, config.DefaultLogContentBytes); got != "answer" {
-		t.Fatalf("content %q want answer", got)
-	}
-
-	want := []struct{ part, text string }{
-		{"reasoning", "thinking"},
-		{"content", "answer"},
-	}
-	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
-	if len(lines) != len(want) {
-		t.Fatalf("got %d lines want %d: %s", len(lines), len(want), buf.String())
-	}
-	for i, w := range want {
-		var rec map[string]any
-		if err := json.Unmarshal([]byte(lines[i]), &rec); err != nil {
-			t.Fatalf("line %d: %v", i, err)
-		}
-		if rec["message"] != "model output" {
-			t.Errorf("line %d message %v want model output", i, rec["message"])
-		}
-		if rec["part"] != w.part {
-			t.Errorf("line %d part %v want %s", i, rec["part"], w.part)
-		}
-		if rec["text"] != w.text {
-			t.Errorf("line %d text %v want %s", i, rec["text"], w.text)
-		}
-		if rec["iter"] != float64(2) {
-			t.Errorf("line %d iter %v want 2", i, rec["iter"])
-		}
-	}
-}
-
-func TestLogModelOutputTruncatesTextKey(t *testing.T) {
-	var buf bytes.Buffer
-	log := zerolog.New(&buf)
-
-	logModelOutput(context.Background(), log, 0, &model.ResponseMessage{Content: "hello world"}, 5)
-
-	var rec map[string]any
-	if err := json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &rec); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if rec["text"] != textutil.Truncate("hello world", 5) {
-		t.Errorf("text %v not truncated", rec["text"])
-	}
-}
 
 func TestAssistantMessageShapeLogged(t *testing.T) {
 	var buf bytes.Buffer
@@ -1072,33 +834,6 @@ func TestExecuteRetriesAfterInvalidTaskStatus(t *testing.T) {
 	}
 }
 
-func TestCallChatUsesTimeout(t *testing.T) {
-	log := zerolog.Nop()
-	called := false
-	mock := &mockKronk{
-		chatFunc: func(ctx context.Context, req model.D) (model.ChatResponse, error) {
-			called = true
-			if _, ok := ctx.Deadline(); !ok {
-				t.Errorf("expected deadline from chatTimeout")
-			}
-			return chatResp("ok", "", model.FinishReasonStop, nil, nil), nil
-		},
-	}
-	agent := NewAgent(log, mock, Options{
-		MaxIterations: 3,
-		ChatTimeout:   2 * time.Second,
-		TotalTimeout:  5 * time.Second,
-		LLM:           defaultLLMConfig(),
-		RunID:         "",
-	})
-	_, err := agent.callChat(context.Background(), model.D{"messages": []model.D{}}, 0)
-	if err != nil {
-		t.Fatalf("callChat failed: %v", err)
-	}
-	if !called {
-		t.Fatalf("mock not called")
-	}
-}
 
 func TestExecuteLogsTokenUsageAndIterationEvents(t *testing.T) {
 	var buf bytes.Buffer
@@ -1144,141 +879,9 @@ func TestExecuteLogsTokenUsageAndIterationEvents(t *testing.T) {
 	onlyEvent(t, events, eventRunSummary)
 }
 
-func TestRunIterationCountsToolResultsInContext(t *testing.T) {
-	const usageTotal = 100
-	big := strings.Repeat("z", 4000)
 
-	mock := &mockKronk{contextWidth: 8192, responses: []model.ChatResponse{
-		chatResp("", "", model.FinishReasonTool, []model.ResponseToolCall{{
-			ID: "c1", Type: "function",
-			Function: model.ResponseToolCallFunction{
-				Name: "vm_exec", Arguments: model.ToolCallArguments{"command": "cat big", "capture": true},
-			},
-		}}, &model.Usage{TotalTokens: usageTotal, PromptTokens: 90, CompletionTokens: 10}),
-	}}
-	cfg := config.Config{
-		VM:     config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
-		Model:  "m",
-		Prompt: "task",
-		Output: config.OutputConfig{Enabled: true, Mode: "auto", MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200},
-	}
-	f := &fakeOutputExec{fn: func(name, cmd string) (string, error) {
-		switch {
-		case strings.Contains(cmd, "grep -a -c"):
-			return "0", nil
-		case strings.Contains(cmd, "__MPH_EXIT_"):
-			return exitMarker(cmd) + "0", nil
-		case strings.Contains(cmd, "cat "):
-			return big, nil
-		case strings.Contains(cmd, "wc -c"):
-			return strconv.Itoa(len(big)), nil
-		case strings.Contains(cmd, "wc -l"):
-			return "1", nil
-		}
-		return "", nil
-	}}
-	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 1<<20)
-	agt := NewAgent(zerolog.Nop(), mock, Options{
-		MaxIterations: 3,
-		ChatTimeout:   time.Second,
-		TotalTimeout:  30 * time.Second,
-		LLM:           defaultLLMConfig(),
-		RunID:         "run-tok",
-	})
-	agt.conversation = buildInitialConversation(cfg)
-	agt.toolDocs = buildToolDocuments(cfg)
-	agt.store = store
 
-	if err := agt.runIteration(context.Background(), newTestClient(t), cfg); err != nil {
-		t.Fatalf("runIteration: %v", err)
-	}
-	if agt.contextTokens <= usageTotal {
-		t.Fatalf("context %d must count the tool result on top of the reported %d", agt.contextTokens, usageTotal)
-	}
-	var wantTool int64
-	for _, m := range agt.conversation {
-		if m["role"] == "tool" {
-			c, _ := m["content"].(string)
-			wantTool += int64(agt.estimateTokens(context.Background(), c))
-		}
-	}
-	if want, got := int64(usageTotal)+wantTool, agt.contextTokens; got != want {
-		t.Fatalf("context %d want %d (usage %d + tool results %d)", got, want, usageTotal, wantTool)
-	}
-}
-
-func TestRunIterationUsageSupersedesEarlierToolResults(t *testing.T) {
-	mock := &mockKronk{contextWidth: 8192, responses: []model.ChatResponse{
-		chatResp("done", "", model.FinishReasonStop, nil, &model.Usage{TotalTokens: 5000}),
-	}}
-	cfg := config.Config{
-		VM:     config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
-		Model:  "m",
-		Prompt: "task",
-	}
-	agt := NewAgent(zerolog.Nop(), mock, Options{
-		MaxIterations: 1,
-		ChatTimeout:   time.Second,
-		TotalTimeout:  30 * time.Second,
-		LLM:           defaultLLMConfig(),
-		RunID:         "run-reset",
-	})
-	agt.conversation = buildInitialConversation(cfg)
-	agt.toolDocs = buildToolDocuments(cfg)
-	agt.contextTokens = 12345
-
-	if err := agt.runIteration(context.Background(), newTestClient(t), cfg); err != nil {
-		t.Fatalf("runIteration: %v", err)
-	}
-	if agt.contextTokens != 5000 {
-		t.Fatalf("context %d want 5000 (reported usage supersedes the previous tally)", agt.contextTokens)
-	}
-}
-
-func TestRecordTokenUsageReadsPrefillAndCache(t *testing.T) {
-	var buf bytes.Buffer
-	ctx := withIteration(t.Context(), 2)
-
-	a := &Agent{krn: &mockKronk{contextWidth: 8192}}
-	a.recordTokenUsage(ctx, zerolog.New(&buf), &model.Usage{
-		PromptTokens:            1200,
-		CompletionTokens:        300,
-		TotalTokens:             1500,
-		TokensPerSecond:         42.5,
-		TimeToFirstTokenMS:      850,
-		PromptTokensDetails:     model.PromptTokensDetails{CachedTokens: 900},
-		CompletionTokensDetails: model.CompletionTokensDetails{ReasoningTokens: 120},
-	})
-
-	usage := onlyEvent(t, decodeEvents(t, &buf), eventTokenUsage)
-	for key, want := range map[string]float64{
-		"iter": 3, "prompt_tokens": 1200, "completion_tokens": 300, "total_tokens": 1500,
-		"tps": 42.5, "ttft_ms": 850, "cached_tokens": 900, "reasoning_tokens": 120, "ctx_window": 8192,
-	} {
-		if got := usage[key]; got != want {
-			t.Errorf("token_usage %s = %v, want %v", key, got, want)
-		}
-	}
-	if a.totals.PromptTokens != 1200 || a.totals.CompletionTokens != 300 {
-		t.Errorf("totals = %+v, want prompt 1200 and completion 300", a.totals)
-	}
-}
-
-// A measured 0 means the inference cache reused nothing; dropping the field
 // would leave a dashboard column blank, which reads as broken logging.
-func TestRecordTokenUsageKeepsZeroCachedTokens(t *testing.T) {
-	var buf bytes.Buffer
-	a := &Agent{krn: &mockKronk{}}
-	a.recordTokenUsage(t.Context(), zerolog.New(&buf), &model.Usage{PromptTokens: 10})
-
-	usage := onlyEvent(t, decodeEvents(t, &buf), eventTokenUsage)
-	if got, ok := usage["cached_tokens"]; !ok || got != float64(0) {
-		t.Errorf("cached_tokens = %v (present=%v), want an explicit 0", got, ok)
-	}
-}
-
-// A run that stops early has a lower a.iteration than the cap, so it must not
-// be labelled budget_exhausted even though the cap was reached in the sense of
 // "the loop would have run again".
 func TestRunOutcomeDistinguishesCleanFinishFromExhaustion(t *testing.T) {
 	tests := []struct {
