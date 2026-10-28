@@ -1280,36 +1280,6 @@ func TestRecordTokenUsageKeepsZeroCachedTokens(t *testing.T) {
 // A run that stops early has a lower a.iteration than the cap, so it must not
 // be labelled budget_exhausted even though the cap was reached in the sense of
 // "the loop would have run again".
-func TestFinalCommandOutput(t *testing.T) {
-	tests := []struct {
-		name    string
-		outputs []string
-		want    string
-	}{
-		{"no outputs", nil, ""},
-		{"single output", []string{"out"}, "out"},
-		{"joined with separator", []string{"a", "b"}, "a\n---\nb"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := finalCommandOutput(tt.outputs); got != tt.want {
-				t.Errorf("got %q want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestFinalCommandOutputIsCapped(t *testing.T) {
-	outputs := []string{strings.Repeat("a", 40000), strings.Repeat("b", 40000)}
-	got := finalCommandOutput(outputs)
-	if len(got) > finalOutputBytes+64 {
-		t.Errorf("len %d exceeds cap %d plus marker", len(got), finalOutputBytes)
-	}
-	if !strings.Contains(got, "truncated") {
-		t.Errorf("missing truncation marker")
-	}
-}
-
 func TestRunOutcomeDistinguishesCleanFinishFromExhaustion(t *testing.T) {
 	tests := []struct {
 		name         string

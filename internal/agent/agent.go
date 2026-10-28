@@ -41,11 +41,6 @@ const (
 	// budget is still bounded rather than falling back to an unbounded payload.
 	assumedContextWindow = 8192
 
-	// finalOutputBytes bounds the stdout dump of every command result. Stdout is
-	// consumed by whatever runs the harness, so an unbounded join becomes that
-	// consumer's token cost.
-	finalOutputBytes = 64 * 1024
-
 	heartbeatInterval = 5 * time.Second
 )
 
@@ -102,13 +97,6 @@ func heartbeatWithCancel(log zerolog.Logger, msg string) func() {
 	}
 }
 
-func finalCommandOutput(commandOutputs []string) string {
-	if len(commandOutputs) == 0 {
-		return ""
-	}
-	return textutil.Truncate(strings.Join(commandOutputs, "\n---\n"), finalOutputBytes)
-}
-
 func toolResultBudgetBytes(cfg config.Config, contextWindow int) int {
 	if cfg.Agent.MaxOutputBytes > 0 {
 		return cfg.Agent.MaxOutputBytes
@@ -132,7 +120,6 @@ type Agent struct {
 
 	conversation       []model.D     // Full message history, including tool results.
 	toolDocs           []model.D     // Tool schemas sent alongside every request.
-	commandOutputs     []string      // Captured command results, in the order they ran.
 	store              *output.Store // Captured output handles, or nil when disabled.
 	contextTokens      int64         // Live context size, driving compaction.
 	iteration          int           // Zero-based index of the round now running.
@@ -205,10 +192,6 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *lxd.Client
 		}
 	}
 
-	if len(a.commandOutputs) > 0 {
-		fmt.Println(finalCommandOutput(a.commandOutputs))
-	}
-
 	contextUsedPercent := 0.0
 	if window := a.krn.ModelConfig().ContextWindow(); window > 0 {
 		contextUsedPercent = float64(a.contextTokens) / float64(window) * 100
@@ -254,8 +237,6 @@ func (a *Agent) runIteration(ctx context.Context, cli *lxd.Client, conf config.C
 		return err
 	}
 
-	// The reported usage is the measurement; anything this turn appends on top
-	// of it is tallied by addToolTokens below.
 	a.recordTokenUsage(iterCtx, iterLog, resp.Usage)
 	a.contextTokens = 0
 	if resp.Usage != nil {
@@ -269,9 +250,6 @@ func (a *Agent) runIteration(ctx context.Context, cli *lxd.Client, conf config.C
 	}
 
 	content := logModelOutput(iterCtx, iterLog, iter, msg, conf.Truncation.LogContent)
-	// Bare tool calls carry no text, so without this a turn leaves no model
-	// output trace at all. The shape event proves the model was heard and
-	// shows what it returned, instead of looking like dropped logging.
 	otlp.LogEvent(iterCtx, iterLog, zerolog.DebugLevel, "assistant message", map[string]any{
 		"iter":   iter + 1,
 		"finish": finishReason,
@@ -297,7 +275,7 @@ func (a *Agent) runIteration(ctx context.Context, cli *lxd.Client, conf config.C
 		return nil
 	}
 
-	if len(toolCalls) == 0 && a.iteration+1 < a.maxIterations && !a.taskStatusNudged && a.finalRunStatus == (TaskStatusOutcome{}) {
+	if len(toolCalls) == 0 && a.iteration+1 < a.maxIterations && a.finalRunStatus == (TaskStatusOutcome{}) {
 		a.taskStatusNudged = true
 		otlp.LogEvent(iterCtx, iterLog, zerolog.WarnLevel, "finished without task_status, injecting nudge and continuing", map[string]any{
 			"iter":   iter + 1,
@@ -316,15 +294,11 @@ func (a *Agent) runIteration(ctx context.Context, cli *lxd.Client, conf config.C
 	a.conversation = append(a.conversation, buildAssistantMessage(msg, toolCallDocs, conf.Agent.Reasoning()))
 
 	toolStart := time.Now()
-	toolResponses, newOutputs := a.executeToolCalls(iterCtx, cli, conf, toolCalls)
+	toolResponses := a.executeToolCalls(iterCtx, cli, conf, toolCalls)
 	toolDur = time.Since(toolStart)
-	a.commandOutputs = append(a.commandOutputs, newOutputs...)
 	a.conversation = append(a.conversation, toolResponses...)
 	a.addToolTokens(iterCtx, toolResponses)
 
-	if len(a.commandOutputs) > 0 {
-		iterLog.Debug().Int("outs", len(a.commandOutputs)).Msg("collected outputs so far")
-	}
 	return nil
 }
 
@@ -366,8 +340,6 @@ func (a *Agent) recordTokenUsage(ctx context.Context, log zerolog.Logger, usage 
 	if iter, ok := iterationFromContext(ctx); ok {
 		fields["iter"] = iter
 	}
-	// Kronk auto-tunes the window, so the configured value (0 = auto) is not
-	// the real limit; only the model's reported window is.
 	if window := a.krn.ModelConfig().ContextWindow(); window > 0 {
 		fields["ctx_window"] = window
 	}
@@ -414,7 +386,7 @@ func (a *Agent) callChat(ctx context.Context, req model.D, iter int) (model.Chat
 
 	resp, err := a.krn.Chat(callCtx, req)
 	if err != nil {
-		return model.ChatResponse{}, fmt.Errorf("kronk chat iteration %d: %w", iter+1, err)
+		return model.ChatResponse{}, fmt.Errorf("chat iteration %d: %w", iter+1, err)
 	}
 	return resp, nil
 }
@@ -471,9 +443,8 @@ func (a *Agent) buildToolCallDocsWithContext(ctx context.Context, toolCalls []mo
 	return docs
 }
 
-func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg config.Config, toolCalls []model.ResponseToolCall) ([]model.D, []string) {
+func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg config.Config, toolCalls []model.ResponseToolCall) []model.D {
 	var toolResponses []model.D
-	var commandOutputs []string
 
 	iter, _ := iterationFromContext(ctx)
 	for _, tc := range toolCalls {
@@ -499,25 +470,20 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 			duration = time.Since(start)
 		}
 
-		status := toolStatusSuccess
 		resultSize := len(result)
 
 		var content string
-		var failure error
 
 		a.totals.ToolCalls++
 		env, isEnvelope := parseToolEnvelope(result)
 		switch {
 		case err != nil:
-			status = toolStatusFailed
-			failure = err
 			content = buildToolErrorContent(err)
 			resultSize = len(content)
 			a.totals.ToolFailures++
 		case isEnvelope:
 			if env.Data.Result.Captured {
 				id := env.Data.Result.OutputID
-				commandOutputs = append(commandOutputs, fmt.Sprintf("<captured output_id=%s>", id))
 				otlp.LogEvent(ctx, a.log, zerolog.InfoLevel, "command output too large for inline context, captured to file", map[string]any{
 					"tool":   tc.Function.Name,
 					"id":     tc.ID,
@@ -527,18 +493,12 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 			content = result
 		default:
 			content = buildToolSuccessContent(tc.Function.Name, result)
-			if tc.Function.Name == "vm_exec" {
-				commandOutputs = append(commandOutputs, result)
-				otlp.LogEvent(ctx, a.log, zerolog.InfoLevel, "command output", map[string]any{
-					"command_output": textutil.Truncate(result, cfg.Truncation.CommandOutput),
-				})
-			}
 		}
 
 		if a.toolResultBudget > 0 && resultSize > a.toolResultBudget {
 			content = buildContextOverflowContent(tc.Function.Name, resultSize, a.toolResultBudget, a.store != nil)
-			if status == toolStatusSuccess {
-				failure = fmt.Errorf("tool result too large: %d bytes over the %d-byte context budget", resultSize, a.toolResultBudget)
+			if err == nil {
+				err = fmt.Errorf("tool result too large: %d bytes over the %d-byte context budget", resultSize, a.toolResultBudget)
 				a.totals.ToolFailures++
 			}
 			otlp.LogEvent(ctx, a.log, zerolog.WarnLevel, "tool output too large", map[string]any{
@@ -551,14 +511,14 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 			})
 		}
 
-		if failure != nil {
+		if err != nil {
 			otlp.LogEvent(ctx, a.log, zerolog.ErrorLevel, "tool execution failed", map[string]any{
 				"event":  eventToolFailed,
 				"iter":   iter,
 				"tool":   tc.Function.Name,
 				"id":     tc.ID,
 				"dur_ms": duration.Milliseconds(),
-				"error":  failure,
+				"error":  err,
 			})
 		} else {
 			otlp.LogEvent(ctx, a.log, zerolog.InfoLevel, "tool succeeded", map[string]any{
@@ -567,7 +527,6 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 				"tool":   tc.Function.Name,
 				"id":     tc.ID,
 				"dur_ms": duration.Milliseconds(),
-				"out":    textutil.Truncate(result, cfg.Truncation.ToolResult),
 			})
 		}
 
@@ -578,15 +537,16 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 		}
 	}
 
-	return toolResponses, commandOutputs
+	return toolResponses
 }
 
 type agentSummarizer struct {
 	krn         Kronk
 	chatTimeout time.Duration
+	maxTokens   int
 }
 
-func (s *agentSummarizer) Summarize(ctx context.Context, systemPrompt, renderedHistory string, maxTokens int) (string, error) {
+func (s *agentSummarizer) Summarize(ctx context.Context, systemPrompt, renderedHistory string) (string, error) {
 	// Dedicated Chat, not an agent turn: no tools, temperature 0, bounded
 	// input. It never touches the run's conversation slice.
 	callCtx, cancel := context.WithTimeout(ctx, s.chatTimeout)
@@ -597,7 +557,7 @@ func (s *agentSummarizer) Summarize(ctx context.Context, systemPrompt, renderedH
 			{"role": "user", "content": renderedHistory},
 		},
 		"temperature": 0,
-		"max_tokens":  maxTokens,
+		"max_tokens":  s.maxTokens,
 		// Thinking would spend the summary's own token budget on <think> and
 		// return no content, which compaction reports as outcome=failed.
 		"enable_thinking": false,
@@ -670,7 +630,7 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
 	compCtx := ctx
 
 	start := time.Now()
-	summarizer := &agentSummarizer{krn: a.krn, chatTimeout: a.chatTimeout}
+	summarizer := &agentSummarizer{krn: a.krn, chatTimeout: a.chatTimeout, maxTokens: cc.MaxSummaryTokens}
 	overhead := a.schemaOverheadTokens(compCtx)
 	before := a.contextTokens
 	win := compactionWindow{Size: window, FixedOverhead: int(overhead)}

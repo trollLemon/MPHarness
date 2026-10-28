@@ -155,7 +155,6 @@ func TestLogEventFieldOrder(t *testing.T) {
 	for range 20 {
 		buf.Reset()
 		LogEvent(context.Background(), logger, zerolog.InfoLevel, "tool succeeded", map[string]any{
-			"out":   strings.Repeat("x", 5000),
 			"id":    "call-1",
 			"tool":  "vm_exec",
 			"iter":  2,
@@ -166,8 +165,7 @@ func TestLogEventFieldOrder(t *testing.T) {
 		tool := strings.Index(line, `"tool"`)
 		id := strings.Index(line, `"id"`)
 		iter := strings.Index(line, `"iter"`)
-		out := strings.Index(line, `"out"`)
-		if event < 0 || iter <= event || tool <= iter || id <= tool || out <= id {
+		if event < 0 || iter <= event || tool <= iter || id <= tool {
 			t.Fatalf("fields out of order: %q...", line[:120])
 		}
 	}
@@ -190,7 +188,6 @@ func TestLogEventPayloadLast(t *testing.T) {
 	for range 20 {
 		buf.Reset()
 		LogEvent(context.Background(), logger, zerolog.InfoLevel, "agent tool call", map[string]any{
-			"out":  strings.Repeat("x", 100),
 			"args": `{"command":"apt --help"}`,
 			"id":   "call-1",
 			"tool": "vm_exec",
@@ -201,11 +198,10 @@ func TestLogEventPayloadLast(t *testing.T) {
 		tool := strings.Index(line, `"tool"`)
 		id := strings.Index(line, `"id"`)
 		args := strings.Index(line, `"args"`)
-		out := strings.Index(line, `"out"`)
-		if iter < 0 || tool < 0 || id < 0 || args < 0 || out < 0 {
+		if iter < 0 || tool < 0 || id < 0 || args < 0 {
 			t.Fatalf("missing keys: %q", line)
 		}
-		if tool <= iter || id <= tool || args <= id || out <= args {
+		if tool <= iter || id <= tool || args <= id {
 			t.Fatalf("payload not last / out of order: %q", line)
 		}
 	}
@@ -216,7 +212,7 @@ func TestLogEventPayloadLast(t *testing.T) {
 // is not, so the list must be exactly the keys the codebase actually logs.
 func TestPayloadKeysMatchEmittedKeys(t *testing.T) {
 	emitted := map[string]bool{
-		"args": true, "text": true, "out": true, "command_output": true,
+		"args": true, "text": true, "command_output": true,
 	}
 	for _, k := range payloadKeyOrder {
 		if !emitted[k] {

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1374,5 +1375,246 @@ func TestDeleteMapsPurgeToForce(t *testing.T) {
 		if server.force == nil || *server.force != purge {
 			t.Fatalf("DeleteInstance force = %v, want %v", server.force, purge)
 		}
+	}
+}
+
+type historyExec struct {
+	command string
+	out     string
+	stderr  string
+	exit    int
+	err     error
+}
+
+func decodeCommandHistory(t *testing.T, data []byte) []commandRecord {
+	t.Helper()
+	dec := json.NewDecoder(bytes.NewReader(data))
+	var got []commandRecord
+	for {
+		var rec commandRecord
+		err := dec.Decode(&rec)
+		if errors.Is(err, io.EOF) {
+			return got
+		}
+		if err != nil {
+			t.Fatalf("decode command history: %v\n%s", err, data)
+		}
+		got = append(got, rec)
+	}
+}
+
+func TestExecRecordsCommandHistory(t *testing.T) {
+	tests := []struct {
+		name      string
+		steps     []historyExec
+		want      []commandRecord
+		wantLines int
+	}{
+		{
+			name:      "success records command and output",
+			steps:     []historyExec{{command: "echo hi", out: "hi\n"}},
+			want:      []commandRecord{{Command: "echo hi", Output: "hi\n"}},
+			wantLines: 1,
+		},
+		{
+			name:      "nonzero exit records the output",
+			steps:     []historyExec{{command: "false", out: "nope\n", exit: 1}},
+			want:      []commandRecord{{Command: "false", Output: "nope\n"}},
+			wantLines: 1,
+		},
+		{
+			name:      "transport error records the error text",
+			steps:     []historyExec{{command: "boom", err: errors.New("connection reset")}},
+			want:      []commandRecord{{Command: "boom", Output: "Exec error: vm exec transport failed: connection reset"}},
+			wantLines: 1,
+		},
+		{
+			name: "multiple commands keep execution order",
+			steps: []historyExec{
+				{command: "first", out: "1\n"},
+				{command: "second", out: "2\n"},
+			},
+			want: []commandRecord{
+				{Command: "first", Output: "1\n"},
+				{Command: "second", Output: "2\n"},
+			},
+			wantLines: 2,
+		},
+		{
+			name:      "plumbing commands are recorded verbatim",
+			steps:     []historyExec{{command: `{ echo hi; } 2>&1 | head -c 11 > '/tmp/x/output.txt'`, out: "__MPH_EXIT_abc:0\n"}},
+			want:      []commandRecord{{Command: `{ echo hi; } 2>&1 | head -c 11 > '/tmp/x/output.txt'`, Output: "__MPH_EXIT_abc:0\n"}},
+			wantLines: 1,
+		},
+		{
+			name:      "newlines stay inside one JSONL record",
+			steps:     []historyExec{{command: "printf", out: "a\nb\nc"}},
+			want:      []commandRecord{{Command: "printf", Output: "a\nb\nc"}},
+			wantLines: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			replies := repliesWithIdentity(nil)
+			errs := map[string]error{}
+			for _, step := range tt.steps {
+				if step.err != nil {
+					errs[step.command] = step.err
+					continue
+				}
+				replies[step.command] = reply{out: step.out, stderr: step.stderr, exit: step.exit}
+			}
+
+			server := &fakeServer{}
+			base := commandReplies(replies)
+			server.exec = func(name string, post api.InstanceExecPost, args *lxdclient.InstanceExecArgs) (lxdclient.Operation, error) {
+				if len(post.Command) >= 3 {
+					if err, ok := errs[post.Command[2]]; ok {
+						return nil, err
+					}
+				}
+				return base(name, post, args)
+			}
+			client := newTestClient(server, nil)
+
+			for _, step := range tt.steps {
+				_, _ = client.Exec(context.Background(), "vm", step.command)
+			}
+
+			var buf bytes.Buffer
+			if err := client.WriteCommandHistory(context.Background(), &buf); err != nil {
+				t.Fatalf("WriteCommandHistory: %v", err)
+			}
+
+			got := decodeCommandHistory(t, buf.Bytes())
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("history = %+v, want %+v", got, tt.want)
+			}
+			if lines := strings.Count(buf.String(), "\n"); lines != tt.wantLines {
+				t.Fatalf("history lines = %d, want %d:\n%s", lines, tt.wantLines, buf.String())
+			}
+		})
+	}
+}
+
+func TestExecRecordsPlaceholdersNotSecrets(t *testing.T) {
+	tests := []struct {
+		name        string
+		command     string
+		execCommand string
+		out         string
+		exit        int
+		want        []commandRecord
+	}{
+		{
+			name:        "success scrubs the secret",
+			command:     "echo %{TOKEN}",
+			execCommand: "echo s3cret",
+			out:         "s3cret\n",
+			want:        []commandRecord{{Command: "echo %{TOKEN}", Output: "%{TOKEN}\n"}},
+		},
+		{
+			name:        "nonzero exit scrubs the secret from the output",
+			command:     "echo %{TOKEN}",
+			execCommand: "echo s3cret",
+			out:         "boom s3cret\n",
+			exit:        7,
+			want:        []commandRecord{{Command: "echo %{TOKEN}", Output: "boom %{TOKEN}\n"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := &fakeServer{}
+			server.exec = commandReplies(repliesWithIdentity(map[string]reply{
+				tt.execCommand: {out: tt.out, exit: tt.exit},
+			}))
+			client := newTestClient(server, mapResolver{"TOKEN": "s3cret"})
+
+			_, _ = client.Exec(context.Background(), "vm", tt.command)
+
+			var buf bytes.Buffer
+			if err := client.WriteCommandHistory(context.Background(), &buf); err != nil {
+				t.Fatalf("WriteCommandHistory: %v", err)
+			}
+			got := decodeCommandHistory(t, buf.Bytes())
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("history = %+v, want %+v", got, tt.want)
+			}
+			if strings.Contains(buf.String(), "s3cret") {
+				t.Fatalf("history leaked the secret: %s", buf.String())
+			}
+		})
+	}
+}
+
+type countingWriter struct {
+	writes int
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	w.writes++
+	return len(p), nil
+}
+
+type failWriter struct {
+	err error
+}
+
+func (w failWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+func TestWriteCommandHistoryErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		commands   []string
+		writer     io.Writer
+		wantWrites int
+		wantErr    string
+	}{
+		{
+			name:       "empty history writes nothing",
+			writer:     &countingWriter{},
+			wantWrites: 0,
+		},
+		{
+			name:    "nil writer is rejected",
+			writer:  nil,
+			wantErr: "writer",
+		},
+		{
+			name:     "writer failure is returned",
+			commands: []string{"echo hi"},
+			writer:   failWriter{err: errors.New("disk full")},
+			wantErr:  "disk full",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := &fakeServer{}
+			server.exec = commandReplies(repliesWithIdentity(map[string]reply{"echo hi": {out: "hi\n"}}))
+			client := newTestClient(server, nil)
+			for _, cmd := range tt.commands {
+				_, _ = client.Exec(context.Background(), "vm", cmd)
+			}
+
+			counter, _ := tt.writer.(*countingWriter)
+			err := client.WriteCommandHistory(context.Background(), tt.writer)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("WriteCommandHistory: %v", err)
+			}
+			if counter != nil && counter.writes != tt.wantWrites {
+				t.Fatalf("writes = %d, want %d", counter.writes, tt.wantWrites)
+			}
+		})
 	}
 }

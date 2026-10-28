@@ -312,7 +312,6 @@ func TestExecuteToolCallsRejectsOversizedVMCExecOutput(t *testing.T) {
 		captures      bool
 		output        string
 		exit          int
-		wantOutputs   int
 		wantSubs      []string
 		reject        []string
 		wantFailures  int
@@ -320,19 +319,19 @@ func TestExecuteToolCallsRejectsOversizedVMCExecOutput(t *testing.T) {
 		wantTooLarge  bool
 	}{
 		{
-			name: "captures available", captures: true, output: strings.Repeat("x", 5000), wantOutputs: 1,
+			name: "captures available", captures: true, output: strings.Repeat("x", 5000),
 			wantSubs:     []string{`"status":"FAILED"`, "capture: true"},
 			reject:       []string{strings.Repeat("x", 100)},
 			wantFailures: 1, wantTooLarge: true,
 		},
 		{
-			name: "captures unavailable", captures: false, output: strings.Repeat("x", 5000), wantOutputs: 1,
+			name: "captures unavailable", captures: false, output: strings.Repeat("x", 5000),
 			wantSubs:     []string{`"status":"FAILED"`, "narrower"},
 			reject:       []string{strings.Repeat("x", 100), "capture: true"},
 			wantFailures: 1, wantTooLarge: true,
 		},
 		{
-			name: "under budget stays inline", captures: true, output: strings.Repeat("x", 500), wantOutputs: 1,
+			name: "under budget stays inline", captures: true, output: strings.Repeat("x", 500),
 			wantSubs:      []string{`"status":"SUCCESS"`, strings.Repeat("x", 100)},
 			wantSucceeded: true,
 		},
@@ -384,12 +383,9 @@ func TestExecuteToolCallsRejectsOversizedVMCExecOutput(t *testing.T) {
 					Name: "vm_exec", Arguments: model.ToolCallArguments{"command": "ls"},
 				},
 			}}
-			responses, outputs := agt.executeToolCalls(context.Background(), cli, cfg, calls)
+			responses := agt.executeToolCalls(context.Background(), cli, cfg, calls)
 			if len(responses) != 1 {
 				t.Fatalf("responses = %d, want 1", len(responses))
-			}
-			if len(outputs) != tt.wantOutputs {
-				t.Fatalf("command outputs = %d, want %d", len(outputs), tt.wantOutputs)
 			}
 			if agt.totals.ToolFailures != tt.wantFailures {
 				t.Errorf("tool failures = %d, want %d", agt.totals.ToolFailures, tt.wantFailures)

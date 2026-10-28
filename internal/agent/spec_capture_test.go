@@ -475,71 +475,9 @@ func TestCaptureLogsAttributionLine(t *testing.T) {
 	tc := model.ResponseToolCall{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{
 		Name: "vm_exec", Arguments: model.ToolCallArguments{"command": "echo hi"},
 	}}
-	_, outputs := agt.executeToolCalls(context.Background(), newTestClient(t), cfg, []model.ResponseToolCall{tc})
-	if len(outputs) != 1 || !strings.HasPrefix(outputs[0], "<captured output_id=") {
-		t.Fatalf("want capture placeholder, got %v", outputs)
-	}
+	agt.executeToolCalls(context.Background(), newTestClient(t), cfg, []model.ResponseToolCall{tc})
 	if !strings.Contains(buf.String(), "too large for inline context") {
 		t.Fatalf("missing capture attribution log line:\n%s", buf.String())
 	}
 }
 
-// Each command's own output must be observable while the run is in flight.
-// Only the final output is logged at the end, so without a per-command record a
-// long multi-command run gives no way to attribute output to a step.
-func TestExecuteToolCallsLogsPerCommandOutput(t *testing.T) {
-	var buf bytes.Buffer
-	cfg := config.Config{
-		VM:         config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
-		Model:      "m",
-		Prompt:     "p",
-		Output:     config.OutputConfig{Enabled: true, Mode: "auto", MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200},
-		Truncation: config.TruncationConfig{CommandOutput: 8, LogContent: 8, ToolResult: 8, Nudge: 8},
-	}
-	f := &fakeOutputExec{fn: func(name, cmd string) (string, error) {
-		switch {
-		case strings.Contains(cmd, "grep -a -c"):
-			return "0", nil
-		case strings.Contains(cmd, "__MPH_EXIT_"):
-			return exitMarker(cmd) + "0", nil
-		case strings.Contains(cmd, "cat "):
-			return "hi there", nil
-		case strings.Contains(cmd, "wc -c"):
-			return "4", nil
-		case strings.Contains(cmd, "wc -l"):
-			return "1", nil
-		}
-		return "", nil
-	}}
-	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 1<<20)
-	agt := NewAgent(zerolog.New(&buf), &mockKronk{}, Options{
-		MaxIterations: 1,
-		ChatTimeout:   time.Second,
-		TotalTimeout:  time.Second,
-		LLM:           defaultLLMConfig(),
-		RunID:         "run-cmdlog",
-	})
-	agt.store = store
-	tc := model.ResponseToolCall{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{
-		Name: "vm_exec", Arguments: model.ToolCallArguments{"command": "echo hi", "capture": true},
-	}}
-	agt.executeToolCalls(context.Background(), newTestClient(t), cfg, []model.ResponseToolCall{tc})
-
-	found := false
-	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
-		var rec map[string]any
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			continue
-		}
-		if rec["message"] != "command output" {
-			continue
-		}
-		found = true
-		if rec["command_output"] == nil {
-			t.Errorf("missing command_output key: %v", rec)
-		}
-	}
-	if !found {
-		t.Fatalf("no per-command command output event:\n%s", buf.String())
-	}
-}

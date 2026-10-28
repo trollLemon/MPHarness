@@ -2,6 +2,7 @@ package harness
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"io"
 	"strings"
@@ -66,5 +67,91 @@ func TestPromptExistingVMEmptyLineRetries(t *testing.T) {
 	}
 	if err := promptExistingVM(in, io.Discard, "vm"); !errors.Is(err, errPromptRead) {
 		t.Fatalf("exhausted input want errPromptRead, got %v", err)
+	}
+}
+
+var errHistoryWrite = errors.New("history write failed")
+
+type fakeCommandHistory struct {
+	calls       int
+	gotErr      error
+	gotDeadline bool
+	err         error
+}
+
+func (f *fakeCommandHistory) WriteCommandHistory(ctx context.Context, _ io.Writer) error {
+	f.calls++
+	f.gotErr = ctx.Err()
+	_, f.gotDeadline = ctx.Deadline()
+	return f.err
+}
+
+func TestWriteCommandHistory(t *testing.T) {
+	tests := []struct {
+		name         string
+		writer       io.Writer
+		cancelRun    bool
+		histErr      error
+		wantCalls    int
+		wantErr      error
+		wantDeadline bool
+	}{
+		{
+			name:         "writes with a valid writer",
+			writer:       io.Discard,
+			wantCalls:    1,
+			wantDeadline: true,
+		},
+		{
+			name:      "nil writer is a no-op",
+			wantCalls: 0,
+		},
+		{
+			name:         "client error is returned",
+			writer:       io.Discard,
+			histErr:      errHistoryWrite,
+			wantCalls:    1,
+			wantErr:      errHistoryWrite,
+			wantDeadline: true,
+		},
+		{
+			name:         "cancelled run context still flushes",
+			writer:       io.Discard,
+			cancelRun:    true,
+			wantCalls:    1,
+			wantDeadline: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tt.cancelRun {
+				cancel()
+			}
+
+			hist := &fakeCommandHistory{err: tt.histErr}
+			err := writeCommandHistory(ctx, hist, tt.writer)
+
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("err = %v, want %v", err, tt.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if hist.calls != tt.wantCalls {
+				t.Fatalf("calls = %d, want %d", hist.calls, tt.wantCalls)
+			}
+			if tt.wantCalls == 0 {
+				return
+			}
+			if hist.gotErr != nil {
+				t.Fatalf("flush context err = %v, want detached from the run context", hist.gotErr)
+			}
+			if hist.gotDeadline != tt.wantDeadline {
+				t.Fatalf("flush context deadline present = %v, want %v", hist.gotDeadline, tt.wantDeadline)
+			}
+		})
 	}
 }

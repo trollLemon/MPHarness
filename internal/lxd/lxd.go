@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -68,6 +69,8 @@ type Client struct {
 	redactor *secrets.Redactor
 	images   map[string]lxd.ImageServer
 	identity map[string]vmIdentity
+
+	cmdHistory []commandRecord
 
 	connectImage func(url string, args *lxd.ConnectionArgs) (lxd.ImageServer, error)
 }
@@ -305,7 +308,31 @@ func (c *Client) Delete(ctx context.Context, name string, purge bool) error {
 	return nil
 }
 
-// Exec runs a command in the VM and returns the combined stdout and stderr.
+// commandRecord is one tracked Exec call in the --cmd-output-file transcript.
+type commandRecord struct {
+	Command string `json:"command"`
+	Output  string `json:"output"`
+}
+
+// WriteCommandHistory writes one JSONL record per tracked Exec call, in the
+// order the commands ran. A nil writer or a write failure is an error.
+func (c *Client) WriteCommandHistory(ctx context.Context, w io.Writer) error {
+	if w == nil {
+		return fmt.Errorf("command history writer is nil")
+	}
+	enc := json.NewEncoder(w)
+	for _, r := range c.cmdHistory {
+		if err := enc.Encode(r); err != nil {
+			return fmt.Errorf("write command history: %w", err)
+		}
+	}
+	return nil
+}
+
+// Exec runs a command in the VM, records it for --cmd-output-file, and returns
+// the combined stdout and stderr. The record keeps the original command text,
+// including any secret placeholders. It stores the scrubbed command output when
+// the command ran, and the scrubbed error text when execution failed.
 func (c *Client) Exec(ctx context.Context, name string, command string) (string, error) {
 	if err := validateName(name); err != nil {
 		return "", err
@@ -328,6 +355,9 @@ func (c *Client) Exec(ctx context.Context, name string, command string) (string,
 	c.log.Debug().Str("vm", name).Str("cmd", command).Msgf("Running %s", command)
 
 	out, exit, err := c.run(ctx, name, resolved, identity)
+
+	c.recordCommand(command, out, err)
+
 	if err != nil {
 		c.log.Debug().Err(err).Str("vm", name).Str("cmd", command).Msg("vm exec failed")
 		return "", fmt.Errorf("vm exec %q %q failed: %w", name, command, err)
@@ -340,6 +370,21 @@ func (c *Client) Exec(ctx context.Context, name string, command string) (string,
 	}
 
 	return c.redactor.Scrub(out), nil
+}
+
+func (c *Client) recordCommand(command, output string, err error) {
+
+	var record commandRecord
+
+	record.Command = command
+	scrubbed := c.redactor.Scrub(output)
+	if err != nil {
+		record.Output = "Exec error: " + err.Error()
+	} else {
+		record.Output = scrubbed
+	}
+
+	c.cmdHistory = append(c.cmdHistory, record)
 }
 
 // run executes one command over the websocket exec API, returning combined

@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	"github.com/rs/zerolog"
@@ -542,7 +541,7 @@ type fakeSummarizer struct {
 	err     error
 }
 
-func (f *fakeSummarizer) Summarize(_ context.Context, _, _ string, _ int) (string, error) {
+func (f *fakeSummarizer) Summarize(_ context.Context, _, _ string) (string, error) {
 	return f.summary, f.err
 }
 
@@ -677,7 +676,7 @@ type sequenceSummarizer struct {
 	rendered  []string
 }
 
-func (s *sequenceSummarizer) Summarize(_ context.Context, systemPrompt, renderedHistory string, _ int) (string, error) {
+func (s *sequenceSummarizer) Summarize(_ context.Context, systemPrompt, renderedHistory string) (string, error) {
 	s.calls++
 	s.systems = append(s.systems, systemPrompt)
 	s.rendered = append(s.rendered, renderedHistory)
@@ -691,20 +690,6 @@ func (s *sequenceSummarizer) Summarize(_ context.Context, systemPrompt, rendered
 		err = s.errs[idx]
 	}
 	return summary, err
-}
-
-type countingSummarizer struct {
-	summary   string
-	calls     int
-	maxTokens []int
-	rendered  []string
-}
-
-func (f *countingSummarizer) Summarize(_ context.Context, _, renderedHistory string, maxTokens int) (string, error) {
-	f.calls++
-	f.maxTokens = append(f.maxTokens, maxTokens)
-	f.rendered = append(f.rendered, renderedHistory)
-	return f.summary, nil
 }
 
 func TestCompactRepairsRejectedSummary(t *testing.T) {
@@ -723,8 +708,11 @@ func TestCompactRepairsRejectedSummary(t *testing.T) {
 	if !strings.Contains(sum.systems[1], "rejected") {
 		t.Errorf("repair system prompt must name the rejection: %q", sum.systems[1])
 	}
-	if !strings.Contains(sum.rendered[1], "Previous rejected handover") || !strings.Contains(sum.rendered[1], "too short") {
-		t.Errorf("repair history must carry the rejected summary: %q", sum.rendered[1])
+	if sum.rendered[1] != sum.rendered[0] {
+		t.Errorf("repair must re-render the conversation, got %q", sum.rendered[1])
+	}
+	if strings.Contains(sum.rendered[1], "too short") {
+		t.Errorf("repair history must not carry the rejected summary: %q", sum.rendered[1])
 	}
 }
 
@@ -780,52 +768,6 @@ func TestCompactReportsFailureReason(t *testing.T) {
 	}
 }
 
-func TestSummarizerInputFitsWindow(t *testing.T) {
-	longResult := strings.Repeat("out", 4000)
-	conversation := []model.D{
-		{"role": "system", "content": "sys"},
-		{"role": "user", "content": "Task:\nrun ls"},
-	}
-	for i := 0; i < 4; i++ {
-		conversation = append(conversation,
-			model.D{"role": "assistant", "content": "calling", "tool_calls": []model.D{
-				{"function": model.D{"name": "vm_exec", "arguments": `{"command":"ls"}`}}}},
-			model.D{"role": "tool", "name": "vm_exec", "content": longResult},
-		)
-	}
-	est := func(s string) int { return len(s)/4 + 1 }
-
-	tests := []struct {
-		name          string
-		window        int
-		budget        int
-		wantRendered  int
-		wantOversized bool
-	}{
-		{name: "budget larger than the window", window: 4096, budget: 2048, wantRendered: 4000},
-		{name: "window several times the budget", window: 32768, budget: 2048, wantRendered: 4000},
-		{name: "window barely fits the prompt", window: 1024, budget: 2048, wantRendered: 0},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			sum := &countingSummarizer{summary: summaryWith("listed the requested output")}
-			_, _, _, _ = compactConversation(context.Background(), conversation, nil, 512, tt.budget,
-				compactionWindow{Size: tt.window}, sum, 0)
-
-			if sum.calls != 1 {
-				t.Fatalf("want 1 summarizer call, got %d", sum.calls)
-			}
-			if used := est(compactionSystemPrompt) + est(sum.rendered[0]); used > tt.window {
-				t.Fatalf("summarizer prompt is %d tokens, over the %d window", used, tt.window)
-			}
-			if len(sum.rendered[0]) < tt.wantRendered {
-				t.Fatalf("render is %d bytes, want at least %d; the bound must not gut the history",
-					len(sum.rendered[0]), tt.wantRendered)
-			}
-		})
-	}
-}
-
 func TestBuildUserMessageGuidesHandles(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -846,7 +788,7 @@ func TestBuildUserMessageGuidesHandles(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildUserMessage("do things", "Completed: x. Remaining: y.", "", tt.handles, tt.applied)
+			got := buildUserMessage("do things", "Completed: x. Remaining: y.", tt.handles, tt.applied)
 			for _, want := range tt.wantSubs {
 				if !strings.Contains(got, want) {
 					t.Fatalf("missing %q in %q", want, got)
@@ -856,96 +798,38 @@ func TestBuildUserMessageGuidesHandles(t *testing.T) {
 	}
 }
 
-func TestTruncateHeadKeepsValidUTF8(t *testing.T) {
-	tests := []struct {
-		name string
-		s    string
-		n    int
-	}{
-		{"cut lands mid rune", strings.Repeat("a", 5) + "日本語テキスト", 8},
-		{"cut lands on rune start", strings.Repeat("a", 5) + "日本語テキスト", 9},
-		{"emoji surrogate pair", strings.Repeat("a", 3) + "🙂🙂🙂", 5},
-		{"no truncation", "short", 100},
-		{"zero budget", "anything", 0},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := truncateHead(tt.s, tt.n)
-			if !utf8.ValidString(got) {
-				t.Fatalf("invalid UTF-8: %q", got)
-			}
-			if body := strings.TrimSuffix(got, "…(truncated)"); !strings.HasPrefix(tt.s, body) {
-				t.Fatalf("truncation is not a prefix of the input: %q", got)
-			}
-		})
-	}
-}
-
-func TestRenderHistory(t *testing.T) {
-	longToolResult := []model.D{
-		{"role": "assistant", "content": "calling", "tool_calls": []model.D{
+func TestRenderHistoryKeepsFullMessageContent(t *testing.T) {
+	longUser := strings.Repeat("u", 100000)
+	longAssistant := strings.Repeat("a", 100000)
+	longResult := strings.Repeat("z", 5000)
+	conversation := []model.D{
+		{"role": "system", "content": "SYS-BYTES"},
+		{"role": "user", "content": longUser},
+		{"role": "assistant", "content": longAssistant, "reasoning_content": "reasoning", "tool_calls": []model.D{
 			{"function": model.D{"name": "vm_exec", "arguments": `{"command":"ls"}`}}}},
-		{"role": "tool", "name": "vm_exec", "content": strings.Repeat("z", 5000)},
-	}
-	manyTurns := make([]model.D, 0, 800)
-	for i := 0; i < 400; i++ {
-		manyTurns = append(manyTurns, model.D{
-			"role": "assistant", "content": strings.Repeat("a", 1000),
-			"reasoning_content": strings.Repeat("r", 1000),
-		})
+		{"role": "tool", "name": "vm_exec", "content": longResult},
 	}
 
-	tests := []struct {
-		name         string
-		conversation []model.D
-		budget       int
-		maxBytes     int
-		maxRendered  int
-		want         []string
+	got := renderHistory(conversation)
+	for _, tt := range []struct {
+		name string
+		want string
 	}{
-		{
-			// Prose is the summarizer's only view of what the agent was doing,
-			// but a single rambling message still has to respect the budget.
-			name:         "assistant prose respects the per-message budget",
-			conversation: []model.D{{"role": "assistant", "content": strings.Repeat("a", 100000)}},
-			budget:       100, maxBytes: 1 << 20,
-			maxRendered: 500,
-		},
-		{
-			name:         "user text respects the per-message budget",
-			conversation: []model.D{{"role": "user", "content": strings.Repeat("u", 100000)}},
-			budget:       100, maxBytes: 1 << 20,
-			maxRendered: 500,
-		},
-		{
-			// budget is per-message, so without a total bound a long
-			// conversation renders to len(messages)*budget and the summarizer
-			// prompt grows without limit.
-			name:         "total render is bounded by maxBytes",
-			conversation: manyTurns,
-			budget:       1000, maxBytes: 8000,
-			maxRendered: 8000,
-		},
-		{
-			// The summarizer has to see what a command actually returned.
-			name:         "full text keeps tool output in the summarizer view",
-			conversation: longToolResult,
-			budget:       100, maxBytes: 1 << 20,
-			want: []string{"vm_exec", "zzz"},
-		},
+		{"user content", "user: " + longUser + "\n"},
+		{"assistant content", longAssistant + "\n"},
+		{"assistant reasoning", "reasoning\n"},
+		{"tool call", "tool: vm_exec({\"command\":\"ls\"})\n"},
+		{"tool result", "tool result vm_exec: " + longResult + "\n"},
+	} {
+		if !strings.Contains(got, tt.want) {
+			t.Errorf("%s was not rendered in full", tt.name)
+		}
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := renderHistory(tt.conversation, tt.budget, tt.maxBytes)
-			if tt.maxRendered > 0 && len(got) > tt.maxRendered {
-				t.Fatalf("rendered %d bytes, over the %d bound", len(got), tt.maxRendered)
-			}
-			for _, want := range tt.want {
-				if !strings.Contains(got, want) {
-					t.Fatalf("missing %q in %q", want, got)
-				}
-			}
-		})
+	if strings.Contains(got, "SYS-BYTES") {
+		t.Error("system message must not be rendered as history")
+	}
+	if strings.Contains(got, "…(truncated)") {
+		t.Error("render must not truncate message content")
 	}
 }
 
@@ -965,10 +849,12 @@ func TestCompactionSystemPromptProtectsHandleIDs(t *testing.T) {
 	}
 }
 
-func TestBuildUserMessageCarriesNoVerbatimTail(t *testing.T) {
-	got := buildUserMessage("do things", "Done: x", "", nil, 1)
-	if strings.Contains(got, "## Recent activity") {
-		t.Fatalf("handover still carries a verbatim recent block: %q", got)
+func TestBuildUserMessageCarriesNoRecentResults(t *testing.T) {
+	got := buildUserMessage("do things", "Done: x", nil, 1)
+	for _, heading := range []string{"## Recent activity", "## Recent command results"} {
+		if strings.Contains(got, heading) {
+			t.Fatalf("handover still carries %q: %q", heading, got)
+		}
 	}
 }
 
@@ -1008,61 +894,6 @@ func TestCompactAcceptsSummaryWithoutHeadings(t *testing.T) {
 	body, _ := got[1]["content"].(string)
 	if !strings.Contains(body, summary) {
 		t.Fatalf("handover lost the summary: %q", body)
-	}
-}
-
-func TestCompactHandoverCarriesRecentCommandResults(t *testing.T) {
-	conversation := []model.D{
-		{"role": "system", "content": "sys"},
-		{"role": "user", "content": "Task:\nrun curl tests"},
-		{"role": "assistant", "content": "", "tool_calls": []model.D{{
-			"id": "c1",
-			"function": model.D{
-				"name": "vm_exec", "arguments": `{"command":"curl -sS -I https://example.com"}`,
-			},
-		}}},
-		{"role": "tool", "name": "vm_exec", "tool_call_id": "c1", "content": "HTTP/2 200"},
-	}
-	got, outcome, _, _ := compactConversation(context.Background(), conversation, nil, 2048, 4000,
-		compactionWindow{Size: 1 << 20}, &fakeSummarizer{summary: validSummary}, 0)
-	if outcome != "applied" {
-		t.Fatalf("want applied, got %q", outcome)
-	}
-	body, _ := got[1]["content"].(string)
-	for _, want := range []string{"## Recent command results", "curl -sS -I https://example.com", "HTTP/2 200"} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("handover missing %q in %q", want, body)
-		}
-	}
-}
-
-func TestCompactHandoverRecentResultsAreBounded(t *testing.T) {
-	big := strings.Repeat("z", 10000)
-	conversation := []model.D{
-		{"role": "system", "content": "sys"},
-		{"role": "user", "content": "Task:\nrun curl tests"},
-		{"role": "assistant", "content": "", "tool_calls": []model.D{{
-			"id": "c1",
-			"function": model.D{
-				"name": "vm_exec", "arguments": `{"command":"cat huge"}`,
-			},
-		}}},
-		{"role": "tool", "name": "vm_exec", "tool_call_id": "c1", "content": big},
-	}
-	got, outcome, _, _ := compactConversation(context.Background(), conversation, nil, 2048, 4000,
-		compactionWindow{Size: 1 << 20}, &fakeSummarizer{summary: validSummary}, 0)
-	if outcome != "applied" {
-		t.Fatalf("want applied, got %q", outcome)
-	}
-	body, _ := got[1]["content"].(string)
-	if strings.Contains(body, big) {
-		t.Fatal("handover copied the entire tool result instead of a bounded excerpt")
-	}
-	if !strings.Contains(body, "…(truncated)") {
-		t.Fatalf("handover must show that the result was truncated: %q", body)
-	}
-	if len(body) > 4096 {
-		t.Fatalf("handover is %d bytes, want evidence and summary bounded", len(body))
 	}
 }
 
