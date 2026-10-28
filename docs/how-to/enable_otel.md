@@ -102,7 +102,7 @@ Every run panel is a LogQL query over structured log events. Each dashboard-faci
 | `token_usage` | `iter`, `prompt_tokens`, `completion_tokens`, `total_tokens`, `tps`, `cached_tokens`, `reasoning_tokens`, `ttft_ms`, `ctx_window` |
 | `iteration` | `iter`, `dur_ms`, `chat_ms`, `tool_ms` |
 | `agent_tool_call` | `iter`, `tool`, `id`, `args` |
-| `tool_succeeded` / `tool_failed` | `iter`, `tool`, `id`, `dur_ms`, and `out` or `error` |
+| `tool_succeeded` / `tool_failed` | `iter`, `tool`, `id`, `dur_ms`, and `error` |
 | `tool_output_too_large` | `iter`, `tool`, `id`, `bytes`, `budget` |
 | `context_overflow` | `iter`, `outcome`, `replaced`, `reclaimed_bytes`, `prompt_tokens`, `ctx_window`, `error` |
 | `context_compaction` | `iter`, `outcome`, `tok_before`, `tok_after`, `reclaimed`, `thr`, `summary`, `handles`, `compacted`, `try`, `dur_ms`, and `error` on failure |
