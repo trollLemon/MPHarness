@@ -1,10 +1,9 @@
-package agent
+package agent_test
 
 import (
 	"context"
 	"io"
 	"net/http"
-	"testing"
 
 	lxdclient "github.com/canonical/lxd/client"
 	"github.com/canonical/lxd/shared/api"
@@ -41,11 +40,6 @@ func (fakeServer) ExecInstance(_ string, _ api.InstanceExecPost, args *lxdclient
 	return fakeOperation{}, nil
 }
 
-func newTestClient(t *testing.T) *lxd.Client {
-	t.Helper()
-	return lxd.NewWithServer(fakeServer{}, zerolog.Nop(), nil)
-}
-
 type scriptedOutputServer struct {
 	fakeServer
 	fn func(command string) (string, int)
@@ -65,7 +59,6 @@ func (s scriptedOutputServer) ExecInstance(_ string, post api.InstanceExecPost, 
 	return fakeOperation{exit: exit}, nil
 }
 
-func newScriptedTestClient(t *testing.T, fn func(command string) (string, int)) *lxd.Client {
-	t.Helper()
+func newScriptedTestClient(_ testFatal, fn func(command string) (string, int)) *lxd.Client {
 	return lxd.NewWithServer(scriptedOutputServer{fn: fn}, zerolog.Nop(), nil)
 }

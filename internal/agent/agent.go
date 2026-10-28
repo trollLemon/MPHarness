@@ -108,6 +108,32 @@ func toolResultBudgetBytes(cfg config.Config, contextWindow int) int {
 	return max(min(budget, maxToolResultBytes), minToolResultBytes)
 }
 
+// argInt reads an integer tool argument. kronk decodes tool arguments through
+// json.Decoder.UseNumber, so a JSON integer arrives as json.Number; float64
+// covers callers that build arguments in Go.
+func argInt(args map[string]any, key string) int {
+	switch v := args[key].(type) {
+	case json.Number:
+		n, err := v.Int64()
+		if err != nil {
+			return 0
+		}
+		return int(n)
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case json.RawMessage:
+		var n int
+		if err := json.Unmarshal(v, &n); err != nil {
+			return 0
+		}
+		return n
+	default:
+		return 0
+	}
+}
+
 // Agent comprises of the state of a single run, including the logger, model, conversation, and metrics.
 type Agent struct {
 	log           zerolog.Logger   // Run-scoped logger, already tagged component=agent.
@@ -306,17 +332,10 @@ func (a *Agent) addToolTokens(ctx context.Context, msgs []model.D) {
 	var batch strings.Builder
 	for _, m := range msgs {
 		c, _ := m["content"].(string)
-		if c == "" {
-			continue
-		}
 		batch.WriteString(c)
 		batch.WriteByte('\n')
 	}
-	added := int64(a.estimateTokens(ctx, batch.String()))
-	if added == 0 {
-		return
-	}
-	a.contextTokens += added
+	a.contextTokens += int64(a.estimateTokens(ctx, batch.String()))
 }
 
 func (a *Agent) recordTokenUsage(ctx context.Context, log zerolog.Logger, usage *model.Usage) {
@@ -593,10 +612,7 @@ func (a *Agent) estimateTokens(ctx context.Context, text string) int {
 // schemaOverheadTokens is the floor for the overhead: every request carries the
 // tool schemas, whatever the reported usage says.
 func (a *Agent) schemaOverheadTokens(ctx context.Context) int64 {
-	schemas, err := json.Marshal(a.toolDocs)
-	if err != nil {
-		return 0
-	}
+	schemas, _ := json.Marshal(a.toolDocs)
 	return int64(a.estimateTokens(ctx, string(schemas)))
 }
 
@@ -676,10 +692,8 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
 		})
 
 		return
-	case "skipped":
-		// Nothing to rewrite yet.
-		return
 	default:
+		// "failed": the summarizer could not produce an acceptable handover.
 		a.compactionAttempts++
 		return
 	}

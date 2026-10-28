@@ -1,935 +1,1660 @@
-package agent
+package agent_test
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	"github.com/rs/zerolog"
+	"pgregory.net/rapid"
 
+	"github.com/trollLemon/MPHarness/internal/agent"
 	"github.com/trollLemon/MPHarness/internal/config"
-	"github.com/trollLemon/MPHarness/internal/textutil"
 )
 
-const validHandoverSummary = `## Done
-- Ran the requested commands and captured their results, for example curl 8.5.0 and HTTP/2 200.
-
-## In progress
-- None.
-
-## Not started
-- None.`
-
-type mockKronk struct {
-	responses    []model.ChatResponse
-	errs         []error
-	calls        int
-	respIdx      int
-	captured     []model.D
-	chatFunc     func(context.Context, model.D) (model.ChatResponse, error)
-	contextWidth int
-	failHandover bool
+type mbtScenario struct {
+	maxIterations int
+	window        int
+	responses     []mbtResponse
+	compaction    config.CompactionConfig
+	agent         config.AgentConfig
+	output        config.OutputConfig
+	allowed       map[string]bool
+	prompt        string
+	contentDir    string
+	vmName        string
+	llm           config.LLMConfig
+	scripted      func(command string) (string, int)
+	chatFunc      func(context.Context, model.D) (model.ChatResponse, error)
+	handover      func(context.Context, model.D) (model.ChatResponse, error)
+	failHandover  bool
+	overflowAt    int
+	overflowErr   error
+	tokenizeErr   error
+	tokenizeZero  bool
+	enforceWindow bool
 }
 
-func (m *mockKronk) ModelConfig() model.Config {
-	cfg := model.Config{}
-	if m.contextWidth > 0 {
-		cfg.PtrContextWindow = &m.contextWidth
-	}
-	return cfg
+type mbtResponse struct {
+	content      string
+	reasoning    string
+	finishReason string
+	toolCalls    []model.ResponseToolCall
+	usage        *model.Usage
+	delta        bool
+	noChoices    bool
+	nilMessage   bool
 }
 
-func (m *mockKronk) Chat(ctx context.Context, req model.D) (model.ChatResponse, error) {
-	if m.chatFunc != nil {
-		return m.chatFunc(ctx, req)
-	}
-	if isCompactionRequest(req) {
-		m.calls++
-		m.captured = append(m.captured, req)
-		if m.failHandover {
-			return model.ChatResponse{}, context.DeadlineExceeded
-		}
-		return chatResp(validHandoverSummary, "", model.FinishReasonStop, nil, nil), nil
-	}
-	idx := m.respIdx
-	m.respIdx++
-	m.calls++
-	m.captured = append(m.captured, req)
-	if idx < len(m.responses) {
-		var err error
-		if idx < len(m.errs) && m.errs[idx] != nil {
-			err = m.errs[idx]
-		}
-		return m.responses[idx], err
-	}
-	return model.ChatResponse{}, nil
+type mbtRun struct {
+	status   *agent.TaskStatusOutcome
+	err      error
+	summary  map[string]any
+	events   []map[string]any
+	mock     *mockKronk
+	enforcer *windowEnforcingKronk
 }
 
-func isCompactionRequest(req model.D) bool {
-	msgs, _ := req["messages"].([]model.D)
-	for _, m := range msgs {
-		if c, _ := m["content"].(string); c != "" && len(c) > 40 && contains(c, "handover") {
-			return true
+func runMBT(t testFatal, sc mbtScenario) mbtRun {
+	responses := make([]model.ChatResponse, len(sc.responses))
+	for i, r := range sc.responses {
+		switch {
+		case r.noChoices:
+			responses[i] = model.ChatResponse{}
+		case r.nilMessage:
+			responses[i] = model.ChatResponse{Choices: []model.Choice{{}}}
+		case r.delta:
+			responses[i] = deltaResp(r.content, r.reasoning, r.finishReason)
+		default:
+			responses[i] = chatResp(r.content, r.reasoning, r.finishReason, r.toolCalls, r.usage)
 		}
 	}
-	if s, _ := req["system"].(string); contains(s, "handover") {
-		return true
+
+	mock := &mockKronk{
+		responses:    responses,
+		contextWidth: sc.window,
+		failHandover: sc.failHandover,
+		handover:     sc.handover,
+		chatFunc:     sc.chatFunc,
+		overflowAt:   sc.overflowAt,
+		overflowErr:  sc.overflowErr,
+		tokenizeErr:  sc.tokenizeErr,
+		tokenizeZero: sc.tokenizeZero,
 	}
-	return false
+
+	var krn agent.Kronk = mock
+	var enforcer *windowEnforcingKronk
+	if sc.enforceWindow {
+		enforcer = &windowEnforcingKronk{mockKronk: mock}
+		krn = enforcer
+	}
+
+	var buf bytes.Buffer
+	agt := agent.NewAgent(zerolog.New(&buf), krn, agent.Options{
+		MaxIterations: sc.maxIterations,
+		ChatTimeout:   time.Second,
+		TotalTimeout:  30 * time.Second,
+		LLM:           sc.llm,
+		RunID:         "mbt",
+	})
+
+	vmName := sc.vmName
+	if vmName == "" {
+		vmName = "vm"
+	}
+	prompt := sc.prompt
+	if prompt == "" {
+		prompt = "task"
+	}
+	conf := config.Config{
+		VM:              config.VMConfig{Name: vmName, CPU: 1, RAM: "1G", Disk: "5G"},
+		Model:           "m",
+		Prompt:          prompt,
+		ContentDir:      sc.contentDir,
+		AllowedCommands: sc.allowed,
+		Compaction:      sc.compaction,
+		Agent:           sc.agent,
+		Output:          sc.output,
+	}
+
+	scripted := sc.scripted
+	if scripted == nil {
+		scripted = identityScripted
+	}
+	cli := newScriptedTestClient(t, scripted)
+
+	status, err := agt.Execute(context.Background(), conf, cli)
+	events := decodeEvents(t, &buf)
+	return mbtRun{
+		status:   status,
+		err:      err,
+		summary:  onlyEvent(t, events, eventRunSummary),
+		events:   events,
+		mock:     mock,
+		enforcer: enforcer,
+	}
 }
 
-func (m *mockKronk) Tokenize(_ context.Context, d model.D) (model.TokenizeResponse, error) {
-	input, _ := d["input"].(string)
-	n := len(input) / bytesPerToken
-	if n < 1 && len(input) > 0 {
-		n = 1
+func genMBTScenario(t *rapid.T) mbtScenario {
+	maxIter := rapid.IntRange(1, 10).Draw(t, "maxIterations")
+	nResp := rapid.IntRange(1, 20).Draw(t, "numResponses")
+
+	sc := mbtScenario{
+		maxIterations: maxIter,
+		window:        rapid.IntRange(0, 65536).Draw(t, "window"),
+		responses:     make([]mbtResponse, nResp),
+		llm:           defaultLLMConfig(),
 	}
-	return model.TokenizeResponse{Tokens: n}, nil
+	for i := range sc.responses {
+		sc.responses[i] = genMBTResponse(t)
+	}
+	return sc
 }
 
-func strPtr(s string) *string { return &s }
+func genMBTResponse(t *rapid.T) mbtResponse {
+	fr := rapid.SampledFrom([]string{
+		model.FinishReasonStop,
+		model.FinishReasonTool,
+		model.FinishReasonLength,
+	}).Draw(t, "finishReason")
 
-func chatResp(content, reasoning, finishReason string, toolCalls []model.ResponseToolCall, usage *model.Usage) model.ChatResponse {
-	var frPtr *string
-	if finishReason != "" {
-		frPtr = strPtr(finishReason)
+	var toolCalls []model.ResponseToolCall
+	if fr == model.FinishReasonTool {
+		n := rapid.IntRange(1, 2).Draw(t, "numToolCalls")
+		toolCalls = make([]model.ResponseToolCall, n)
+		for j := range toolCalls {
+			name := rapid.SampledFrom([]string{"vm_exec", "vm_info", "task_status"}).Draw(t, "toolName")
+			switch name {
+			case "task_status":
+				status := rapid.SampledFrom([]string{agent.TaskStatusCompleted, agent.TaskStatusFailed, agent.TaskStatusError}).Draw(t, "taskStatus")
+				toolCalls[j] = taskStatusCall("ts", status, "mbt test")
+			case "vm_info":
+				toolCalls[j] = vmInfoCall("c1")
+			default:
+				toolCalls[j] = vmExecCall("c1", "echo x")
+			}
+		}
 	}
-	msg := &model.ResponseMessage{
-		Content:   content,
-		Reasoning: reasoning,
-		ToolCalls: toolCalls,
+
+	pt := rapid.IntRange(5, 1000).Draw(t, "promptTokens")
+	ct := rapid.IntRange(5, 1000).Draw(t, "completionTokens")
+	tt := rapid.IntRange(pt+ct, pt+ct+500).Draw(t, "totalTokens")
+
+	return mbtResponse{
+		content:      rapid.StringN(0, 20, 100).Draw(t, "content"),
+		finishReason: fr,
+		toolCalls:    toolCalls,
+		usage:        &model.Usage{TotalTokens: tt, PromptTokens: pt, CompletionTokens: ct},
 	}
-	return model.ChatResponse{
-		ID:      "test-id",
-		Object:  "chat.completion",
-		Created: 123,
-		Model:   "test-model",
-		Choices: []model.Choice{
-			{
-				Index:           0,
-				Message:         msg,
-				FinishReasonPtr: frPtr,
+}
+
+func vmExecCall(id, command string) model.ResponseToolCall {
+	return model.ResponseToolCall{ID: id, Type: "function", Function: model.ResponseToolCallFunction{
+		Name: "vm_exec", Arguments: model.ToolCallArguments{"command": command},
+	}}
+}
+
+func vmInfoCall(id string) model.ResponseToolCall {
+	return model.ResponseToolCall{ID: id, Type: "function", Function: model.ResponseToolCallFunction{
+		Name: "vm_info", Arguments: model.ToolCallArguments{},
+	}}
+}
+
+func taskStatusCall(id, status, reason string) model.ResponseToolCall {
+	return model.ResponseToolCall{ID: id, Type: "function", Function: model.ResponseToolCallFunction{
+		Name: "task_status", Arguments: model.ToolCallArguments{"status": status, "reason": reason},
+	}}
+}
+
+func totalUsage(total int) *model.Usage {
+	return &model.Usage{TotalTokens: total, PromptTokens: total}
+}
+
+func overflowErr(prompt, window int) error {
+	return fmt.Errorf("kronk chat iteration 1: %w: input tokens [%d] exceed context window [%d]",
+		model.ErrInvalidRequest, prompt, window)
+}
+
+type windowEnforcingKronk struct {
+	*mockKronk
+	overWindow int
+}
+
+func promptTokens(req model.D) int {
+	n := 0
+	if msgs, ok := req["messages"].([]model.D); ok {
+		for _, m := range msgs {
+			if c, _ := m["content"].(string); c != "" {
+				n += len(c) / testBytesPerToken
+			}
+		}
+	}
+	if tools, ok := req["tools"].([]model.D); ok {
+		for _, d := range tools {
+			b, _ := json.Marshal(d)
+			n += len(b) / testBytesPerToken
+		}
+	}
+	return n
+}
+
+func (w *windowEnforcingKronk) Chat(ctx context.Context, req model.D) (model.ChatResponse, error) {
+	n := promptTokens(req)
+	if n > w.contextWidth {
+		if !isCompactionRequest(req) {
+			w.overWindow++
+		}
+		return model.ChatResponse{}, overflowErr(n, w.contextWidth)
+	}
+	resp, err := w.mockKronk.Chat(ctx, req)
+	if err == nil && len(resp.Choices) > 0 {
+		completion := 0
+		if resp.Usage != nil {
+			completion = resp.Usage.CompletionTokens
+		}
+		resp.Usage = &model.Usage{PromptTokens: n, CompletionTokens: completion, TotalTokens: n + completion}
+	}
+	return resp, err
+}
+
+func expectedToolCounts(responses []mbtResponse, consumed int) (executed, failures, logged int) {
+	for i := 0; i < consumed && i < len(responses); i++ {
+		stopped := false
+		for _, tc := range responses[i].toolCalls {
+			logged++
+			if stopped {
+				continue
+			}
+			executed++
+			switch tc.Function.Name {
+			case "vm_info":
+				failures++
+			case "task_status":
+				stopped = true
+			}
+		}
+		if stopped {
+			break
+		}
+	}
+	return
+}
+
+func sumUsages(usages []*model.Usage) (prompt, completion int64) {
+	for _, u := range usages {
+		if u == nil {
+			continue
+		}
+		prompt += int64(u.PromptTokens)
+		completion += int64(u.CompletionTokens)
+	}
+	return
+}
+
+func TestMBTInitialPrompt(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		prompt := rapid.StringN(1, 40, 100).Draw(t, "prompt")
+		contentDir := rapid.SampledFrom([]string{"", "/tmp/content"}).Draw(t, "contentDir")
+		allowed := rapid.SampledFrom([]map[string]bool{nil, {"ls": true, "cat": true}}).Draw(t, "allowed")
+		outputEnabled := rapid.Bool().Draw(t, "outputEnabled")
+
+		sc := mbtScenario{
+			maxIterations: 1,
+			window:        8192,
+			vmName:        "secret-vm",
+			prompt:        prompt,
+			contentDir:    contentDir,
+			allowed:       allowed,
+			output:        config.OutputConfig{Enabled: outputEnabled},
+			responses: []mbtResponse{{
+				finishReason: model.FinishReasonStop,
+				usage:        totalUsage(10),
+			}},
+			llm: defaultLLMConfig(),
+		}
+		run := runMBT(t, sc)
+
+		req := run.mock.captured[0]
+		msgs, _ := req["messages"].([]model.D)
+		if len(msgs) < 2 {
+			t.Fatalf("initial request has %d messages, want at least 2", len(msgs))
+		}
+		if msgs[0]["role"] != "system" || msgs[1]["role"] != "user" {
+			t.Fatalf("initial roles = %v/%v, want system/user", msgs[0]["role"], msgs[1]["role"])
+		}
+		system, _ := msgs[0]["content"].(string)
+		user, _ := msgs[1]["content"].(string)
+		if !strings.Contains(user, strings.TrimSpace(prompt)) {
+			t.Errorf("user prompt missing task %q: %q", prompt, user)
+		}
+		if !strings.Contains(user, "Allowed commands:") {
+			t.Errorf("user prompt missing allowed-commands header: %q", user)
+		}
+		if len(allowed) > 0 {
+			for name := range allowed {
+				if !strings.Contains(user, name) {
+					t.Errorf("user prompt missing allowed command %q: %q", name, user)
+				}
+			}
+		} else if !strings.Contains(user, "(all)") {
+			t.Errorf("user prompt must allow all commands: %q", user)
+		}
+		if contentDir != "" && !strings.Contains(system, "Additional Content") {
+			t.Errorf("system prompt missing content-dir suffix: %q", system)
+		}
+		for _, leaked := range []string{"secret-vm", "16G", "100G", "noble", "VM Configuration"} {
+			if strings.Contains(system, leaked) {
+				t.Errorf("system prompt leaked VM detail %q: %q", leaked, system)
+			}
+		}
+		tools, _ := req["tools"].([]model.D)
+		names := map[string]bool{}
+		for _, d := range tools {
+			fn, _ := d["function"].(model.D)
+			name, _ := fn["name"].(string)
+			names[name] = true
+		}
+		for _, want := range []string{"vm_exec", "vm_info", "task_status"} {
+			if !names[want] {
+				t.Errorf("missing tool %q in %v", want, names)
+			}
+		}
+		for _, outputTool := range []string{"output_search", "output_read"} {
+			if names[outputTool] != outputEnabled {
+				t.Errorf("tool %q present=%v, want %v", outputTool, names[outputTool], outputEnabled)
+			}
+		}
+	})
+}
+
+func TestMBTRequestShape(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		temp := rapid.SampledFrom([]float64{0, 0.7, 0.8}).Draw(t, "temperature")
+		topP := rapid.Float64Range(0, 1).Draw(t, "topP")
+		topK := rapid.IntRange(0, 40).Draw(t, "topK")
+		maxTokens := rapid.IntRange(0, 4096).Draw(t, "maxOutputTokens")
+
+		sc := mbtScenario{
+			maxIterations: 3,
+			window:        rapid.IntRange(0, 65536).Draw(t, "window"),
+			responses: []mbtResponse{
+				{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{vmExecCall("c1", "echo x")}, usage: totalUsage(100)},
+				{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{taskStatusCall("ts", agent.TaskStatusCompleted, "done")}, usage: totalUsage(100)},
 			},
-		},
-		Usage: usage,
-	}
-}
-
-func defaultLLMConfig() config.LLMConfig {
-	return config.LLMConfig{Temperature: 0.0, TopP: 0.1, TopK: 1}
-}
-
-func TestLLMConfig(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  config.LLMConfig
-		want config.LLMConfig
-	}{
-		{
-			name: "defaults when empty",
-			cfg:  config.LLMConfig{},
-			want: config.LLMConfig{MaxOutputTokens: config.DefaultLLMMaxOutputTokens},
-		},
-		{
-			name: "passthrough preserves values",
-			cfg:  config.LLMConfig{Temperature: 0.7, TopP: 0.9, TopK: 5, MaxOutputTokens: 512},
-			want: config.LLMConfig{Temperature: 0.7, TopP: 0.9, TopK: 5, MaxOutputTokens: 512},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			a := NewAgent(zerolog.Nop(), &mockKronk{}, Options{
-				MaxIterations: 3,
-				ChatTimeout:   time.Second,
-				TotalTimeout:  5 * time.Second,
-				LLM:           tt.cfg,
-				RunID:         "",
-			})
-			if a.llmConfig != tt.want {
-				t.Fatalf("got %+v want %+v", a.llmConfig, tt.want)
-			}
-		})
-	}
-}
-
-
-func TestBuildUserPrompt(t *testing.T) {
-	tests := []struct {
-		name   string
-		conf   config.Config
-		want   []string
-		leaked []string
-	}{
-		{
-			name: "basic",
-			conf: config.Config{VM: config.VMConfig{Name: "test-vm", CPU: 2, RAM: "4G", Disk: "20G"}, Prompt: "do stuff"},
-			want: []string{"do stuff", "Allowed commands"},
-		},
-		{
-			name: "with allowed commands",
-			conf: config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task", AllowedCommands: map[string]bool{"ls": true, "cat": true}},
-			want: []string{"ls", "cat"},
-		},
-		{
-			name:   "no vm details leaked",
-			conf:   config.Config{VM: config.VMConfig{Name: "secret-vm", CPU: 8, RAM: "16G", Disk: "100G", Image: "noble"}, Prompt: "task"},
-			want:   []string{"task", "Allowed commands"},
-			leaked: []string{"secret-vm", "16G", "100G", "noble", "CPUs", "Memory", "Disk", "VM Configuration"},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			p := buildUserPrompt(tt.conf)
-			if p == "" {
-				t.Fatalf("empty prompt")
-			}
-			for _, w := range tt.want {
-				if !contains(p, w) {
-					t.Errorf("missing %q in %q", w, p)
-				}
-			}
-			for _, leaked := range tt.leaked {
-				if contains(p, leaked) {
-					t.Errorf("prompt should not contain VM detail %q, got %q", leaked, p)
-				}
-			}
-		})
-	}
-}
-
-func contains(s, sub string) bool {
-	return len(s) >= len(sub) && (func() bool {
-		for i := 0; i <= len(s)-len(sub); i++ {
-			if s[i:i+len(sub)] == sub {
-				return true
-			}
+			llm: config.LLMConfig{Temperature: temp, TopP: topP, TopK: topK, MaxOutputTokens: maxTokens},
 		}
-		return false
-	})()
-}
+		run := runMBT(t, sc)
+		if run.err != nil {
+			t.Fatalf("Execute: %v", run.err)
+		}
 
-func TestBuildToolDocuments(t *testing.T) {
-	tests := []struct {
-		name       string
-		cfg        config.Config
-		want       []string
-		wantAbsent []string
-	}{
-		{"base tools", config.Config{}, []string{"vm_exec", "vm_info"}, []string{"output_search", "output_read"}},
-		{"output tools when enabled", config.Config{Output: config.OutputConfig{Enabled: true}}, []string{"vm_exec", "vm_info", "output_search", "output_read"}, nil},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			docs := buildToolDocuments(tt.cfg)
-			if len(docs) == 0 {
-				t.Fatalf("no tool docs")
-			}
-			names := map[string]bool{}
-			for _, d := range docs {
-				fn, _ := d["function"].(model.D)
-				name, _ := fn["name"].(string)
-				names[name] = true
-			}
-			for _, want := range tt.want {
-				if !names[want] {
-					t.Errorf("missing tool %q", want)
-				}
-			}
-			for _, absent := range tt.wantAbsent {
-				if names[absent] {
-					t.Errorf("tool %q must be omitted, got %v", absent, names)
-				}
-			}
-		})
-	}
-}
+		wantTopK := any(nil)
+		switch {
+		case topK > 0:
+			wantTopK = topK
+		case temp == 0:
+			wantTopK = 1
+		}
+		wantMaxTokens := maxTokens
+		if wantMaxTokens == 0 {
+			wantMaxTokens = config.DefaultLLMMaxOutputTokens
+		}
 
-func TestBuildInitialConversation(t *testing.T) {
-	tests := []struct {
-		name       string
-		conf       config.Config
-		wantSysSub string
-	}{
-		{"plain", config.Config{VM: config.VMConfig{Name: "vm1", CPU: 1, RAM: "1G", Disk: "10G"}, Prompt: "task"}, ""},
-		{"content dir adds suffix", config.Config{VM: config.VMConfig{Name: "vm1", CPU: 1, RAM: "1G", Disk: "10G"}, Prompt: "task", ContentDir: "/tmp/content"}, "Additional Content"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			conv := buildInitialConversation(tt.conf)
-			if len(conv) != 2 {
-				t.Fatalf("conv len %d want 2", len(conv))
+		agentRequests := 0
+		for _, req := range run.mock.captured {
+			if isCompactionRequest(req) {
+				continue
 			}
-			if conv[0]["role"] != "system" {
-				t.Errorf("first role %v want system", conv[0]["role"])
-			}
-			if conv[1]["role"] != "user" {
-				t.Errorf("second role %v want user", conv[1]["role"])
-			}
-			if tt.wantSysSub != "" {
-				sys, _ := conv[0]["content"].(string)
-				if !contains(sys, tt.wantSysSub) {
-					t.Errorf("system prompt missing %q", tt.wantSysSub)
-				}
-			}
-		})
-	}
-}
-
-
-
-
-func TestBuildAssistantMessageAndAppend(t *testing.T) {
-	tests := []struct {
-		name          string
-		content       string
-		reasoning     string
-		sendReasoning []bool
-		wantContent   any
-		wantReasoning any
-	}{
-		{"content and reasoning kept", "hi", "think", nil, "hi", "think"},
-		{"reasoning dropped when disabled", "hi", "think", []bool{false}, "hi", nil},
-		{"empty content omitted", "", "think", nil, nil, "think"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			msg := &model.ResponseMessage{Content: tt.content, Reasoning: tt.reasoning}
-			am := buildAssistantMessage(msg, []model.D{{"id": "1"}}, tt.sendReasoning...)
-			if am["role"] != "assistant" {
-				t.Errorf("role %v", am["role"])
-			}
-			if am["content"] != tt.wantContent {
-				t.Errorf("content %v want %v", am["content"], tt.wantContent)
-			}
-			if am["reasoning_content"] != tt.wantReasoning {
-				t.Errorf("reasoning %v want %v", am["reasoning_content"], tt.wantReasoning)
-			}
-			conv2 := append([]model.D{{"role": "system"}}, am)
-			if len(conv2) != 2 {
-				t.Fatalf("append len %d", len(conv2))
-			}
-		})
-	}
-}
-
-func TestBuildToolResponseMessage(t *testing.T) {
-	tests := []struct {
-		name     string
-		id       string
-		toolName string
-		content  string
-	}{
-		{"exec result", "call-1", "vm_exec", "out"},
-		{"search result", "call-2", "output_search", "{}"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tc := model.ResponseToolCall{ID: tt.id, Type: "function", Function: model.ResponseToolCallFunction{Name: tt.toolName}}
-			m := buildToolResponseMessage(tc, tt.content)
-			if m["role"] != "tool" {
-				t.Errorf("role %v", m["role"])
-			}
-			if m["tool_call_id"] != tt.id {
-				t.Errorf("tool_call_id %v", m["tool_call_id"])
-			}
-			if m["name"] != tt.toolName {
-				t.Errorf("name %v", m["name"])
-			}
-			if m["content"] != tt.content {
-				t.Errorf("content %v", m["content"])
-			}
-		})
-	}
-}
-
-func TestBuildChatRequest(t *testing.T) {
-	conv := []model.D{{"role": "user", "content": "task"}}
-	docs := []model.D{{"type": "function"}}
-
-	tests := []struct {
-		name          string
-		llm           config.LLMConfig
-		wantTopK      any
-		wantMaxTokens int
-		wantTemp      float64
-		wantTopP      float64
-	}{
-		{"greedy defaults", config.LLMConfig{}, 1, config.DefaultLLMMaxOutputTokens, 0, 0},
-		{"config values pass through", config.LLMConfig{Temperature: 0.7, TopP: 0.9, TopK: 5}, 5, config.DefaultLLMMaxOutputTokens, 0.7, 0.9},
-		{"explicit top_k wins over greedy default", config.LLMConfig{Temperature: 0, TopK: 40}, 40, config.DefaultLLMMaxOutputTokens, 0, 0},
-		{"top_k omitted when sampling without top_k", config.LLMConfig{Temperature: 0.8}, nil, config.DefaultLLMMaxOutputTokens, 0.8, 0},
-		{"explicit top_k kept when sampling", config.LLMConfig{Temperature: 0.8, TopK: 20}, 20, config.DefaultLLMMaxOutputTokens, 0.8, 0},
-		{"explicit max tokens win", config.LLMConfig{MaxOutputTokens: 512}, 1, 512, 0, 0},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			req := buildChatRequest(conv, docs, tt.llm)
-			if req["top_k"] != tt.wantTopK {
-				t.Errorf("top_k %v want %v", req["top_k"], tt.wantTopK)
-			}
-			if req["max_tokens"] != tt.wantMaxTokens {
-				t.Errorf("max_tokens %v want %d", req["max_tokens"], tt.wantMaxTokens)
-			}
+			agentRequests++
 			if _, ok := req["tool_choice"]; ok {
 				t.Error("tool_choice must not be sent: the model decides when to call tools")
 			}
-			if req["temperature"] != tt.wantTemp {
-				t.Errorf("temperature %v want %v", req["temperature"], tt.wantTemp)
-			}
-			if req["top_p"] != tt.wantTopP {
-				t.Errorf("top_p %v want %v", req["top_p"], tt.wantTopP)
-			}
 			if req["parallel_tool_calls"] != true {
-				t.Errorf("parallel_tool_calls %v want true", req["parallel_tool_calls"])
+				t.Errorf("parallel_tool_calls = %v, want true", req["parallel_tool_calls"])
 			}
 			if req["reasoning_effort"] != model.ReasoningEffortMedium {
-				t.Errorf("reasoning_effort %v want medium", req["reasoning_effort"])
+				t.Errorf("reasoning_effort = %v, want medium", req["reasoning_effort"])
+			}
+			if req["temperature"] != temp {
+				t.Errorf("temperature = %v, want %v", req["temperature"], temp)
+			}
+			if req["top_p"] != topP {
+				t.Errorf("top_p = %v, want %v", req["top_p"], topP)
+			}
+			if req["max_tokens"] != wantMaxTokens {
+				t.Errorf("max_tokens = %v, want %d", req["max_tokens"], wantMaxTokens)
+			}
+			gotTopK, hasTopK := req["top_k"]
+			if wantTopK == nil {
+				if hasTopK {
+					t.Errorf("top_k = %v, want omitted for sampling without top_k", gotTopK)
+				}
+			} else if gotTopK != wantTopK {
+				t.Errorf("top_k = %v, want %v", gotTopK, wantTopK)
 			}
 			msgs, _ := req["messages"].([]model.D)
-			if len(msgs) != 1 || msgs[0]["content"] != "task" {
-				t.Errorf("messages %v", req["messages"])
+			if len(msgs) < 2 || msgs[0]["role"] != "system" {
+				t.Errorf("request messages must start with system and user: %v", msgs)
 			}
 			tools, _ := req["tools"].([]model.D)
-			if len(tools) != 1 {
-				t.Errorf("tools %v", req["tools"])
+			if len(tools) == 0 {
+				t.Error("request has no tool documents")
 			}
-		})
-	}
-}
-
-func TestBuildAssistantMessageReasoning(t *testing.T) {
-	tests := []struct {
-		name          string
-		sendReasoning []bool
-		wantReasoning any
-	}{
-		{"included by default", nil, "because"},
-		{"included when enabled", []bool{true}, "because"},
-		{"omitted when disabled", []bool{false}, nil},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			m := buildAssistantMessage(&model.ResponseMessage{Content: "hi", Reasoning: "because"}, nil, tt.sendReasoning...)
-			if m["reasoning_content"] != tt.wantReasoning {
-				t.Errorf("reasoning_content %v want %v", m["reasoning_content"], tt.wantReasoning)
-			}
-			if m["content"] != "hi" {
-				t.Errorf("content %v want hi", m["content"])
-			}
-		})
-	}
-}
-
-func TestBuildLengthNudgeMessages(t *testing.T) {
-	const nudgePrefix = "Your previous response hit the token limit"
-	long := strings.Repeat("x", 2500)
-
-	tests := []struct {
-		name          string
-		msg           *model.ResponseMessage
-		wantLen       int
-		wantRole      string
-		wantContent   string
-		wantReasoning string
-	}{
-		{
-			name:     "empty message yields only the nudge",
-			msg:      &model.ResponseMessage{},
-			wantLen:  1,
-			wantRole: "user",
-		},
-		{
-			name:        "content is truncated into the replayed turn",
-			msg:         &model.ResponseMessage{Content: long},
-			wantLen:     2,
-			wantRole:    "assistant",
-			wantContent: textutil.Truncate(long, config.DefaultNudgeBytes),
-		},
-		{
-			name:          "reasoning is replayed too",
-			msg:           &model.ResponseMessage{Reasoning: "because"},
-			wantLen:       2,
-			wantRole:      "assistant",
-			wantReasoning: "because",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			msgs := buildNudgeMessages(tt.msg, config.DefaultNudgeBytes, lengthNudge)
-			if len(msgs) != tt.wantLen {
-				t.Fatalf("msgs len %d want %d: %v", len(msgs), tt.wantLen, msgs)
-			}
-			if msgs[0]["role"] != tt.wantRole {
-				t.Errorf("role %v want %v", msgs[0]["role"], tt.wantRole)
-			}
-			if tt.wantContent != "" && msgs[0]["content"] != tt.wantContent {
-				t.Errorf("content len %d want %d", len(msgs[0]["content"].(string)), len(tt.wantContent))
-			}
-			if tt.wantReasoning != "" && msgs[0]["reasoning_content"] != tt.wantReasoning {
-				t.Errorf("reasoning %v want %v", msgs[0]["reasoning_content"], tt.wantReasoning)
-			}
-			last := msgs[len(msgs)-1]
-			if last["role"] != "user" {
-				t.Errorf("last role %v want user", last["role"])
-			}
-			if nudge, _ := last["content"].(string); !strings.HasPrefix(nudge, nudgePrefix) {
-				t.Errorf("nudge %q", nudge)
-			}
-		})
-	}
-}
-
-
-
-
-func TestAssistantMessageShapeLogged(t *testing.T) {
-	var buf bytes.Buffer
-	mock := &mockKronk{
-		contextWidth: 8192,
-		responses: []model.ChatResponse{
-			chatResp("", "", model.FinishReasonTool, []model.ResponseToolCall{
-				{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{Name: "bogus_tool", Arguments: model.ToolCallArguments{}}},
-			}, &model.Usage{TotalTokens: 100}),
-			chatResp("done", "", model.FinishReasonStop, nil, &model.Usage{TotalTokens: 50}),
-		},
-	}
-	agt := NewAgent(zerolog.New(&buf), mock, Options{
-		MaxIterations: 3,
-		ChatTimeout:   time.Second,
-		TotalTimeout:  30 * time.Second,
-		LLM:           defaultLLMConfig(),
-		RunID:         "run-shape",
+		}
+		if agentRequests != 2 {
+			t.Fatalf("agent requests = %d, want 2", agentRequests)
+		}
 	})
-	conf := config.Config{
-		VM:     config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
-		Model:  "m",
-		Prompt: "task",
-	}
-	if _, err := agt.Execute(context.Background(), conf, newTestClient(t)); err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	found := false
-	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
-		var rec map[string]any
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			continue
-		}
-		if rec["message"] != "assistant message" || rec["iter"] != float64(1) {
-			continue
-		}
-		found = true
-		if rec["calls"] != float64(1) {
-			t.Errorf("calls %v want 1", rec["calls"])
-		}
-		if rec["clen"] != float64(0) || rec["rlen"] != float64(0) {
-			t.Errorf("bare tool call must report zero text lengths, got %v", rec)
-		}
-	}
-	if !found {
-		t.Fatalf("no assistant message shape event for iteration 1:\n%s", buf.String())
-	}
 }
 
-func TestExecuteReportsNoOutputWithoutError(t *testing.T) {
-	mock := &mockKronk{responses: []model.ChatResponse{
-		chatResp("", "", model.FinishReasonStop, nil, &model.Usage{TotalTokens: 1}),
-	}}
-	agt := NewAgent(zerolog.Nop(), mock, Options{
-		MaxIterations: 1,
-		ChatTimeout:   time.Second,
-		TotalTimeout:  5 * time.Second,
-		LLM:           defaultLLMConfig(),
-		RunID:         "run-empty",
+func TestMBTNudge(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		length := rapid.Bool().Draw(t, "lengthNudge")
+		delta := rapid.Bool().Draw(t, "delta")
+		content := rapid.StringN(0, 3000, 12000).Draw(t, "content")
+		reasoning := rapid.StringN(0, 3000, 12000).Draw(t, "reasoning")
+
+		finish := model.FinishReasonStop
+		if length {
+			finish = model.FinishReasonLength
+		}
+		sc := mbtScenario{
+			maxIterations: 3,
+			window:        8192,
+			responses: []mbtResponse{
+				{content: content, reasoning: reasoning, finishReason: finish, usage: totalUsage(100), delta: delta},
+				{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{taskStatusCall("ts", agent.TaskStatusCompleted, "done")}, usage: totalUsage(100)},
+			},
+			llm: defaultLLMConfig(),
+		}
+		run := runMBT(t, sc)
+		if run.err != nil {
+			t.Fatalf("Execute: %v", run.err)
+		}
+		if run.status == nil || run.status.CompletedStatus != agent.TaskStatusCompleted {
+			t.Fatalf("status = %+v, want Completed", run.status)
+		}
+
+		req := run.mock.captured[1]
+		msgs, _ := req["messages"].([]model.D)
+		last := msgs[len(msgs)-1]
+		if last["role"] != "user" {
+			t.Fatalf("last role = %v, want user", last["role"])
+		}
+		nudge, _ := last["content"].(string)
+		if length {
+			if !strings.HasPrefix(nudge, "Your previous response hit the token limit") {
+				t.Errorf("length nudge = %q", nudge)
+			}
+		} else if !strings.Contains(nudge, "task_status") {
+			t.Errorf("task_status nudge = %q", nudge)
+		}
+
+		hasAssistant := false
+		for _, m := range msgs[:len(msgs)-1] {
+			if m["role"] != "assistant" {
+				continue
+			}
+			hasAssistant = true
+			if content != "" {
+				got, _ := m["content"].(string)
+				if !strings.HasPrefix(content, got) {
+					t.Errorf("assistant content = %q, want a prefix of %q", got, content)
+				}
+				if len(content) > config.DefaultNudgeBytes && !strings.Contains(got, "…(truncated") {
+					t.Errorf("long content was not truncated: %q", got)
+				}
+			}
+			if reasoning != "" {
+				got, _ := m["reasoning_content"].(string)
+				if !strings.HasPrefix(reasoning, got) {
+					t.Errorf("assistant reasoning = %q, want a prefix of %q", got, reasoning)
+				}
+				if len(reasoning) > config.DefaultNudgeBytes && !strings.Contains(got, "…(truncated") {
+					t.Errorf("long reasoning was not truncated: %q", got)
+				}
+			}
+		}
+		if (content != "" || reasoning != "") && !hasAssistant {
+			t.Error("nudge must replay the assistant turn when it carried text")
+		}
 	})
-	conf := config.Config{
-		VM:     config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
-		Model:  "m",
-		Prompt: "task",
-	}
-
-	if _, err := agt.Execute(context.Background(), conf, newTestClient(t)); err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
 }
 
-func TestExecute(t *testing.T) {
-	tests := []struct {
-		name      string
-		mock      *mockKronk
-		maxIter   int
-		wantCalls int
-		wantErr   bool
-		llmCfg    *config.LLMConfig
-		vm        config.VMConfig
-		prompt    string
-		verifyReq func(t *testing.T, reqs []model.D)
-	}{
-		{
-			name:    "no tool calls gets a task_status nudge",
-			mock:    &mockKronk{responses: []model.ChatResponse{chatResp("final answer", "thinking", model.FinishReasonStop, nil, &model.Usage{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3, TokensPerSecond: 10})}},
-			maxIter: 5, wantCalls: 2,
-			vm:     config.VMConfig{Name: "test-vm", CPU: 2, RAM: "4G", Disk: "20G"},
-			prompt: "do nothing",
-			verifyReq: func(t *testing.T, reqs []model.D) {
-				if reqs[0]["temperature"] != 0.0 {
-					t.Errorf("temperature %v", reqs[0]["temperature"])
-				}
-				if reqs[0]["top_p"] != 0.1 {
-					t.Errorf("top_p %v", reqs[0]["top_p"])
-				}
-				if len(reqs) < 2 {
-					t.Fatal("no nudge request after a finish without task_status")
-				}
-				msgs, _ := reqs[1]["messages"].([]model.D)
-				if len(msgs) == 0 {
-					t.Fatal("nudge request has no messages")
-				}
-				last := msgs[len(msgs)-1]
-				if last["role"] != "user" {
-					t.Errorf("nudge role %v want user", last["role"])
-				}
-				if content, _ := last["content"].(string); !strings.Contains(content, "task_status") {
-					t.Errorf("nudge %q does not mention task_status", content)
-				}
-			},
-		},
-		{
-			name:    "uses LLMConfig",
-			mock:    &mockKronk{responses: []model.ChatResponse{chatResp("ok", "", model.FinishReasonStop, nil, nil)}},
-			maxIter: 3, wantCalls: 2,
-			llmCfg: &config.LLMConfig{Temperature: 0.7, TopP: 0.9, TopK: 5},
-			verifyReq: func(t *testing.T, reqs []model.D) {
-				if reqs[0]["temperature"] != 0.7 {
-					t.Errorf("temperature %v want 0.7", reqs[0]["temperature"])
-				}
-				if reqs[0]["top_p"] != 0.9 {
-					t.Errorf("top_p %v want 0.9", reqs[0]["top_p"])
-				}
-				if reqs[0]["top_k"] != 5 {
-					t.Errorf("top_k %v want 5", reqs[0]["top_k"])
-				}
-			},
-		},
-		{
-			name:    "empty choices breaks gracefully",
-			mock:    &mockKronk{responses: []model.ChatResponse{{Choices: []model.Choice{}}}},
-			maxIter: 3, wantCalls: 1,
-		},
-		{
-			name: "respects maxIterations",
-			mock: func() *mockKronk {
-				tc := []model.ResponseToolCall{{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{Name: "vm_info", Arguments: model.ToolCallArguments{}}}}
-				resp := chatResp("", "", model.FinishReasonTool, tc, nil)
-				return &mockKronk{responses: []model.ChatResponse{resp, resp, resp, resp, resp}}
-			}(),
-			maxIter: 2, wantCalls: 2,
-		},
-		{
-			name: "handles chat error",
-			mock: &mockKronk{chatFunc: func(ctx context.Context, req model.D) (model.ChatResponse, error) {
-				return model.ChatResponse{}, context.DeadlineExceeded
-			}},
-			maxIter: 3, wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			llmCfg := defaultLLMConfig()
-			if tt.llmCfg != nil {
-				llmCfg = *tt.llmCfg
+func TestMBTNoChoicesEndsRun(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		kind := rapid.SampledFrom([]string{"no_choices", "nil_message"}).Draw(t, "malformedResponse")
+		resp := mbtResponse{}
+		if kind == "no_choices" {
+			resp.noChoices = true
+		} else {
+			resp.nilMessage = true
+		}
+		sc := mbtScenario{
+			maxIterations: rapid.IntRange(2, 5).Draw(t, "maxIterations"),
+			window:        8192,
+			responses:     []mbtResponse{resp},
+			llm:           defaultLLMConfig(),
+		}
+		run := runMBT(t, sc)
+		if run.err != nil {
+			t.Fatalf("Execute: %v", run.err)
+		}
+		if run.status == nil || *run.status != (agent.TaskStatusOutcome{}) {
+			t.Fatalf("status = %+v, want an empty outcome", run.status)
+		}
+		if got := run.summary["iterations"]; got != float64(1) {
+			t.Errorf("iterations = %v, want 1", got)
+		}
+		if got := run.summary["outcome"]; got != "error" {
+			t.Errorf("outcome = %v, want error", got)
+		}
+		if run.mock.agentCalls != 1 {
+			t.Errorf("chat calls = %d, want 1", run.mock.agentCalls)
+		}
+	})
+}
+
+func TestMBTMaxIterationsInvariant(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		sc := genMBTScenario(t)
+		run := runMBT(t, sc)
+		iterations := run.summary["iterations"].(float64)
+		if iterations > float64(sc.maxIterations) {
+			t.Fatalf("iterations %v exceed maxIterations %d", iterations, sc.maxIterations)
+		}
+	})
+}
+
+func TestMBTTerminatesAtMaxIterations(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		maxIter := rapid.IntRange(1, 8).Draw(t, "maxIterations")
+		extra := rapid.IntRange(0, 5).Draw(t, "extraResponses")
+
+		responses := make([]mbtResponse, maxIter+extra)
+		for i := range responses {
+			responses[i] = mbtResponse{
+				finishReason: model.FinishReasonTool,
+				toolCalls:    []model.ResponseToolCall{vmExecCall("c1", "echo x")},
+				usage:        totalUsage(50),
 			}
-			agent := NewAgent(zerolog.Nop(), tt.mock, Options{
-				MaxIterations: tt.maxIter,
-				ChatTimeout:   time.Second,
-				TotalTimeout:  5 * time.Second,
-				LLM:           llmCfg,
-				RunID:         "",
-			})
-			vm := config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}
-			if tt.vm.Name != "" {
-				vm = tt.vm
-			}
-			prompt := "task"
-			if tt.prompt != "" {
-				prompt = tt.prompt
-			}
-			conf := config.Config{VM: vm, Prompt: prompt}
-			cli := newTestClient(t)
-			_, err := agent.Execute(context.Background(), conf, cli)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("err %v wantErr %v", err, tt.wantErr)
-			}
-			if !tt.wantErr && tt.mock.calls != tt.wantCalls {
-				t.Fatalf("calls %d want %d", tt.mock.calls, tt.wantCalls)
-			}
-			if tt.verifyReq != nil && len(tt.mock.captured) > 0 {
-				tt.verifyReq(t, tt.mock.captured)
-			}
+		}
+
+		run := runMBT(t, mbtScenario{
+			maxIterations: maxIter,
+			window:        16384,
+			responses:     responses,
+			llm:           defaultLLMConfig(),
 		})
-	}
+		if run.err != nil {
+			t.Fatalf("Execute: %v", run.err)
+		}
+		if run.status == nil || *run.status != (agent.TaskStatusOutcome{}) {
+			t.Fatalf("status = %+v, want an empty outcome", run.status)
+		}
+		if got := run.summary["iterations"]; got != float64(maxIter) {
+			t.Errorf("iterations = %v, want %d", got, maxIter)
+		}
+		if got := run.summary["outcome"]; got != "budget_exhausted" {
+			t.Errorf("outcome = %v, want budget_exhausted", got)
+		}
+		if run.mock.agentCalls != maxIter {
+			t.Errorf("chat calls = %d, want %d", run.mock.agentCalls, maxIter)
+		}
+		if run.mock.handoverCalls != 0 {
+			t.Errorf("handover calls = %d, want 0", run.mock.handoverCalls)
+		}
+	})
 }
 
-func TestExecuteReturnsTaskStatus(t *testing.T) {
+func TestMBTTerminatesOnTaskStatus(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		maxIter := rapid.IntRange(3, 10).Draw(t, "maxIterations")
+		tsPosition := rapid.IntRange(0, maxIter-1).Draw(t, "tsPosition")
+		status := rapid.SampledFrom([]string{agent.TaskStatusCompleted, agent.TaskStatusFailed, agent.TaskStatusError}).Draw(t, "status")
+		reason := rapid.SampledFrom([]string{"done", "all checks passed", "command failed"}).Draw(t, "reason")
+		tsFirst := rapid.Bool().Draw(t, "taskStatusFirstInBatch")
+
+		responses := make([]mbtResponse, maxIter+2)
+		for i := range responses {
+			switch {
+			case i == tsPosition && tsFirst:
+				responses[i] = mbtResponse{
+					finishReason: model.FinishReasonTool,
+					toolCalls:    []model.ResponseToolCall{taskStatusCall("ts", status, reason), vmExecCall("later", "echo x")},
+					usage:        totalUsage(50),
+				}
+			case i == tsPosition:
+				responses[i] = mbtResponse{
+					finishReason: model.FinishReasonTool,
+					toolCalls:    []model.ResponseToolCall{vmExecCall("before", "echo x"), taskStatusCall("ts", status, reason)},
+					usage:        totalUsage(50),
+				}
+			default:
+				responses[i] = mbtResponse{
+					finishReason: model.FinishReasonTool,
+					toolCalls:    []model.ResponseToolCall{vmExecCall("c1", "echo x")},
+					usage:        totalUsage(50),
+				}
+			}
+		}
+
+		run := runMBT(t, mbtScenario{
+			maxIterations: maxIter,
+			window:        16384,
+			responses:     responses,
+			llm:           defaultLLMConfig(),
+		})
+		if run.err != nil {
+			t.Fatalf("Execute: %v", run.err)
+		}
+		want := agent.TaskStatusOutcome{CompletedStatus: status, Reason: reason}
+		if run.status == nil || *run.status != want {
+			t.Fatalf("status = %+v, want %+v", run.status, want)
+		}
+		wantIter := tsPosition + 1
+		if got := run.summary["iterations"]; got != float64(wantIter) {
+			t.Errorf("iterations = %v, want %d", got, wantIter)
+		}
+		if got := run.summary["status"]; got != status {
+			t.Errorf("summary status = %v, want %q", got, status)
+		}
+		if got := run.summary["reason"]; got != reason {
+			t.Errorf("summary reason = %v, want %q", got, reason)
+		}
+		wantOutcome := map[string]string{
+			agent.TaskStatusCompleted: "ok",
+			agent.TaskStatusFailed:    "failed",
+			agent.TaskStatusError:     "error",
+		}[status]
+		if got := run.summary["outcome"]; got != wantOutcome {
+			t.Errorf("outcome = %v, want %q", got, wantOutcome)
+		}
+		wantCalls := wantIter
+		if !tsFirst {
+			wantCalls++
+		}
+		if got := run.summary["tool_calls"]; got != float64(wantCalls) {
+			t.Errorf("tool_calls = %v, want %d", got, wantCalls)
+		}
+		if run.mock.agentCalls != wantIter {
+			t.Errorf("chat calls = %d, want %d", run.mock.agentCalls, wantIter)
+		}
+		if run.mock.handoverCalls != 0 {
+			t.Errorf("handover calls = %d, want 0", run.mock.handoverCalls)
+		}
+	})
+}
+
+func TestMBTInvalidTaskStatusRetries(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		kind := rapid.SampledFrom([]string{"bad_status", "missing_reason", "blank_reason"}).Draw(t, "invalidKind")
+		var bad model.ResponseToolCall
+		switch kind {
+		case "bad_status":
+			bad = taskStatusCall("ts", "Done", "x")
+		case "missing_reason":
+			bad = taskStatusCall("ts", agent.TaskStatusCompleted, "")
+		default:
+			bad = taskStatusCall("ts", agent.TaskStatusCompleted, "   ")
+		}
+		good := taskStatusCall("ts2", agent.TaskStatusCompleted, "all checks passed")
+
+		run := runMBT(t, mbtScenario{
+			maxIterations: 3,
+			window:        8192,
+			responses: []mbtResponse{
+				{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{bad}, usage: totalUsage(100)},
+				{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{good}, usage: totalUsage(100)},
+			},
+			llm: defaultLLMConfig(),
+		})
+		if run.err != nil {
+			t.Fatalf("Execute: %v", run.err)
+		}
+		want := agent.TaskStatusOutcome{CompletedStatus: agent.TaskStatusCompleted, Reason: "all checks passed"}
+		if run.status == nil || *run.status != want {
+			t.Fatalf("status = %+v, want %+v", run.status, want)
+		}
+		if got := run.summary["iterations"]; got != float64(2) {
+			t.Errorf("iterations = %v, want 2", got)
+		}
+		if got := run.summary["tool_calls"]; got != float64(2) {
+			t.Errorf("tool_calls = %v, want 2", got)
+		}
+		if got := run.summary["tool_failures"]; got != float64(1) {
+			t.Errorf("tool_failures = %v, want 1", got)
+		}
+		req := run.mock.captured[1]
+		msgs, _ := req["messages"].([]model.D)
+		found := false
+		for _, m := range msgs {
+			if m["role"] != "tool" || m["name"] != "task_status" {
+				continue
+			}
+			found = true
+			content, _ := m["content"].(string)
+			if !strings.Contains(content, `"status":"FAILED"`) {
+				t.Errorf("invalid task_status response = %q, want a tool error envelope", content)
+			}
+		}
+		if !found {
+			t.Error("retry request is missing the invalid task_status tool result")
+		}
+	})
+}
+
+func TestMBTToolCallAndToolErrorCounts(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		sc := genMBTScenario(t)
+		run := runMBT(t, sc)
+
+		consumed := run.mock.agentCalls
+		wantCalls, wantFailures, wantLogged := expectedToolCounts(sc.responses, consumed)
+		if got := run.summary["tool_calls"]; got != float64(wantCalls) {
+			t.Fatalf("tool_calls = %v, want %d", got, wantCalls)
+		}
+		if got := run.summary["tool_failures"]; got != float64(wantFailures) {
+			t.Fatalf("tool_failures = %v, want %d", got, wantFailures)
+		}
+		if wantFailures > wantCalls {
+			t.Fatalf("tool failures %d > tool calls %d", wantFailures, wantCalls)
+		}
+
+		if got := len(eventsOf(run.events, eventAgentToolCall)); got != wantLogged {
+			t.Errorf("agent_tool_call events = %d, want %d", got, wantLogged)
+		}
+		if got := len(eventsOf(run.events, eventToolFailed)); got != wantFailures {
+			t.Errorf("tool_failed events = %d, want %d", got, wantFailures)
+		}
+		if got, want := len(eventsOf(run.events, eventToolSucceeded)), wantCalls-wantFailures; got != want {
+			t.Errorf("tool_succeeded events = %d, want %d", got, want)
+		}
+		if got := len(eventsOf(run.events, eventIteration)); got != int(run.summary["iterations"].(float64)) {
+			t.Errorf("iteration events = %d, want %v", got, run.summary["iterations"])
+		}
+		withUsage := 0
+		for _, u := range run.mock.usages {
+			if u != nil {
+				withUsage++
+			}
+		}
+		if got := len(eventsOf(run.events, eventTokenUsage)); got != withUsage {
+			t.Errorf("token_usage events = %d, want %d", got, withUsage)
+		}
+	})
+}
+
+func TestMBTTracking(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		sc := genMBTScenario(t)
+		run := runMBT(t, sc)
+
+		if got := run.summary["iterations"]; got != float64(run.mock.agentCalls) {
+			t.Errorf("iterations = %v, chat calls = %d", got, run.mock.agentCalls)
+		}
+		wantPrompt, wantCompletion := sumUsages(run.mock.usages)
+		if got := run.summary["prompt_tokens"]; got != float64(wantPrompt) {
+			t.Errorf("prompt_tokens = %v, want %d", got, wantPrompt)
+		}
+		if got := run.summary["completion_tokens"]; got != float64(wantCompletion) {
+			t.Errorf("completion_tokens = %v, want %d", got, wantCompletion)
+		}
+		if got := run.summary["compactions"]; got != float64(0) {
+			t.Errorf("compactions = %v, want 0", got)
+		}
+		if got := run.summary["reclaimed_tokens"]; got != float64(0) {
+			t.Errorf("reclaimed_tokens = %v, want 0", got)
+		}
+	})
+}
+
+func TestMBTRunSummary(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		sc := genMBTScenario(t)
+		run := runMBT(t, sc)
+
+		if got := len(eventsOf(run.events, eventRunSummary)); got != 1 {
+			t.Fatalf("run_summary events = %d, want 1", got)
+		}
+		iterations := run.summary["iterations"].(float64)
+		if iterations > float64(sc.maxIterations) {
+			t.Errorf("iterations = %v, maxIterations = %d", iterations, sc.maxIterations)
+		}
+		if got := run.summary["tool_failures"].(float64); got > run.summary["tool_calls"].(float64) {
+			t.Errorf("tool_failures = %v > tool_calls = %v", got, run.summary["tool_calls"])
+		}
+
+		wantStatus, wantReason := "", ""
+		if run.status != nil {
+			wantStatus, wantReason = run.status.CompletedStatus, run.status.Reason
+		}
+		if got := run.summary["status"]; got != wantStatus {
+			t.Errorf("status = %v, want %q", got, wantStatus)
+		}
+		if got := run.summary["reason"]; got != wantReason {
+			t.Errorf("reason = %v, want %q", got, wantReason)
+		}
+
+		outcome, _ := run.summary["outcome"].(string)
+		switch outcome {
+		case "timeout":
+			if run.err == nil || !errors.Is(run.err, context.DeadlineExceeded) {
+				t.Errorf("outcome = timeout with err %v", run.err)
+			}
+		case "error":
+			if wantStatus == agent.TaskStatusCompleted || wantStatus == agent.TaskStatusFailed {
+				t.Errorf("outcome = error with status %q", wantStatus)
+			}
+		case "ok":
+			if run.err != nil || wantStatus != agent.TaskStatusCompleted {
+				t.Errorf("outcome = ok with err %v and status %q", run.err, wantStatus)
+			}
+		case "failed":
+			if run.err != nil || wantStatus != agent.TaskStatusFailed {
+				t.Errorf("outcome = failed with err %v and status %q", run.err, wantStatus)
+			}
+		case "budget_exhausted":
+			if run.err != nil || wantStatus != "" || iterations != float64(sc.maxIterations) {
+				t.Errorf("outcome = budget_exhausted with err %v, status %q, iterations %v/%d",
+					run.err, wantStatus, iterations, sc.maxIterations)
+			}
+		default:
+			t.Errorf("unknown outcome %q", outcome)
+		}
+
+		if got := run.summary["avg_iter_ms"].(float64); iterations > 0 {
+			want := float64(int64(run.summary["dur_ms"].(float64)) / int64(iterations))
+			if got != want {
+				t.Errorf("avg_iter_ms = %v, want %v", got, want)
+			}
+		} else if got != 0 {
+			t.Errorf("avg_iter_ms = %v, want 0 with no iterations", got)
+		}
+
+		if sc.window > 0 {
+			if got := run.summary["ctx_window"]; got != float64(sc.window) {
+				t.Errorf("ctx_window = %v, want %d", got, sc.window)
+			}
+		} else if _, ok := run.summary["ctx_window"]; ok {
+			t.Error("ctx_window must be omitted when the model reports no window")
+		}
+	})
+}
+
+func TestMBTRunSummaryTimeoutAndBackendError(t *testing.T) {
 	tests := []struct {
 		name        string
-		status      string
-		reason      string
-		wantOutcome runOutcome
+		err         error
+		wantOutcome string
+		wantTimeout bool
 	}{
-		{"completed", "Completed", "kernel string verified", outcomeOK},
-		{"failed", "Failed", "cli lacks the required flag", outcomeFailed},
-		{"error", "Error", "permission denied", outcomeError},
+		{"timeout", context.DeadlineExceeded, "timeout", true},
+		{"backend error", errors.New("backend down"), "error", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tc := model.ResponseToolCall{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{
-				Name:      "task_status",
-				Arguments: model.ToolCallArguments{"status": tt.status, "reason": tt.reason},
-			}}
-			mock := &mockKronk{responses: []model.ChatResponse{
-				chatResp("summary", "", model.FinishReasonTool, []model.ResponseToolCall{tc}, &model.Usage{TotalTokens: 100}),
-			}}
-			var buf bytes.Buffer
-			agt := NewAgent(zerolog.New(&buf), mock, Options{
-				MaxIterations: 5,
-				ChatTimeout:   time.Second,
-				TotalTimeout:  5 * time.Second,
-				LLM:           defaultLLMConfig(),
-				RunID:         "run-status",
+			run := runMBT(t, mbtScenario{
+				maxIterations: 3,
+				window:        8192,
+				chatFunc: func(context.Context, model.D) (model.ChatResponse, error) {
+					return model.ChatResponse{}, tt.err
+				},
+				llm: defaultLLMConfig(),
 			})
-			conf := config.Config{
-				VM:     config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
-				Model:  "m",
-				Prompt: "task",
+			if run.err == nil {
+				t.Fatal("Execute succeeded against a failing backend")
 			}
-
-			got, err := agt.Execute(context.Background(), conf, newTestClient(t))
-			if err != nil {
-				t.Fatalf("Execute: %v", err)
+			if got := errors.Is(run.err, context.DeadlineExceeded); got != tt.wantTimeout {
+				t.Errorf("timeout = %v, want %v (err %v)", got, tt.wantTimeout, run.err)
 			}
-			want := TaskStatusOutcome{CompletedStatus: tt.status, Reason: tt.reason}
-			if got == nil || *got != want {
-				t.Fatalf("status = %+v, want %+v", got, want)
+			if run.status != nil {
+				t.Errorf("status = %+v, want nil", run.status)
 			}
-			if !agt.done {
-				t.Error("agent must stop after task_status")
+			if got := run.summary["iterations"]; got != float64(1) {
+				t.Errorf("iterations = %v, want 1 for the aborted round", got)
 			}
-			if mock.calls != 1 {
-				t.Errorf("chat calls = %d, want 1: task_status must end the run", mock.calls)
-			}
-
-			summary := onlyEvent(t, decodeEvents(t, &buf), eventRunSummary)
-			if summary["status"] != tt.status {
-				t.Errorf("run_summary status = %v, want %q", summary["status"], tt.status)
-			}
-			if summary["reason"] != tt.reason {
-				t.Errorf("run_summary reason = %v, want %q", summary["reason"], tt.reason)
-			}
-			if summary["outcome"] != string(tt.wantOutcome) {
-				t.Errorf("run_summary outcome = %v, want %q", summary["outcome"], tt.wantOutcome)
+			if got := run.summary["outcome"]; got != tt.wantOutcome {
+				t.Errorf("outcome = %v, want %q", got, tt.wantOutcome)
 			}
 		})
 	}
 }
 
-func TestExecuteStopsAtTaskStatusInBatch(t *testing.T) {
-	completed := model.ResponseToolCall{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{
-		Name:      "task_status",
-		Arguments: model.ToolCallArguments{"status": "Completed", "reason": "first status wins"},
-	}}
+func TestMBTCompaction(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		window := rapid.IntRange(2048, 16384).Draw(t, "window")
+		threshold := rapid.Float64Range(0.6, 0.9).Draw(t, "threshold")
+		extra := rapid.IntRange(1, 1000).Draw(t, "extraTokens")
+		enabled := rapid.Bool().Draw(t, "enabled")
+		failHandover := rapid.Bool().Draw(t, "failHandover")
+
+		total := int(threshold*float64(window)) + extra
+		sc := mbtScenario{
+			maxIterations: 3,
+			window:        window,
+			responses: []mbtResponse{
+				{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{vmExecCall("c1", "echo x")}, usage: totalUsage(total)},
+				{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{taskStatusCall("ts", agent.TaskStatusCompleted, "done")}, usage: totalUsage(100)},
+			},
+			compaction: config.CompactionConfig{
+				Enabled: enabled, Threshold: threshold, MaxSummaryTokens: 512, MaxAttempts: 3,
+			},
+			failHandover: failHandover,
+			llm:          defaultLLMConfig(),
+		}
+		run := runMBT(t, sc)
+		if run.err != nil {
+			t.Fatalf("compaction must not end the run: %v", run.err)
+		}
+		if run.status == nil || run.status.CompletedStatus != agent.TaskStatusCompleted {
+			t.Fatalf("status = %+v, want Completed", run.status)
+		}
+		if got := run.summary["iterations"]; got != float64(2) {
+			t.Errorf("iterations = %v, want 2", got)
+		}
+
+		switch {
+		case !enabled:
+			if run.mock.handoverCalls != 0 {
+				t.Errorf("disabled compaction made %d handover calls", run.mock.handoverCalls)
+			}
+			if got := run.summary["compactions"]; got != float64(0) {
+				t.Errorf("compactions = %v, want 0", got)
+			}
+			if got := run.summary["reclaimed_tokens"]; got != float64(0) {
+				t.Errorf("reclaimed_tokens = %v, want 0", got)
+			}
+		case failHandover:
+			if run.mock.handoverCalls != 1 {
+				t.Errorf("handover calls = %d, want 1", run.mock.handoverCalls)
+			}
+			if got := run.summary["compactions"]; got != float64(0) {
+				t.Errorf("compactions = %v, want 0 after a failed handover", got)
+			}
+			events := eventsOf(run.events, eventContextCompaction)
+			if len(events) != 1 || events[0]["outcome"] != "failed" {
+				t.Errorf("context_compaction events = %v, want one failed", events)
+			}
+			if _, ok := events[0]["error"]; !ok {
+				t.Error("failed compaction must log its reason")
+			}
+			if got := len(eventsOf(run.events, eventContextCompactionApplied)); got != 0 {
+				t.Errorf("applied events = %d, want 0", got)
+			}
+		default:
+			if run.mock.handoverCalls != 1 {
+				t.Errorf("handover calls = %d, want 1", run.mock.handoverCalls)
+			}
+			if got := run.summary["compactions"]; got != float64(1) {
+				t.Errorf("compactions = %v, want 1", got)
+			}
+			events := eventsOf(run.events, eventContextCompaction)
+			if len(events) != 1 || events[0]["outcome"] != "applied" {
+				t.Fatalf("context_compaction events = %v, want one applied", events)
+			}
+			if got, want := run.summary["reclaimed_tokens"], events[0]["reclaimed"]; got != want {
+				t.Errorf("reclaimed_tokens = %v, want event reclaimed %v", got, want)
+			}
+			if len(run.mock.captured) < 3 || !isCompactionRequest(run.mock.captured[1]) {
+				t.Fatalf("handover request was not captured between agent calls: %d calls", len(run.mock.captured))
+			}
+			handoverMsgs, _ := run.mock.captured[1]["messages"].([]model.D)
+			if len(handoverMsgs) < 2 {
+				t.Fatalf("handover request has %d messages", len(handoverMsgs))
+			}
+			history, _ := handoverMsgs[1]["content"].(string)
+			if !strings.Contains(history, "tool result vm_exec") {
+				t.Errorf("handover history did not see the tool result: %q", history)
+			}
+			system, _ := handoverMsgs[0]["content"].(string)
+			for _, want := range []string{"## Done", "## In progress", "## Not started", "handover"} {
+				if !strings.Contains(system, want) {
+					t.Errorf("compaction system prompt missing %q", want)
+				}
+			}
+			nextMsgs, _ := run.mock.captured[2]["messages"].([]model.D)
+			if len(nextMsgs) < 2 {
+				t.Fatalf("post-compaction request has %d messages", len(nextMsgs))
+			}
+			user, _ := nextMsgs[1]["content"].(string)
+			for _, want := range []string{"## Task", "## Work completed so far", "## Active output handles"} {
+				if !strings.Contains(user, want) {
+					t.Errorf("post-compaction user message missing %q: %q", want, user)
+				}
+			}
+			if got := len(eventsOf(run.events, eventContextCompactionApplied)); got != 1 {
+				t.Errorf("applied events = %d, want 1", got)
+			}
+		}
+	})
+}
+
+func TestMBTCompactionFailuresDoNotEndRun(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		n := rapid.IntRange(1, 2).Draw(t, "handoverOutcomes")
+		outcomes := make([]string, n)
+		for i := range outcomes {
+			outcomes[i] = rapid.SampledFrom([]string{"valid", "short", "empty", "error"}).Draw(t, "outcome")
+		}
+
+		idx := 0
+		handover := func(context.Context, model.D) (model.ChatResponse, error) {
+			if idx >= len(outcomes) {
+				return chatResp("", "", model.FinishReasonStop, nil, nil), nil
+			}
+			outcome := outcomes[idx]
+			idx++
+			switch outcome {
+			case "valid":
+				return chatResp(validHandoverSummary, "", model.FinishReasonStop, nil, nil), nil
+			case "short":
+				return chatResp("too short", "", model.FinishReasonStop, nil, nil), nil
+			case "empty":
+				return chatResp("", "", model.FinishReasonStop, nil, nil), nil
+			default:
+				return model.ChatResponse{}, context.DeadlineExceeded
+			}
+		}
+
+		run := runMBT(t, mbtScenario{
+			maxIterations: 3,
+			window:        8192,
+			responses: []mbtResponse{
+				{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{vmExecCall("c1", "echo x")}, usage: totalUsage(7000)},
+				{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{taskStatusCall("ts", agent.TaskStatusCompleted, "done")}, usage: totalUsage(100)},
+			},
+			compaction: config.CompactionConfig{Enabled: true, Threshold: 0.8, MaxSummaryTokens: 512, MaxAttempts: 3},
+			handover:   handover,
+			llm:        defaultLLMConfig(),
+		})
+		if run.err != nil {
+			t.Fatalf("compaction failure must not end the run: %v", run.err)
+		}
+		if run.status == nil || run.status.CompletedStatus != agent.TaskStatusCompleted {
+			t.Fatalf("status = %+v, want Completed", run.status)
+		}
+
+		wantHandovers := 2
+		if outcomes[0] == "valid" || outcomes[0] == "error" {
+			wantHandovers = 1
+		}
+		if run.mock.handoverCalls != wantHandovers {
+			t.Errorf("handover calls = %d, want %d for outcomes %v", run.mock.handoverCalls, wantHandovers, outcomes)
+		}
+		wantApplied := outcomes[0] == "valid" || ((outcomes[0] == "short" || outcomes[0] == "empty") && len(outcomes) > 1 && outcomes[1] == "valid")
+		gotApplied := run.summary["compactions"].(float64) == 1
+		if gotApplied != wantApplied {
+			t.Errorf("applied = %v, want %v for outcomes %v", gotApplied, wantApplied, outcomes)
+		}
+		events := eventsOf(run.events, eventContextCompaction)
+		if len(events) != 1 {
+			t.Fatalf("context_compaction events = %d, want 1", len(events))
+		}
+		if gotApplied {
+			if got, want := run.summary["reclaimed_tokens"], events[0]["reclaimed"]; got != want {
+				t.Errorf("reclaimed_tokens = %v, want event reclaimed %v", got, want)
+			}
+		} else if got := run.summary["reclaimed_tokens"]; got != float64(0) {
+			t.Errorf("reclaimed_tokens = %v, want 0 when compaction failed", got)
+		}
+		wantOutcome := "failed"
+		if wantApplied {
+			wantOutcome = "applied"
+		}
+		if events[0]["outcome"] != wantOutcome {
+			t.Errorf("context_compaction outcome = %v, want %q", events[0]["outcome"], wantOutcome)
+		}
+		if !wantApplied {
+			if _, ok := events[0]["error"]; !ok {
+				t.Error("failed compaction must log its reason")
+			}
+		}
+		if got := len(eventsOf(run.events, eventContextCompactionApplied)); got != map[bool]int{true: 1, false: 0}[wantApplied] {
+			t.Errorf("applied events = %d, want %d", got, map[bool]int{true: 1, false: 0}[wantApplied])
+		}
+	})
+}
+
+func TestMBTCompactionHandoverShapes(t *testing.T) {
 	tests := []struct {
-		name  string
-		later model.ResponseToolCall
+		name string
+		resp model.ChatResponse
 	}{
-		{
-			name: "later task_status ignored",
-			later: model.ResponseToolCall{ID: "c2", Type: "function", Function: model.ResponseToolCallFunction{
-				Name:      "task_status",
-				Arguments: model.ToolCallArguments{"status": "Failed", "reason": "second status must not win"},
-			}},
-		},
-		{
-			name: "later tool call not executed",
-			later: model.ResponseToolCall{ID: "c3", Type: "function", Function: model.ResponseToolCallFunction{
-				Name:      "vm_info",
-				Arguments: model.ToolCallArguments{},
-			}},
-		},
+		{"no choices", model.ChatResponse{}},
+		{"nil message", model.ChatResponse{Choices: []model.Choice{{}}}},
+		{"whitespace", chatResp("   ", "", model.FinishReasonStop, nil, nil)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mock := &mockKronk{responses: []model.ChatResponse{
-				chatResp("summary", "", model.FinishReasonTool, []model.ResponseToolCall{completed, tt.later}, &model.Usage{TotalTokens: 100}),
-			}}
-			agt := NewAgent(zerolog.Nop(), mock, Options{
-				MaxIterations: 5,
-				ChatTimeout:   time.Second,
-				TotalTimeout:  5 * time.Second,
-				LLM:           defaultLLMConfig(),
-				RunID:         "run-status-batch",
+			handovers := 0
+			run := runMBT(t, mbtScenario{
+				maxIterations: 3,
+				window:        8192,
+				responses: []mbtResponse{
+					{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{vmExecCall("c1", "echo x")}, usage: totalUsage(7000)},
+					{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{taskStatusCall("ts", agent.TaskStatusCompleted, "done")}, usage: totalUsage(100)},
+				},
+				compaction: config.CompactionConfig{Enabled: true, Threshold: 0.8, MaxSummaryTokens: 512, MaxAttempts: 3},
+				handover: func(context.Context, model.D) (model.ChatResponse, error) {
+					handovers++
+					return tt.resp, nil
+				},
+				llm: defaultLLMConfig(),
 			})
-			conf := config.Config{
-				VM:     config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
-				Model:  "m",
-				Prompt: "task",
+			if run.err != nil {
+				t.Fatalf("compaction failure must not end the run: %v", run.err)
 			}
-
-			got, err := agt.Execute(context.Background(), conf, newTestClient(t))
-			if err != nil {
-				t.Fatalf("Execute: %v", err)
+			if run.status == nil || run.status.CompletedStatus != agent.TaskStatusCompleted {
+				t.Fatalf("status = %+v, want Completed", run.status)
 			}
-			want := TaskStatusOutcome{CompletedStatus: "Completed", Reason: "first status wins"}
-			if got == nil || *got != want {
-				t.Fatalf("status = %+v, want %+v", got, want)
+			if got := run.summary["compactions"]; got != float64(0) {
+				t.Errorf("compactions = %v, want 0", got)
 			}
-			if agt.totals.ToolCalls != 1 {
-				t.Errorf("tool calls = %d, want 1: nothing after task_status may run", agt.totals.ToolCalls)
+			if handovers != 2 {
+				t.Errorf("handover calls = %d, want 2 (summary and repair)", handovers)
 			}
-			if mock.calls != 1 {
-				t.Errorf("chat calls = %d, want 1: task_status must end the run", mock.calls)
+			events := eventsOf(run.events, eventContextCompaction)
+			if len(events) != 1 || events[0]["outcome"] != "failed" {
+				t.Fatalf("context_compaction events = %v, want one failed", events)
+			}
+			if _, ok := events[0]["error"]; !ok {
+				t.Error("failed compaction must log its reason")
 			}
 		})
 	}
 }
 
-func TestExecuteRetriesAfterInvalidTaskStatus(t *testing.T) {
-	bad := model.ResponseToolCall{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{
-		Name:      "task_status",
-		Arguments: model.ToolCallArguments{"status": "Done", "reason": "x"},
-	}}
-	good := model.ResponseToolCall{ID: "c2", Type: "function", Function: model.ResponseToolCallFunction{
-		Name:      "task_status",
-		Arguments: model.ToolCallArguments{"status": "Completed", "reason": "all checks passed"},
-	}}
-	mock := &mockKronk{responses: []model.ChatResponse{
-		chatResp("", "", model.FinishReasonTool, []model.ResponseToolCall{bad}, &model.Usage{TotalTokens: 100}),
-		chatResp("", "", model.FinishReasonTool, []model.ResponseToolCall{good}, &model.Usage{TotalTokens: 100}),
-	}}
-	agt := NewAgent(zerolog.Nop(), mock, Options{
-		MaxIterations: 5,
-		ChatTimeout:   time.Second,
-		TotalTimeout:  5 * time.Second,
-		LLM:           defaultLLMConfig(),
-		RunID:         "run-status-retry",
-	})
-	conf := config.Config{
-		VM:     config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
-		Model:  "m",
-		Prompt: "task",
+func TestMBTTokenizeFallback(t *testing.T) {
+	tests := []struct {
+		name string
+		sc   mbtScenario
+	}{
+		{"tokenize error", mbtScenario{tokenizeErr: errors.New("tokenizer down")}},
+		{"zero tokens", mbtScenario{tokenizeZero: true}},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.sc.maxIterations = 3
+			tt.sc.window = 8192
+			tt.sc.responses = []mbtResponse{
+				{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{vmExecCall("c1", "echo x")}, usage: totalUsage(7000)},
+				{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{taskStatusCall("ts", agent.TaskStatusCompleted, "done")}, usage: totalUsage(100)},
+			}
+			tt.sc.compaction = config.CompactionConfig{Enabled: true, Threshold: 0.8, MaxSummaryTokens: 512, MaxAttempts: 3}
+			tt.sc.llm = defaultLLMConfig()
 
-	got, err := agt.Execute(context.Background(), conf, newTestClient(t))
-	if err != nil {
-		t.Fatalf("Execute: %v", err)
-	}
-	if got == nil || got.CompletedStatus != "Completed" || got.Reason != "all checks passed" {
-		t.Fatalf("status = %+v, want the retried Completed status", got)
-	}
-	if mock.calls != 2 {
-		t.Errorf("chat calls = %d, want 2: an invalid status must not end the run", mock.calls)
+			run := runMBT(t, tt.sc)
+			if run.err != nil {
+				t.Fatalf("Execute: %v", run.err)
+			}
+			if run.status == nil || run.status.CompletedStatus != agent.TaskStatusCompleted {
+				t.Fatalf("status = %+v, want Completed", run.status)
+			}
+			if got := run.summary["compactions"]; got != float64(1) {
+				t.Errorf("compactions = %v, want 1", got)
+			}
+		})
 	}
 }
 
+func TestMBTCompactionWithOutputHandles(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		window := rapid.IntRange(4096, 16384).Draw(t, "window")
+		threshold := 0.5
+		total := int(threshold*float64(window)) + 1000
+		size := rapid.IntRange(1, 4096).Draw(t, "capturedBytes")
 
-func TestExecuteLogsTokenUsageAndIterationEvents(t *testing.T) {
-	var buf bytes.Buffer
-	mock := &mockKronk{
-		contextWidth: 32768,
-		responses: []model.ChatResponse{chatResp("done", "", model.FinishReasonStop, nil,
-			&model.Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120, TokensPerSecond: 8.5})},
-	}
-	agent := NewAgent(zerolog.New(&buf), mock, Options{
-		MaxIterations: 1,
-		ChatTimeout:   time.Second,
-		TotalTimeout:  5 * time.Second,
-		LLM:           defaultLLMConfig(),
-		RunID:         "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5",
+		run := runMBT(t, mbtScenario{
+			maxIterations: 3,
+			window:        window,
+			responses: []mbtResponse{
+				{
+					content:      "running the capture",
+					reasoning:    "ran the capture",
+					finishReason: model.FinishReasonTool,
+					toolCalls:    []model.ResponseToolCall{vmExecCall("c1", "echo hi")},
+					usage:        totalUsage(total),
+				},
+				{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{taskStatusCall("ts", agent.TaskStatusCompleted, "done")}, usage: totalUsage(100)},
+			},
+			compaction: config.CompactionConfig{Enabled: true, Threshold: threshold, MaxSummaryTokens: 512, MaxAttempts: 3},
+			output: config.OutputConfig{
+				Enabled: true, Mode: "always",
+				MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200,
+			},
+			scripted: func(command string) (string, int) {
+				switch {
+				case strings.HasPrefix(command, "id -u"), strings.HasPrefix(command, "id -g"):
+					return "1000\n", 0
+				case strings.HasPrefix(command, "getent passwd"):
+					return "ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n", 0
+				case strings.Contains(command, "df -P"):
+					return "99999999", 0
+				case strings.Contains(command, "mkdir"):
+					return "", 0
+				case strings.Contains(command, "__MPH_EXIT_"):
+					return exitMarker(command) + "0", 0
+				case strings.Contains(command, "wc -c"):
+					return fmt.Sprintf("%d", size), 0
+				case strings.Contains(command, "wc -l"):
+					return "1", 0
+				default:
+					return "", 0
+				}
+			},
+			llm: defaultLLMConfig(),
+		})
+		if run.err != nil {
+			t.Fatalf("Execute: %v", run.err)
+		}
+		if run.status == nil || run.status.CompletedStatus != agent.TaskStatusCompleted {
+			t.Fatalf("status = %+v, want Completed", run.status)
+		}
+		if got := run.summary["compactions"]; got != float64(1) {
+			t.Fatalf("compactions = %v, want 1", got)
+		}
+
+		handoverMsgs, _ := run.mock.captured[1]["messages"].([]model.D)
+		history, _ := handoverMsgs[1]["content"].(string)
+		if !strings.Contains(history, "tool result vm_exec") {
+			t.Errorf("handover history did not see the tool result: %q", history)
+		}
+		if !strings.Contains(history, "ran the capture") {
+			t.Errorf("handover history did not see the assistant reasoning: %q", history)
+		}
+
+		nextMsgs, _ := run.mock.captured[2]["messages"].([]model.D)
+		user, _ := nextMsgs[1]["content"].(string)
+		for _, want := range []string{"## Active output handles", "from `echo hi`", "Only use the output_id values listed above"} {
+			if !strings.Contains(user, want) {
+				t.Errorf("post-compaction user message missing %q: %q", want, user)
+			}
+		}
 	})
-	conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
-	ctx := context.Background()
-	if _, err := agent.Execute(ctx, conf, newTestClient(t)); err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-
-	events := decodeEvents(t, &buf)
-	usage := onlyEvent(t, events, eventTokenUsage)
-	for key, want := range map[string]float64{
-		"iter": 1, "prompt_tokens": 100, "completion_tokens": 20,
-		"total_tokens": 120, "tps": 8.5, "ctx_window": 32768,
-	} {
-		if got := usage[key]; got != want {
-			t.Errorf("token_usage %s = %v, want %v", key, got, want)
-		}
-	}
-
-	iteration := onlyEvent(t, events, eventIteration)
-	if iteration["iter"] != float64(1) {
-		t.Errorf("iteration iter = %v, want 1", iteration["iter"])
-	}
-	for _, key := range []string{"dur_ms", "chat_ms", "tool_ms"} {
-		if _, ok := iteration[key].(float64); !ok {
-			t.Errorf("iteration event missing numeric %q: %v", key, iteration)
-		}
-	}
-
-	onlyEvent(t, events, eventRunSummary)
 }
 
+func TestMBTCompactionPreventsWindowOverflow(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		window := rapid.IntRange(4096, 32768).Draw(t, "window")
+		threshold := rapid.Float64Range(0.55, 0.8).Draw(t, "threshold")
+		steps := rapid.IntRange(5, 20).Draw(t, "steps")
+		stepBytes := int(float64(window)*threshold*4*1.5/float64(steps)) + 100
 
+		responses := make([]mbtResponse, 0, steps+1)
+		for i := 0; i < steps; i++ {
+			responses = append(responses, mbtResponse{
+				finishReason: model.FinishReasonTool,
+				toolCalls:    []model.ResponseToolCall{vmExecCall("c1", "step")},
+			})
+		}
+		responses = append(responses, mbtResponse{
+			finishReason: model.FinishReasonTool,
+			toolCalls:    []model.ResponseToolCall{taskStatusCall("ts", agent.TaskStatusCompleted, "done")},
+		})
 
-// would leave a dashboard column blank, which reads as broken logging.
-// "the loop would have run again".
-func TestRunOutcomeDistinguishesCleanFinishFromExhaustion(t *testing.T) {
+		run := runMBT(t, mbtScenario{
+			maxIterations: steps + 4,
+			window:        window,
+			responses:     responses,
+			compaction:    config.CompactionConfig{Enabled: true, Threshold: threshold, MaxSummaryTokens: 512, MaxAttempts: 3},
+			agent:         config.AgentConfig{MaxOutputBytes: 64 * 1024},
+			scripted: func(command string) (string, int) {
+				switch {
+				case strings.HasPrefix(command, "id -u"), strings.HasPrefix(command, "id -g"):
+					return "1000\n", 0
+				case strings.HasPrefix(command, "getent passwd"):
+					return "ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n", 0
+				case strings.Contains(command, "step"):
+					return strings.Repeat("k", stepBytes), 0
+				default:
+					return "", 0
+				}
+			},
+			enforceWindow: true,
+			llm:           defaultLLMConfig(),
+		})
+		if run.err != nil {
+			t.Fatalf("run grew past the window without compacting: %v", run.err)
+		}
+		if run.enforcer == nil {
+			t.Fatal("window enforcer was not installed")
+		}
+		if run.enforcer.overWindow != 0 {
+			t.Errorf("%d chat requests exceeded the %d-token window before compaction", run.enforcer.overWindow, window)
+		}
+		if got := run.summary["compactions"].(float64); got == 0 {
+			t.Fatal("no compaction applied; the window enforcer never forced one")
+		}
+		if run.status == nil || run.status.CompletedStatus != agent.TaskStatusCompleted {
+			t.Errorf("status = %+v, want Completed", run.status)
+		}
+	})
+}
+
+func TestMBTOverflowRecovery(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		large := rapid.Bool().Draw(t, "largeResult")
+		size := rapid.IntRange(4096, 16384).Draw(t, "resultBytes")
+		window := rapid.IntRange(4096, 16384).Draw(t, "window")
+
+		run := runMBT(t, mbtScenario{
+			maxIterations: 3,
+			window:        window,
+			responses: []mbtResponse{
+				{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{vmExecCall("c1", "big")}, usage: totalUsage(100)},
+				{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{taskStatusCall("ts", agent.TaskStatusCompleted, "done")}, usage: totalUsage(100)},
+			},
+			agent:       config.AgentConfig{MaxOutputBytes: 64 * 1024},
+			overflowAt:  1,
+			overflowErr: overflowErr(9000, window),
+			scripted: func(command string) (string, int) {
+				switch {
+				case strings.HasPrefix(command, "id -u"), strings.HasPrefix(command, "id -g"):
+					return "1000\n", 0
+				case strings.HasPrefix(command, "getent passwd"):
+					return "ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n", 0
+				case strings.Contains(command, "big"):
+					if large {
+						return strings.Repeat("x", size), 0
+					}
+					return "small", 0
+				default:
+					return "", 0
+				}
+			},
+			llm: defaultLLMConfig(),
+		})
+
+		if got := run.summary["iterations"]; got != float64(2) {
+			t.Errorf("iterations = %v, want 2", got)
+		}
+		wantToolCalls := 1
+		if large {
+			wantToolCalls = 2
+		}
+		if got := run.summary["tool_calls"]; got != float64(wantToolCalls) {
+			t.Errorf("tool_calls = %v, want %d", got, wantToolCalls)
+		}
+		if got := run.summary["tool_failures"]; got != float64(0) {
+			t.Errorf("tool_failures = %v, want 0", got)
+		}
+		event := onlyEvent(t, run.events, eventContextOverflow)
+		if event["prompt_tokens"] != float64(9000) || event["ctx_window"] != float64(window) {
+			t.Errorf("overflow measurements = %v/%v, want 9000/%d", event["prompt_tokens"], event["ctx_window"], window)
+		}
+
+		if large {
+			if run.err != nil {
+				t.Fatalf("recoverable overflow returned an error: %v", run.err)
+			}
+			if run.status == nil || run.status.CompletedStatus != agent.TaskStatusCompleted {
+				t.Fatalf("status = %+v, want Completed", run.status)
+			}
+			if event["outcome"] != "recovered" {
+				t.Errorf("overflow outcome = %v, want recovered", event["outcome"])
+			}
+			if event["replaced"] != float64(1) {
+				t.Errorf("replaced = %v, want 1", event["replaced"])
+			}
+			if event["reclaimed_bytes"].(float64) <= 0 {
+				t.Errorf("reclaimed_bytes = %v, want > 0", event["reclaimed_bytes"])
+			}
+			if run.mock.agentCalls != 3 {
+				t.Errorf("chat calls = %d, want 3 (initial, overflow, retry)", run.mock.agentCalls)
+			}
+			if len(run.mock.captured) < 3 {
+				t.Fatalf("captured requests = %d, want at least 3", len(run.mock.captured))
+			}
+			retry, _ := json.Marshal(run.mock.captured[2])
+			if strings.Contains(string(retry), strings.Repeat("x", 100)) {
+				t.Error("the oversized result survived into the retry request")
+			}
+			if !strings.Contains(string(retry), "was discarded") {
+				t.Errorf("retry request is missing the replacement error: %s", retry)
+			}
+			if got := run.summary["outcome"]; got != "ok" {
+				t.Errorf("outcome = %v, want ok", got)
+			}
+		} else {
+			if run.err == nil {
+				t.Fatal("an unrecoverable overflow must fail the run")
+			}
+			if !errors.Is(run.err, model.ErrInvalidRequest) {
+				t.Errorf("error must preserve the kronk cause: %v", run.err)
+			}
+			if !strings.Contains(run.err.Error(), "context overflow") {
+				t.Errorf("error must name the repair attempt: %v", run.err)
+			}
+			if run.status != nil {
+				t.Errorf("status = %+v, want nil", run.status)
+			}
+			if event["outcome"] != "exhausted" {
+				t.Errorf("overflow outcome = %v, want exhausted", event["outcome"])
+			}
+			if event["replaced"] != float64(0) {
+				t.Errorf("replaced = %v, want 0", event["replaced"])
+			}
+			if run.mock.agentCalls != 2 {
+				t.Errorf("chat calls = %d, want 2 (initial, overflow)", run.mock.agentCalls)
+			}
+			if got := run.summary["outcome"]; got != "error" {
+				t.Errorf("outcome = %v, want error", got)
+			}
+		}
+	})
+}
+
+func TestMBTOverflowClassification(t *testing.T) {
 	tests := []struct {
 		name         string
-		maxIter      int
-		finishReason string
-		toolCalls    []model.ResponseToolCall
-		want         runOutcome
+		err          error
+		wantOverflow bool
 	}{
-		{"clean finish below the cap", 5, model.FinishReasonTool, []model.ResponseToolCall{
-			{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{
-				Name:      "task_status",
-				Arguments: model.ToolCallArguments{"status": "Completed", "reason": "done"},
-			}},
-		}, outcomeOK},
-		{"clean finish on the last permitted iteration", 1, model.FinishReasonTool, []model.ResponseToolCall{
-			{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{
-				Name:      "task_status",
-				Arguments: model.ToolCallArguments{"status": "Completed", "reason": "done"},
-			}},
-		}, outcomeOK},
-		{"cap reached while still calling tools", 1, model.FinishReasonTool, []model.ResponseToolCall{
-			{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{Name: "vm_info", Arguments: model.ToolCallArguments{}}},
-		}, outcomeBudgetExhausted},
+		{"overflow", overflowErr(9000, 8192), true},
+		{"other invalid request", fmt.Errorf("%w: messages[0].content[0]: file inputs are not currently supported", model.ErrInvalidRequest), false},
+		{"unrelated error", errors.New("connection reset"), false},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mock := &mockKronk{contextWidth: 32768, responses: []model.ChatResponse{
-				chatResp("", "", tt.finishReason, tt.toolCalls, &model.Usage{TotalTokens: 100}),
-			}}
-			var buf bytes.Buffer
-			a := NewAgent(zerolog.New(&buf), mock, Options{
-				MaxIterations: tt.maxIter,
-				ChatTimeout:   time.Second,
-				TotalTimeout:  30 * time.Second,
-				LLM:           defaultLLMConfig(),
-				RunID:         "01J9",
+			run := runMBT(t, mbtScenario{
+				maxIterations: 2,
+				window:        8192,
+				chatFunc: func(context.Context, model.D) (model.ChatResponse, error) {
+					return model.ChatResponse{}, tt.err
+				},
+				llm: defaultLLMConfig(),
 			})
-			conf := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
-			if _, err := a.Execute(t.Context(), conf, newTestClient(t)); err != nil {
-				t.Fatalf("Execute: %v", err)
+			if run.err == nil {
+				t.Fatal("Execute succeeded against a failing backend")
 			}
-
-			summary := onlyEvent(t, decodeEvents(t, &buf), eventRunSummary)
-			if got := runOutcome(summary["outcome"].(string)); got != tt.want {
-				t.Errorf("outcome = %q, want %q", got, tt.want)
+			if got := len(eventsOf(run.events, eventContextOverflow)); (got > 0) != tt.wantOverflow {
+				t.Errorf("context_overflow events = %d, want overflow=%v", got, tt.wantOverflow)
+			}
+			if tt.wantOverflow {
+				event := onlyEvent(t, run.events, eventContextOverflow)
+				if event["outcome"] != "exhausted" {
+					t.Errorf("overflow outcome = %v, want exhausted", event["outcome"])
+				}
+			}
+			if got := run.summary["outcome"]; got != "error" {
+				t.Errorf("outcome = %v, want error", got)
 			}
 		})
 	}
+}
+
+func TestMBTToolOutputTooLarge(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		size := rapid.IntRange(4097, 65536).Draw(t, "outputBytes")
+		captures := rapid.Bool().Draw(t, "outputEnabled")
+
+		output := config.OutputConfig{}
+		if captures {
+			output = config.OutputConfig{
+				Enabled: true, Mode: "auto",
+				MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200,
+			}
+		}
+		run := runMBT(t, mbtScenario{
+			maxIterations: 3,
+			window:        8192,
+			responses: []mbtResponse{
+				{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{vmExecCall("c1", "big")}, usage: totalUsage(100)},
+				{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{taskStatusCall("ts", agent.TaskStatusCompleted, "done")}, usage: totalUsage(100)},
+			},
+			agent:  config.AgentConfig{MaxOutputBytes: 4096},
+			output: output,
+			scripted: func(command string) (string, int) {
+				switch {
+				case strings.HasPrefix(command, "id -u"), strings.HasPrefix(command, "id -g"):
+					return "1000\n", 0
+				case strings.HasPrefix(command, "getent passwd"):
+					return "ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n", 0
+				case strings.Contains(command, "big"):
+					return strings.Repeat("z", size), 0
+				default:
+					return "", 0
+				}
+			},
+			llm: defaultLLMConfig(),
+		})
+		if run.err != nil {
+			t.Fatalf("Execute: %v", run.err)
+		}
+		if run.status == nil || run.status.CompletedStatus != agent.TaskStatusCompleted {
+			t.Fatalf("status = %+v, want Completed", run.status)
+		}
+		if got := run.summary["tool_calls"]; got != float64(2) {
+			t.Errorf("tool_calls = %v, want 2", got)
+		}
+		if got := run.summary["tool_failures"]; got != float64(1) {
+			t.Errorf("tool_failures = %v, want 1", got)
+		}
+
+		event := onlyEvent(t, run.events, eventToolOutputTooLarge)
+		if event["tool"] != "vm_exec" {
+			t.Errorf("tool = %v, want vm_exec", event["tool"])
+		}
+		if event["bytes"] != float64(size) || event["budget"] != float64(4096) {
+			t.Errorf("bytes/budget = %v/%v, want %d/4096", event["bytes"], event["budget"], size)
+		}
+
+		req := run.mock.captured[1]
+		msgs, _ := req["messages"].([]model.D)
+		found := false
+		for _, m := range msgs {
+			if m["role"] != "tool" || m["name"] != "vm_exec" {
+				continue
+			}
+			found = true
+			content, _ := m["content"].(string)
+			if !strings.Contains(content, "was discarded") {
+				t.Errorf("oversized tool result = %q, want a discard notice", content)
+			}
+			if got := strings.Contains(content, "capture: true"); got != captures {
+				t.Errorf("capture guidance present = %v, want %v: %q", got, captures, content)
+			}
+			if strings.Contains(content, strings.Repeat("z", 100)) {
+				t.Error("oversized tool result kept the payload")
+			}
+		}
+		if !found {
+			t.Error("next request is missing the vm_exec tool result")
+		}
+	})
+}
+
+func TestMBTCaptureAttribution(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		size := rapid.IntRange(1, 8192).Draw(t, "capturedBytes")
+
+		run := runMBT(t, mbtScenario{
+			maxIterations: 3,
+			window:        8192,
+			responses: []mbtResponse{
+				{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{vmExecCall("c1", "echo hi")}, usage: totalUsage(100)},
+				{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{taskStatusCall("ts", agent.TaskStatusCompleted, "done")}, usage: totalUsage(100)},
+			},
+			agent: config.AgentConfig{MaxOutputBytes: 4096},
+			output: config.OutputConfig{
+				Enabled: true, Mode: "always",
+				MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200,
+			},
+			scripted: func(command string) (string, int) {
+				switch {
+				case strings.HasPrefix(command, "id -u"), strings.HasPrefix(command, "id -g"):
+					return "1000\n", 0
+				case strings.HasPrefix(command, "getent passwd"):
+					return "ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n", 0
+				case strings.Contains(command, "df -P"):
+					return "99999999", 0
+				case strings.Contains(command, "mkdir"):
+					return "", 0
+				case strings.Contains(command, "__MPH_EXIT_"):
+					return exitMarker(command) + "0", 0
+				case strings.Contains(command, "wc -c"):
+					return fmt.Sprintf("%d", size), 0
+				case strings.Contains(command, "wc -l"):
+					return "1", 0
+				default:
+					return "", 0
+				}
+			},
+			llm: defaultLLMConfig(),
+		})
+		if run.err != nil {
+			t.Fatalf("Execute: %v", run.err)
+		}
+		if run.status == nil || run.status.CompletedStatus != agent.TaskStatusCompleted {
+			t.Fatalf("status = %+v, want Completed", run.status)
+		}
+		if got := run.summary["tool_calls"]; got != float64(2) {
+			t.Errorf("tool_calls = %v, want 2", got)
+		}
+		if got := run.summary["tool_failures"]; got != float64(0) {
+			t.Errorf("tool_failures = %v, want 0", got)
+		}
+
+		attributed := false
+		for _, e := range run.events {
+			if e["message"] != "command output too large for inline context, captured to file" {
+				continue
+			}
+			attributed = true
+			if e["tool"] != "vm_exec" {
+				t.Errorf("attribution tool = %v, want vm_exec", e["tool"])
+			}
+			if id, _ := e["out_id"].(string); id == "" {
+				t.Error("attribution log is missing the output_id")
+			}
+			break
+		}
+		if !attributed {
+			t.Fatal("missing capture attribution log line")
+		}
+
+		req := run.mock.captured[1]
+		msgs, _ := req["messages"].([]model.D)
+		found := false
+		for _, m := range msgs {
+			if m["role"] != "tool" || m["name"] != "vm_exec" {
+				continue
+			}
+			found = true
+			content, _ := m["content"].(string)
+			if !strings.Contains(content, `"captured":true`) {
+				t.Errorf("tool result = %q, want a capture envelope", content)
+			}
+		}
+		if !found {
+			t.Error("next request is missing the vm_exec tool result")
+		}
+	})
 }
