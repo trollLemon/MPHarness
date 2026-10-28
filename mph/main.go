@@ -215,6 +215,7 @@ func run() int {
 
 	var cmdOutput io.Writer
 	if cmdOutputFile != "" {
+		// #nosec G304
 		f, err := os.Create(cmdOutputFile)
 		if err != nil {
 			return fail(fmt.Errorf("open cmd output file: %w", err))

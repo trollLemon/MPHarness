@@ -78,14 +78,14 @@ func renderHistory(conversation []model.D) string {
 					if fn, ok := tc["function"].(model.D); ok {
 						name, _ := fn["name"].(string)
 						args, _ := fn["arguments"].(string)
-						b.WriteString(fmt.Sprintf("tool: %s(%s)\n", name, args))
+						fmt.Fprintf(&b, "tool: %s(%s)\n", name, args)
 					}
 				}
 			}
 		case "tool":
 			name, _ := m["name"].(string)
 			content, _ := m["content"].(string)
-			b.WriteString(fmt.Sprintf("tool result %s: %s\n", name, content))
+			fmt.Fprintf(&b, "tool result %s: %s\n", name, content)
 		case "user":
 			if c, _ := m["content"].(string); c != "" {
 				b.WriteString("user: " + c + "\n")
