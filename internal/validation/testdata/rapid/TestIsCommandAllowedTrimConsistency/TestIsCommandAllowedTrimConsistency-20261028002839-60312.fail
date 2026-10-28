@@ -1,9 +1,0 @@
-# 2026/10/28 00:28:39.045155 [TestIsCommandAllowedTrimConsistency] [rapid] draw cmd: "\v"
-# 2026/10/28 00:28:39.045166 [TestIsCommandAllowedTrimConsistency] padded command "   \v   " should match "\v"
-# 
-v0.4.8#17718398220057439778
-0x0
-0x0
-0x80d7e0a603823
-0x9
-0x0

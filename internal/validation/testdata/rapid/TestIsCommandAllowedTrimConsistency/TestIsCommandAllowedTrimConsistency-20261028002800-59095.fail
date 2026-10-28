@@ -1,9 +1,0 @@
-# 2026/10/28 00:28:00.031448 [TestIsCommandAllowedTrimConsistency] [rapid] draw cmd: " "
-# 2026/10/28 00:28:00.031478 [TestIsCommandAllowedTrimConsistency] padded command "       " should match " "
-# 
-v0.4.8#15887256245876486914
-0x0
-0x0
-0xc05c654ab866b
-0x14
-0x0
