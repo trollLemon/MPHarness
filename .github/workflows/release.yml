@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v1.0.0)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -16,6 +22,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
 
       - name: Set up Go
@@ -26,7 +33,7 @@ jobs:
 
       - name: Build binaries
         env:
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ inputs.tag || github.ref_name }}
         run: |
           mkdir -p dist
           LDFLAGS="-X main.version=${VERSION} -s -w"
@@ -40,14 +47,14 @@ jobs:
       - name: Generate SBOM for linux/amd64
         uses: anchore/sbom-action@f325610c9f50a54015d37c8d16cb3b0e2c8f4de0 # v0.18.0
         with:
-          path: dist/mph-linux-amd64
+          file: dist/mph-linux-amd64
           format: cyclonedx-json
           output-file: dist/mph-linux-amd64.cdx.json
 
       - name: Generate SBOM for linux/arm64
         uses: anchore/sbom-action@f325610c9f50a54015d37c8d16cb3b0e2c8f4de0 # v0.18.0
         with:
-          path: dist/mph-linux-arm64
+          file: dist/mph-linux-arm64
           format: cyclonedx-json
           output-file: dist/mph-linux-arm64.cdx.json
 
@@ -60,6 +67,7 @@ jobs:
       - name: Create GitHub Release and Upload Assets
         uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
             dist/mph-linux-amd64
             dist/mph-linux-arm64
