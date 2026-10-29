@@ -1,12 +1,12 @@
 package lxd_test
 
 import (
-	. "github.com/trollLemon/MPHarness/internal/lxd"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	. "github.com/trollLemon/MPHarness/internal/lxd"
 	"io"
 	"net/http"
 	"os"

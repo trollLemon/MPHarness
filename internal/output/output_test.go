@@ -1050,3 +1050,68 @@ func TestWrapCaptureWithNoCapKeepsFullOutput(t *testing.T) {
 		t.Fatalf("capture body or marker lost: %q", got)
 	}
 }
+
+// agent.callExec returns res.Inline verbatim, with no empty-string fallback, so
+// a successful Capture that produces no handle must always carry inline text.
+func TestCaptureNeverReturnsEmptyInline(t *testing.T) {
+	tests := []struct {
+		name    string
+		force   bool
+		respond func(cmd string) (string, error)
+	}{
+		{
+			name:    "direct exec with no output",
+			respond: func(string) (string, error) { return "", nil },
+		},
+		{
+			name:  "captured file is empty",
+			force: true,
+			respond: func(cmd string) (string, error) {
+				switch {
+				case strings.Contains(cmd, "df -P"):
+					return "99999999", nil
+				case strings.Contains(cmd, "__MPH_EXIT_"):
+					return echoMarker(cmd, "0"), nil
+				case strings.Contains(cmd, "wc -c"):
+					return "0", nil
+				default:
+					return "", nil
+				}
+			},
+		},
+		{
+			name:  "captured file reports a size but reads back empty",
+			force: true,
+			respond: func(cmd string) (string, error) {
+				switch {
+				case strings.Contains(cmd, "df -P"):
+					return "99999999", nil
+				case strings.Contains(cmd, "__MPH_EXIT_"):
+					return echoMarker(cmd, "0"), nil
+				case strings.Contains(cmd, "wc -c"):
+					return "12", nil
+				default:
+					return "", nil
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewStore(&fakeExec{fn: func(name, cmd string) (string, error) {
+				return tt.respond(cmd)
+			}}, "vm", "/tmp/mph-output/run1", testCfg(), 4096)
+
+			res, err := s.Capture(context.Background(), "echo hi", tt.force)
+			if err != nil {
+				t.Fatalf("capture: %v", err)
+			}
+			if res.Handle != nil {
+				t.Fatalf("want inline result, got handle %+v", res.Handle)
+			}
+			if res.Inline != NoOutput {
+				t.Fatalf("Inline = %q, want %q", res.Inline, NoOutput)
+			}
+		})
+	}
+}

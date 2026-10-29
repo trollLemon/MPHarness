@@ -332,6 +332,9 @@ func (a *Agent) addToolTokens(ctx context.Context, msgs []model.D) {
 	var batch strings.Builder
 	for _, m := range msgs {
 		c, _ := m["content"].(string)
+		if c == "" {
+			continue
+		}
 		batch.WriteString(c)
 		batch.WriteByte('\n')
 	}

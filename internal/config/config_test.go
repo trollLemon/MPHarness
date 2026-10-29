@@ -1,8 +1,6 @@
 package config_test
 
 import (
-
-	. "github.com/trollLemon/MPHarness/internal/config"
 	"errors"
 	"flag"
 	"fmt"
@@ -15,6 +13,8 @@ import (
 	"time"
 
 	"pgregory.net/rapid"
+
+	. "github.com/trollLemon/MPHarness/internal/config"
 )
 
 func TestVMConfig_Validate(t *testing.T) {
@@ -1150,21 +1150,21 @@ func TestNormalizeSize(t *testing.T) {
 
 // normalizeAllowedCommands returns nil for empty or whitespace-only input.
 func TestNormalizeAllowedCommandsEmptyReturnsNil(t *testing.T) {
-	rapid.Check(t, func(t *rapid.T) {
-		// Empty slice
-		if got := NormalizeAllowedCommands(nil); got != nil {
-			t.Fatalf("NormalizeAllowedCommands(nil) = %v, want nil", got)
-		}
-		// Empty array
-		if got := NormalizeAllowedCommands([]string{}); got != nil {
-			t.Fatalf("NormalizeAllowedCommands([]) = %v, want nil", got)
-		}
-		// All whitespace entries
-		ws := []string{"", " ", "\t", "  \n  "}
-		if got := NormalizeAllowedCommands(ws); got != nil {
-			t.Fatalf("NormalizeAllowedCommands(whitespace) = %v, want nil", got)
-		}
-	})
+	tests := []struct {
+		name string
+		in   []string
+	}{
+		{"nil", nil},
+		{"empty", []string{}},
+		{"whitespace entries", []string{"", " ", "\t", "  \n  "}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := NormalizeAllowedCommands(tt.in); got != nil {
+				t.Fatalf("NormalizeAllowedCommands(%v) = %v, want nil", tt.in, got)
+			}
+		})
+	}
 }
 
 // normalizeAllowedCommands trims whitespace from entries.
@@ -1219,20 +1219,18 @@ func TestNormalizeAllowedCommandsIdempotent(t *testing.T) {
 
 // NormalizeAllowedCommands expands coreUtils.
 func TestNormalizeAllowedCommandsExpandsCoreUtils(t *testing.T) {
-	rapid.Check(t, func(t *rapid.T) {
-		got := NormalizeAllowedCommands([]string{"coreUtils"})
-		if got == nil {
-			t.Fatalf("NormalizeAllowedCommands([coreUtils]) = nil")
+	got := NormalizeAllowedCommands([]string{"coreUtils"})
+	if got == nil {
+		t.Fatalf("NormalizeAllowedCommands([coreUtils]) = nil")
+	}
+	for _, cu := range CoreUtils {
+		if !got[cu] {
+			t.Fatalf("missing coreutils command %q", cu)
 		}
-		for _, cu := range CoreUtils {
-			if !got[cu] {
-				t.Fatalf("missing coreutils command %q", cu)
-			}
-		}
-		if got["coreUtils"] {
-			t.Fatalf("meta command coreUtils was not expanded")
-		}
-	})
+	}
+	if got["coreUtils"] {
+		t.Fatalf("meta command coreUtils was not expanded")
+	}
 }
 
 // VMConfig validation: valid configs always pass.
@@ -1256,47 +1254,30 @@ func TestVMConfigValidConfigsPass(t *testing.T) {
 
 // VMConfig validation: missing fields produce correct errors.
 func TestVMConfigMissingFields(t *testing.T) {
-	rapid.Check(t, func(t *rapid.T) {
-		name := "valid-vm"
-		disk := "20G"
-		ram := "4G"
-		cpu := 2
-
-		// Randomly omit one field
-		omitField := rapid.IntRange(0, 3).Draw(t, "omitField")
-		var cfg VMConfig
-		switch omitField {
-		case 0:
-			cfg = VMConfig{RAM: ram, CPU: cpu, Name: name}
-			if err := cfg.Validate(); !errors.Is(err, ErrVMDiskRequired) {
-				t.Fatalf("missing disk: got %v, want %v", err, ErrVMDiskRequired)
+	tests := []struct {
+		name    string
+		cfg     VMConfig
+		wantErr error
+	}{
+		{"missing disk", VMConfig{RAM: "4G", CPU: 2, Name: "valid-vm"}, ErrVMDiskRequired},
+		{"missing ram", VMConfig{Disk: "20G", CPU: 2, Name: "valid-vm"}, ErrVMRAMRequired},
+		{"zero cpu", VMConfig{Disk: "20G", RAM: "4G", Name: "valid-vm"}, ErrVMCPURequired},
+		{"negative cpu", VMConfig{Disk: "20G", RAM: "4G", CPU: -1, Name: "valid-vm"}, ErrVMCPURequired},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.cfg.Validate(); !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Validate() = %v, want %v", err, tt.wantErr)
 			}
-		case 1:
-			cfg = VMConfig{Disk: disk, CPU: cpu, Name: name}
-			if err := cfg.Validate(); !errors.Is(err, ErrVMRAMRequired) {
-				t.Fatalf("missing ram: got %v, want %v", err, ErrVMRAMRequired)
-			}
-		case 2:
-			cfg = VMConfig{Disk: disk, RAM: ram, Name: name, CPU: 0}
-			if err := cfg.Validate(); !errors.Is(err, ErrVMCPURequired) {
-				t.Fatalf("zero cpu: got %v, want %v", err, ErrVMCPURequired)
-			}
-		case 3:
-			cfg = VMConfig{Disk: disk, RAM: ram, Name: name, CPU: -1}
-			if err := cfg.Validate(); !errors.Is(err, ErrVMCPURequired) {
-				t.Fatalf("negative cpu: got %v, want %v", err, ErrVMCPURequired)
-			}
-		}
-	})
+		})
+	}
 }
 
 // IsSafeValue rejects empty strings.
 func TestIsSafeValueRejectsEmpty(t *testing.T) {
-	rapid.Check(t, func(t *rapid.T) {
-		if IsSafeValue("") {
-			t.Fatal("IsSafeValue(\"\") should be false")
-		}
-	})
+	if IsSafeValue("") {
+		t.Fatal("IsSafeValue(\"\") should be false")
+	}
 }
 
 // IsSafeValue accepts valid alphanumeric strings.
@@ -1317,7 +1298,7 @@ func TestIsSafeValueAcceptsValid(t *testing.T) {
 func TestIsSafeValueRejectsInvalid(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		// Generate strings that contain at least one disallowed char
-		invalid := rapid.StringMatching(`.*[\s$\|` + "`" + `\"'~;<>()\[\]{}\\].*`).Draw(t, "invalid")
+		invalid := rapid.StringMatching(`.*[\s$\|`+"`"+`\"'~;<>()\[\]{}\\].*`).Draw(t, "invalid")
 		if invalid == "" {
 			return
 		}
@@ -1329,17 +1310,15 @@ func TestIsSafeValueRejectsInvalid(t *testing.T) {
 
 // Config.Validate requires model and prompt.
 func TestConfigRequiresModelAndPrompt(t *testing.T) {
-	rapid.Check(t, func(t *rapid.T) {
-		validVM := VMConfig{Disk: "20G", RAM: "4G", CPU: 2, Name: "vm"}
-		cfg := Config{VM: validVM}
-		if err := cfg.Validate(); !errors.Is(err, ErrModelRequired) {
-			t.Fatalf("missing model: got %v, want %v", err, ErrModelRequired)
-		}
-		cfg.Model = "model"
-		if err := cfg.Validate(); !errors.Is(err, ErrPromptRequired) {
-			t.Fatalf("missing prompt: got %v, want %v", err, ErrPromptRequired)
-		}
-	})
+	validVM := VMConfig{Disk: "20G", RAM: "4G", CPU: 2, Name: "vm"}
+	cfg := Config{VM: validVM}
+	if err := cfg.Validate(); !errors.Is(err, ErrModelRequired) {
+		t.Fatalf("missing model: got %v, want %v", err, ErrModelRequired)
+	}
+	cfg.Model = "model"
+	if err := cfg.Validate(); !errors.Is(err, ErrPromptRequired) {
+		t.Fatalf("missing prompt: got %v, want %v", err, ErrPromptRequired)
+	}
 }
 
 // AllowedCommandsList returns sorted results.

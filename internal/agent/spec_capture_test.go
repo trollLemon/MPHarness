@@ -493,6 +493,38 @@ func TestCallExecNoStoreEmptyOutput(t *testing.T) {
 	}
 }
 
+// callExec forwards Result.Inline with no empty-string fallback, so the capture
+// path must substitute output.NoOutput itself. output.TestCaptureNeverReturnsEmptyInline
+// pins the other half of this contract.
+func TestCallExecCaptureEmptyOutput(t *testing.T) {
+	cfg := config.Config{
+		VM:              config.VMConfig{Name: "vm"},
+		AllowedCommands: map[string]bool{"echo": true},
+		Output:          config.OutputConfig{Enabled: true, Mode: "auto", MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200},
+	}
+	f := &fakeOutputExec{fn: func(name, cmd string) (string, error) {
+		switch {
+		case strings.Contains(cmd, "df -P"):
+			return "99999999", nil
+		case strings.Contains(cmd, "__MPH_EXIT_"):
+			return exitMarker(cmd) + "0", nil
+		case strings.Contains(cmd, "wc -c"):
+			return "0", nil
+		default:
+			return "", nil
+		}
+	}}
+	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 4096)
+
+	got, err := agent.Call(context.Background(), nil, cfg, store, "vm_exec", map[string]any{"command": "echo", "capture": true})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if got != output.NoOutput {
+		t.Fatalf("got %q, want %q", got, output.NoOutput)
+	}
+}
+
 func TestCallOutputReadCorrectsOffsetBelowOne(t *testing.T) {
 	cfg := config.Config{
 		VM:     config.VMConfig{Name: "vm"},

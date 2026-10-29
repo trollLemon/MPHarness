@@ -1,10 +1,10 @@
 package harness_test
 
 import (
-	. "github.com/trollLemon/MPHarness/internal/harness"
 	"bufio"
 	"context"
 	"errors"
+	. "github.com/trollLemon/MPHarness/internal/harness"
 	"io"
 	"strings"
 	"testing"
