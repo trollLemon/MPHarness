@@ -1,42 +1,71 @@
 name: Release
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*'
 
 permissions:
   contents: write
 
 jobs:
   release:
-    name: Build and upload release assets
+    name: Build, SBOM, and Release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.event.release.tag_name }}
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
         with:
-          go-version: '1.27'
-      - name: Vet and test
-        run: |
-          go vet ./...
-          go test -count=1 ./...
-      - name: Build release binaries
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          VERSION="${GITHUB_REF_NAME}"
-          for arch in amd64 arm64; do
-            GOOS=linux GOARCH="$arch" go build -trimpath -ldflags "-X main.version=${VERSION} -s -w" -o "dist/mph-${VERSION}-linux-${arch}/mph" ./mph
-            tar -C dist -czf "dist/mph-${VERSION}-linux-${arch}.tar.gz" "mph-${VERSION}-linux-${arch}/mph"
-            rm -rf "dist/mph-${VERSION}-linux-${arch}"
-          done
-          (cd dist && sha256sum *.tar.gz > SHA256SUMS && sha256sum -c SHA256SUMS)
-          ls -l dist
-      - name: Upload assets to release
+          go-version: '1.27.2'
+          cache: true
+
+      - name: Build binaries
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.ref_name }}
         run: |
-          set -euo pipefail
-          gh release upload "${GITHUB_REF_NAME}" --clobber dist/*
+          mkdir -p dist
+          LDFLAGS="-X main.version=${VERSION} -s -w"
+          
+          echo "Building for linux/amd64..."
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$LDFLAGS" -o dist/mph-linux-amd64 ./mph
+          
+          echo "Building for linux/arm64..."
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "$LDFLAGS" -o dist/mph-linux-arm64 ./mph
+
+      - name: Generate SBOM for linux/amd64
+        uses: anchore/sbom-action@f325610c9f50a54015d37c8d16cb3b0e2c8f4de0 # v0.18.0
+        with:
+          path: dist/mph-linux-amd64
+          format: cyclonedx-json
+          output-file: dist/mph-linux-amd64.cdx.json
+
+      - name: Generate SBOM for linux/arm64
+        uses: anchore/sbom-action@f325610c9f50a54015d37c8d16cb3b0e2c8f4de0 # v0.18.0
+        with:
+          path: dist/mph-linux-arm64
+          format: cyclonedx-json
+          output-file: dist/mph-linux-arm64.cdx.json
+
+      - name: Generate Checksums
+        run: |
+          cd dist
+          sha256sum mph-linux-* *.cdx.json > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub Release and Upload Assets
+        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
+        with:
+          files: |
+            dist/mph-linux-amd64
+            dist/mph-linux-arm64
+            dist/mph-linux-amd64.cdx.json
+            dist/mph-linux-arm64.cdx.json
+            dist/SHA256SUMS
+          generate_release_notes: true
+          draft: false
+          prerelease: false

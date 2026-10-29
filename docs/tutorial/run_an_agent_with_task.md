@@ -78,6 +78,7 @@ Additional flags:
 - `-c`, `--config <file>`: path to YAML config file (positional arg also works)
 - `-i`: reuse an existing VM with the same name without prompting
 - `-k`: keep the VM after the task completes instead of deleting it
+- `-cmd-output-file <file>`: write a JSONL transcript of `vm_exec` commands and outputs to this file
 - `-v`, `--verbose`: verbose (debug) logging
 - `--pretty`: pretty-print logs (human-readable console) instead of JSON
 - `--version`: print version and exit
