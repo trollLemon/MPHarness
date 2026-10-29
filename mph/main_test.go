@@ -1,4 +1,4 @@
-package main
+package main_test
 
 import (
 	"strings"
@@ -7,6 +7,8 @@ import (
 
 	"github.com/trollLemon/MPHarness/internal/agent"
 	"github.com/trollLemon/MPHarness/internal/config"
+
+	main "github.com/trollLemon/MPHarness/mph"
 )
 
 func TestExitCode(t *testing.T) {
@@ -23,8 +25,8 @@ func TestExitCode(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := exitCode(tt.outcome); got != tt.want {
-				t.Errorf("exitCode(%+v) = %d, want %d", tt.outcome, got, tt.want)
+			if got := main.ExitCode(tt.outcome); got != tt.want {
+				t.Errorf("main.ExitCode(%+v) = %d, want %d", tt.outcome, got, tt.want)
 			}
 		})
 	}
@@ -54,7 +56,7 @@ func TestResolveOtelConfig(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := resolveOtelConfig(tt.otel, "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5", "baseline")
+			got := main.ResolveOtelConfig(tt.otel, "0198f0c1-2a3b-7c4d-8e5f-60718293a4b5", "baseline")
 			if got.Enabled != tt.wantEnabled {
 				t.Errorf("Enabled = %v, want %v", got.Enabled, tt.wantEnabled)
 			}
@@ -90,15 +92,15 @@ func TestResolveRunName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := resolveRunName(tt.run, tt.vm); got != tt.want {
-				t.Errorf("resolveRunName() = %q, want %q", got, tt.want)
+			if got := main.ResolveRunName(tt.run, tt.vm); got != tt.want {
+				t.Errorf("main.ResolveRunName() = %q, want %q", got, tt.want)
 			}
 		})
 	}
 }
 
 func TestNewRunIdentity(t *testing.T) {
-	got := newRunIdentity(config.RunConfig{Name: "baseline"}, "mph-vm")
+	got := main.NewRunIdentity(config.RunConfig{Name: "baseline"}, "mph-vm")
 
 	if got.Name != "baseline" {
 		t.Errorf("Name = %q, want %q", got.Name, "baseline")
@@ -112,7 +114,7 @@ func TestNewRunIdentity(t *testing.T) {
 }
 
 func TestRunIdentityIDIsBareUUID(t *testing.T) {
-	got := newRunIdentity(config.RunConfig{Name: "baseline"}, "mph-vm")
+	got := main.NewRunIdentity(config.RunConfig{Name: "baseline"}, "mph-vm")
 
 	if strings.Contains(got.ID, ":") {
 		t.Errorf("ID = %q, must not contain a separator: it becomes a filesystem path", got.ID)

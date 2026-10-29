@@ -128,9 +128,6 @@ func taskText(conversation []model.D) string {
 	for _, m := range conversation {
 		if role, _ := m["role"].(string); role == "user" {
 			if c, _ := m["content"].(string); c != "" {
-				if v, ok := strings.CutPrefix(c, "Task:\n"); ok {
-					return strings.TrimSpace(v)
-				}
 				return c
 			}
 		}
@@ -139,13 +136,13 @@ func taskText(conversation []model.D) string {
 }
 
 // compactConversation rewrites the conversation into a system message plus a
-// summary, or returns the original with skipped or failed. The third return is
-// the summary length in bytes (0 when no summary was produced). The error
-// explains a failed outcome and is nil otherwise.
+// summary, or returns the original with failed. The third return is the
+// summary length in bytes (0 when no summary was produced). The error
+// explains a failed outcome and is nil otherwise. The caller (maybeCompact)
+// only reaches this after shouldCompact confirms a positive context size, so
+// conversation is always non-empty: Execute seeds it with a system and user
+// message before the first call.
 func compactConversation(ctx context.Context, conversation []model.D, handles []handleInfo, maxSummaryTokens, budget int, win compactionWindow, s summarizer, compactionsApplied int) ([]model.D, string, int, error) {
-	if len(conversation) == 0 {
-		return conversation, "skipped", 0, nil
-	}
 	system := conversation[0]
 	task := taskText(conversation)
 

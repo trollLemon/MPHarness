@@ -1,4 +1,4 @@
-package lxd
+package lxd_test
 
 import (
 	"bytes"
@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	. "github.com/trollLemon/MPHarness/internal/lxd"
 	"io"
 	"net/http"
 	"os"
@@ -259,17 +260,17 @@ func TestResolveImageCachesServers(t *testing.T) {
 	client := newTestClient(server, nil)
 	imageServer := &fakeImageServer{target: "fingerprint-noble"}
 	var urls []string
-	client.connectImage = func(url string, _ *lxdclient.ConnectionArgs) (lxdclient.ImageServer, error) {
+	client.SetConnectImage(func(url string, _ *lxdclient.ConnectionArgs) (lxdclient.ImageServer, error) {
 		urls = append(urls, url)
 		return imageServer, nil
-	}
+	})
 
 	for range 2 {
-		if _, _, err := client.resolveImage("noble"); err != nil {
+		if _, _, err := client.ResolveImage("noble"); err != nil {
 			t.Fatalf("resolveImage: %v", err)
 		}
 	}
-	if _, _, err := client.resolveImage("daily:24.04"); err != nil {
+	if _, _, err := client.ResolveImage("daily:24.04"); err != nil {
 		t.Fatalf("resolveImage daily: %v", err)
 	}
 
@@ -768,7 +769,7 @@ func TestExecSetsUpGuestUser(t *testing.T) {
 					r.out = "ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n"
 				case "echo hi":
 					r.out = "hi\n"
-				case guestUserSetup:
+				case GuestUserSetup:
 					userExists = true
 				}
 				writeExecReply(args, r)
@@ -788,7 +789,7 @@ func TestExecSetsUpGuestUser(t *testing.T) {
 			setupPosts := 0
 			setupCommand := ""
 			for _, post := range server.posts() {
-				if len(post.Command) == 3 && post.Command[2] == guestUserSetup {
+				if len(post.Command) == 3 && post.Command[2] == GuestUserSetup {
 					setupPosts++
 					setupCommand = post.Command[2]
 				}
@@ -823,7 +824,7 @@ func TestExecReportsGuestSetupFailure(t *testing.T) {
 		switch command {
 		case "id -u ubuntu":
 			r.exit = 1
-		case guestUserSetup:
+		case GuestUserSetup:
 			r.out = "useradd: cannot create user\n"
 			r.exit = 1
 		}
@@ -844,18 +845,18 @@ func TestExecReportsGuestSetupFailure(t *testing.T) {
 }
 
 func TestWaitForVMReadyRequiresZeroExit(t *testing.T) {
-	oldTimeout, oldInterval := readyTimeout, readyPollInterval
-	readyTimeout = 50 * time.Millisecond
-	readyPollInterval = time.Millisecond
+	oldTimeout, oldInterval := *ReadyTimeout, *ReadyPollInterval
+	*ReadyTimeout = 50 * time.Millisecond
+	*ReadyPollInterval = time.Millisecond
 	t.Cleanup(func() {
-		readyTimeout, readyPollInterval = oldTimeout, oldInterval
+		*ReadyTimeout, *ReadyPollInterval = oldTimeout, oldInterval
 	})
 
 	server := &fakeServer{}
 	server.exec = commandReplies(map[string]reply{"echo ready": {out: "ready\n", exit: 1}})
 	client := newTestClient(server, nil)
 
-	err := client.waitForVMReady(context.Background(), "vm")
+	err := client.WaitForVMReady(context.Background(), "vm")
 	if err == nil || !strings.Contains(err.Error(), "timeout waiting") {
 		t.Fatalf("waitForVMReady = %v, want a readiness timeout", err)
 	}
@@ -872,11 +873,11 @@ func TestWaitForVMReadyRequiresZeroExit(t *testing.T) {
 }
 
 func TestWaitForVMReadyReportsAgentError(t *testing.T) {
-	oldTimeout, oldInterval := readyTimeout, readyPollInterval
-	readyTimeout = 50 * time.Millisecond
-	readyPollInterval = time.Millisecond
+	oldTimeout, oldInterval := *ReadyTimeout, *ReadyPollInterval
+	*ReadyTimeout = 50 * time.Millisecond
+	*ReadyPollInterval = time.Millisecond
 	t.Cleanup(func() {
-		readyTimeout, readyPollInterval = oldTimeout, oldInterval
+		*ReadyTimeout, *ReadyPollInterval = oldTimeout, oldInterval
 	})
 
 	agentErr := errors.New("LXD VM agent is not currently running")
@@ -886,7 +887,7 @@ func TestWaitForVMReadyReportsAgentError(t *testing.T) {
 	}
 	client := newTestClient(server, nil)
 
-	err := client.waitForVMReady(context.Background(), "vm")
+	err := client.WaitForVMReady(context.Background(), "vm")
 	if err == nil || !strings.Contains(err.Error(), "timeout waiting") || !strings.Contains(err.Error(), agentErr.Error()) {
 		t.Fatalf("waitForVMReady = %v, want a timeout including the agent error", err)
 	}
@@ -958,10 +959,10 @@ func TestLaunch(t *testing.T) {
 	client := newTestClient(server, nil)
 	imageServer := &fakeImageServer{target: "fingerprint-resolute"}
 	var connectedURLs []string
-	client.connectImage = func(url string, _ *lxdclient.ConnectionArgs) (lxdclient.ImageServer, error) {
+	client.SetConnectImage(func(url string, _ *lxdclient.ConnectionArgs) (lxdclient.ImageServer, error) {
 		connectedURLs = append(connectedURLs, url)
 		return imageServer, nil
-	}
+	})
 
 	vm := config.VMConfig{Name: "vm", CPU: 2, RAM: "4096M", Disk: "20G", Image: "resolute"}
 	if err := client.Launch(context.Background(), vm); err != nil {
@@ -1027,9 +1028,9 @@ func TestLaunchInheritsDefaultProfilePool(t *testing.T) {
 	}
 	server.exec = commandReplies(identityReplies)
 	client := newTestClient(server, nil)
-	client.connectImage = func(string, *lxdclient.ConnectionArgs) (lxdclient.ImageServer, error) {
+	client.SetConnectImage(func(string, *lxdclient.ConnectionArgs) (lxdclient.ImageServer, error) {
 		return &fakeImageServer{target: "fingerprint-resolute"}, nil
-	}
+	})
 
 	vm := config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "10G", Image: "resolute"}
 	if err := client.Launch(context.Background(), vm); err != nil {
@@ -1075,9 +1076,9 @@ func TestLaunchFailsWithoutDefaultProfileRoot(t *testing.T) {
 			}
 			server.exec = commandReplies(identityReplies)
 			client := newTestClient(server, nil)
-			client.connectImage = func(string, *lxdclient.ConnectionArgs) (lxdclient.ImageServer, error) {
+			client.SetConnectImage(func(string, *lxdclient.ConnectionArgs) (lxdclient.ImageServer, error) {
 				return &fakeImageServer{target: "fingerprint-resolute"}, nil
-			}
+			})
 
 			vm := config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "10G", Image: "resolute"}
 			err := client.Launch(context.Background(), vm)
@@ -1118,9 +1119,9 @@ func TestLaunchSecureBootConfig(t *testing.T) {
 			server := &fakeServer{hasExtension: func(string) bool { return tt.hasExtension }}
 			server.exec = commandReplies(identityReplies)
 			client := newTestClient(server, nil)
-			client.connectImage = func(string, *lxdclient.ConnectionArgs) (lxdclient.ImageServer, error) {
+			client.SetConnectImage(func(string, *lxdclient.ConnectionArgs) (lxdclient.ImageServer, error) {
 				return &fakeImageServer{target: "fingerprint-resolute"}, nil
-			}
+			})
 
 			vm := config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "10G", Image: "resolute"}
 			if err := client.Launch(context.Background(), vm); err != nil {
@@ -1386,12 +1387,12 @@ type historyExec struct {
 	err     error
 }
 
-func decodeCommandHistory(t *testing.T, data []byte) []commandRecord {
+func decodeCommandHistory(t *testing.T, data []byte) []CommandRecord {
 	t.Helper()
 	dec := json.NewDecoder(bytes.NewReader(data))
-	var got []commandRecord
+	var got []CommandRecord
 	for {
-		var rec commandRecord
+		var rec CommandRecord
 		err := dec.Decode(&rec)
 		if errors.Is(err, io.EOF) {
 			return got
@@ -1407,25 +1408,25 @@ func TestExecRecordsCommandHistory(t *testing.T) {
 	tests := []struct {
 		name      string
 		steps     []historyExec
-		want      []commandRecord
+		want      []CommandRecord
 		wantLines int
 	}{
 		{
 			name:      "success records command and output",
 			steps:     []historyExec{{command: "echo hi", out: "hi\n"}},
-			want:      []commandRecord{{Command: "echo hi", Output: "hi\n"}},
+			want:      []CommandRecord{{Command: "echo hi", Output: "hi\n"}},
 			wantLines: 1,
 		},
 		{
 			name:      "nonzero exit records the output",
 			steps:     []historyExec{{command: "false", out: "nope\n", exit: 1}},
-			want:      []commandRecord{{Command: "false", Output: "nope\n"}},
+			want:      []CommandRecord{{Command: "false", Output: "nope\n"}},
 			wantLines: 1,
 		},
 		{
 			name:      "transport error records the error text",
 			steps:     []historyExec{{command: "boom", err: errors.New("connection reset")}},
-			want:      []commandRecord{{Command: "boom", Output: "Exec error: vm exec transport failed: connection reset"}},
+			want:      []CommandRecord{{Command: "boom", Output: "Exec error: vm exec transport failed: connection reset"}},
 			wantLines: 1,
 		},
 		{
@@ -1434,7 +1435,7 @@ func TestExecRecordsCommandHistory(t *testing.T) {
 				{command: "first", out: "1\n"},
 				{command: "second", out: "2\n"},
 			},
-			want: []commandRecord{
+			want: []CommandRecord{
 				{Command: "first", Output: "1\n"},
 				{Command: "second", Output: "2\n"},
 			},
@@ -1443,13 +1444,13 @@ func TestExecRecordsCommandHistory(t *testing.T) {
 		{
 			name:      "plumbing commands are recorded verbatim",
 			steps:     []historyExec{{command: `{ echo hi; } 2>&1 | head -c 11 > '/tmp/x/output.txt'`, out: "__MPH_EXIT_abc:0\n"}},
-			want:      []commandRecord{{Command: `{ echo hi; } 2>&1 | head -c 11 > '/tmp/x/output.txt'`, Output: "__MPH_EXIT_abc:0\n"}},
+			want:      []CommandRecord{{Command: `{ echo hi; } 2>&1 | head -c 11 > '/tmp/x/output.txt'`, Output: "__MPH_EXIT_abc:0\n"}},
 			wantLines: 1,
 		},
 		{
 			name:      "newlines stay inside one JSONL record",
 			steps:     []historyExec{{command: "printf", out: "a\nb\nc"}},
-			want:      []commandRecord{{Command: "printf", Output: "a\nb\nc"}},
+			want:      []CommandRecord{{Command: "printf", Output: "a\nb\nc"}},
 			wantLines: 1,
 		},
 	}
@@ -1505,14 +1506,14 @@ func TestExecRecordsPlaceholdersNotSecrets(t *testing.T) {
 		execCommand string
 		out         string
 		exit        int
-		want        []commandRecord
+		want        []CommandRecord
 	}{
 		{
 			name:        "success scrubs the secret",
 			command:     "echo %{TOKEN}",
 			execCommand: "echo s3cret",
 			out:         "s3cret\n",
-			want:        []commandRecord{{Command: "echo %{TOKEN}", Output: "%{TOKEN}\n"}},
+			want:        []CommandRecord{{Command: "echo %{TOKEN}", Output: "%{TOKEN}\n"}},
 		},
 		{
 			name:        "nonzero exit scrubs the secret from the output",
@@ -1520,7 +1521,7 @@ func TestExecRecordsPlaceholdersNotSecrets(t *testing.T) {
 			execCommand: "echo s3cret",
 			out:         "boom s3cret\n",
 			exit:        7,
-			want:        []commandRecord{{Command: "echo %{TOKEN}", Output: "boom %{TOKEN}\n"}},
+			want:        []CommandRecord{{Command: "echo %{TOKEN}", Output: "boom %{TOKEN}\n"}},
 		},
 	}
 

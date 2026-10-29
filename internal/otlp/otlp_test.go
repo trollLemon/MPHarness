@@ -1,4 +1,4 @@
-package otlp
+package otlp_test
 
 import (
 	"bytes"
@@ -11,6 +11,8 @@ import (
 	"go.opentelemetry.io/otel"
 	otellog "go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+
+	. "github.com/trollLemon/MPHarness/internal/otlp"
 )
 
 // TestSetup covers the Setup matrix: disabled and SDK-disabled installs
@@ -142,8 +144,8 @@ func TestConvertLevel(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := convertLevel(tt.level); got != tt.want {
-				t.Fatalf("convertLevel(%v) = %v want %v", tt.level, got, tt.want)
+			if got := ConvertLevel(tt.level); got != tt.want {
+				t.Fatalf("ConvertLevel(%v) = %v want %v", tt.level, got, tt.want)
 			}
 		})
 	}
@@ -214,14 +216,14 @@ func TestPayloadKeysMatchEmittedKeys(t *testing.T) {
 	emitted := map[string]bool{
 		"args": true, "text": true, "command_output": true,
 	}
-	for _, k := range payloadKeyOrder {
+	for _, k := range PayloadKeyOrder {
 		if !emitted[k] {
 			t.Errorf("payload key %q is never emitted as a LogEvent field", k)
 		}
 	}
 	for k := range emitted {
-		if !slices.Contains(payloadKeyOrder, k) {
-			t.Errorf("emitted key %q is missing from payloadKeyOrder", k)
+		if !slices.Contains(PayloadKeyOrder, k) {
+			t.Errorf("emitted key %q is missing from PayloadKeyOrder", k)
 		}
 	}
 }

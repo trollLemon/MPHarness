@@ -1,6 +1,10 @@
-package validation
+package validation_test
 
-import "testing"
+import (
+	"testing"
+
+	. "github.com/trollLemon/MPHarness/internal/validation"
+)
 
 func TestIsCommandAllowed(t *testing.T) {
 	tests := []struct {
@@ -23,8 +27,8 @@ func TestIsCommandAllowed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isCommandAllowed(tt.allowed, tt.cmd); got != tt.want {
-				t.Fatalf("isCommandAllowed(%q)=%v want %v (set %v)", tt.cmd, got, tt.want, tt.allowed)
+			if got := IsCommandAllowed(tt.allowed, tt.cmd); got != tt.want {
+				t.Fatalf("IsCommandAllowed(%q)=%v want %v (set %v)", tt.cmd, got, tt.want, tt.allowed)
 			}
 		})
 	}
@@ -106,5 +110,86 @@ func TestValidateShellCommand(t *testing.T) {
 				t.Fatalf("ValidateShellCommand(%q) error = %v, wantErr %v", tt.cmd, err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestIsCommandAllowedEmptyAllowsAll(t *testing.T) {
+	for _, allowed := range []map[string]bool{nil, {}} {
+		if !IsCommandAllowed(allowed, "anything --here") {
+			t.Fatalf("empty allowlist %v should allow everything", allowed)
+		}
+	}
+}
+
+func TestIsCommandAllowedEmptyCommandRejected(t *testing.T) {
+	for _, cmd := range []string{"", " ", "\t", "  \t  "} {
+		if IsCommandAllowed(map[string]bool{"ls": true}, cmd) {
+			t.Fatalf("empty command %q should be rejected with a non-empty allowlist", cmd)
+		}
+	}
+}
+
+func TestIsCommandAllowedTrimConsistency(t *testing.T) {
+	for _, cmd := range []string{"ls", "cat", "vm_exec"} {
+		if !IsCommandAllowed(map[string]bool{cmd: true}, "   "+cmd+"   ") {
+			t.Fatalf("padded command %q should match %q", "   "+cmd+"   ", cmd)
+		}
+	}
+}
+
+func TestIsCommandAllowedIsCaseSensitive(t *testing.T) {
+	if IsCommandAllowed(map[string]bool{"LS": true}, "ls") {
+		t.Fatal(`command "ls" should not match "LS" (case sensitive)`)
+	}
+}
+
+func TestValidateShellCommandBlocksShells(t *testing.T) {
+	blocked := []string{"bash", "sh", "zsh", "fish", "dash", "ksh", "csh", "tcsh"}
+	for _, shell := range blocked {
+		t.Run(shell, func(t *testing.T) {
+			err := ValidateShellCommand(nil, shell+" -c 'echo hi'")
+			if err == nil {
+				t.Fatalf("shell %q should be blocked", shell)
+			}
+		})
+	}
+}
+
+func TestValidateShellCommandEmptyAllowsSimple(t *testing.T) {
+	for _, cmd := range []string{"ls", "cat /etc/passwd", "echo hello", "pwd"} {
+		if err := ValidateShellCommand(nil, cmd); err != nil {
+			t.Fatalf("simple command %q should be allowed with empty allowlist, got: %v", cmd, err)
+		}
+	}
+}
+
+func TestValidateShellCommandRejectsMalformed(t *testing.T) {
+	for _, cmd := range []string{`echo "unclosed`, `echo 'unclosed`} {
+		if err := ValidateShellCommand(nil, cmd); err == nil {
+			t.Fatalf("malformed command %q should be rejected", cmd)
+		}
+	}
+}
+
+func TestValidateShellCommandAllowsListed(t *testing.T) {
+	allowed := map[string]bool{"ls": true}
+	if err := ValidateShellCommand(allowed, "ls -la"); err != nil {
+		t.Fatalf("command should be allowed with %v, got: %v", allowed, err)
+	}
+}
+
+func TestValidateShellCommandRejectsNotListed(t *testing.T) {
+	allowed := map[string]bool{"ls": true, "cat": true}
+	if err := ValidateShellCommand(allowed, "rm -rf /"); err == nil {
+		t.Fatalf("command should be rejected with allowlist %v", allowed)
+	}
+}
+
+func TestValidateShellCommandWhitespaceVariants(t *testing.T) {
+	allowed := map[string]bool{"ls": true}
+	for _, cmd := range []string{"ls", " ls", "ls ", "  ls  ", "\tls\t", "   ls     "} {
+		if err := ValidateShellCommand(allowed, cmd); err != nil {
+			t.Fatalf("padded command %q should be allowed with 'ls' in allowlist, got: %v", cmd, err)
+		}
 	}
 }

@@ -1,4 +1,4 @@
-package output
+package output_test
 
 import (
 	"context"
@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/trollLemon/MPHarness/internal/config"
+
+	. "github.com/trollLemon/MPHarness/internal/output"
 )
 
 type fakeExec struct {
@@ -39,7 +41,7 @@ func TestDecideInline(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := decideInline(tt.mode, tt.size, tt.cutoff); got != tt.want {
+			if got := DecideInline(tt.mode, tt.size, tt.cutoff); got != tt.want {
 				t.Fatalf("got %v want %v", got, tt.want)
 			}
 		})
@@ -74,7 +76,7 @@ func TestSearchFixedStringSkipsValidation(t *testing.T) {
 		return "", nil
 	}}
 	s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096)
-	s.handles["abc"] = Handle{ID: "abc", Path: "/tmp/x/output.txt", TotalLines: 10}
+	s.SetHandle("abc", Handle{ID: "abc", Path: "/tmp/x/output.txt", TotalLines: 10})
 
 	tests := []struct {
 		name        string
@@ -354,7 +356,7 @@ func TestSearchExitMapping(t *testing.T) {
 				return "", nil
 			}}
 			s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096)
-			s.handles["abc"] = Handle{ID: "abc", Path: "/tmp/x/output.txt", TotalLines: 2000000}
+			s.SetHandle("abc", Handle{ID: "abc", Path: "/tmp/x/output.txt", TotalLines: 2000000})
 
 			res, err := s.Search(context.Background(), SearchArgs{OutputID: tt.outputID, Pattern: "hit"})
 			if tt.wantErr {
@@ -377,7 +379,7 @@ func TestSearchExitMapping(t *testing.T) {
 }
 
 func TestCapturePaths(t *testing.T) {
-	subdir, raw := capturePaths("/tmp/mph-output/run1", "oid")
+	subdir, raw := CapturePaths("/tmp/mph-output/run1", "oid")
 	if subdir != "/tmp/mph-output/run1/raw-oid" || raw != "/tmp/mph-output/run1/raw-oid/output.txt" {
 		t.Fatalf("got %q %q", subdir, raw)
 	}
@@ -397,7 +399,7 @@ func TestRunRedirectMissingMarkerIsAnError(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			f := &fakeExec{fn: func(name, cmd string) (string, error) { return tt.execOut, tt.execErr }}
 			s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096)
-			_, err := s.runRedirect(context.Background(), "echo hi", "/tmp/raw/output.txt", "__MPH_EXIT_abc:")
+			_, err := s.RunRedirect(context.Background(), "echo hi", "/tmp/raw/output.txt", "__MPH_EXIT_abc:")
 			if err == nil {
 				t.Fatal("a missing marker must not report success")
 			}
@@ -413,7 +415,7 @@ func TestRunRedirectMarkerWinsOverExecError(t *testing.T) {
 		return echoMarker(cmd, "7"), errors.New("wrapper complained")
 	}}
 	s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096)
-	exit, err := s.runRedirect(context.Background(), "echo hi", "/tmp/raw/output.txt", "__MPH_EXIT_abc:")
+	exit, err := s.RunRedirect(context.Background(), "echo hi", "/tmp/raw/output.txt", "__MPH_EXIT_abc:")
 	if err != nil {
 		t.Fatalf("the marker is authoritative: %v", err)
 	}
@@ -563,7 +565,7 @@ func TestSearchTotalMatchesIsARealCount(t *testing.T) {
 				return tt.execOut, nil
 			}}
 			s := NewStore(f, "vm", "/tmp/mph-output/run1", cfg, 4096)
-			s.handles["abc"] = Handle{ID: "abc", Path: "/tmp/raw/output.txt", TotalLines: 10}
+			s.SetHandle("abc", Handle{ID: "abc", Path: "/tmp/raw/output.txt", TotalLines: 10})
 			res, err := s.Search(context.Background(), SearchArgs{OutputID: "abc", Pattern: "a"})
 			if err != nil {
 				t.Fatalf("search: %v", err)
@@ -579,14 +581,14 @@ func TestSearchTotalMatchesIsARealCount(t *testing.T) {
 }
 
 func TestParseGrepOutputIgnoresLookalikeContent(t *testing.T) {
-	lines, exit, hasMarker := parseGrepOutput("__MPH_GREP_EXIT_abc:0\n7:hit\n__MPH_GREP_EXIT_abc:1", "__MPH_GREP_EXIT_abc:")
+	lines, exit, hasMarker := ParseGrepOutput("__MPH_GREP_EXIT_abc:0\n7:hit\n__MPH_GREP_EXIT_abc:1", "__MPH_GREP_EXIT_abc:")
 	if !hasMarker {
 		t.Fatal("must find the trailing marker")
 	}
 	if exit != 1 {
 		t.Fatalf("exit %d want 1 (the real trailing marker, not the 0 written by the model)", exit)
 	}
-	if n := parseGrepLines(lines); len(n) != 1 || n[0] != 7 {
+	if n := ParseGrepLines(lines); len(n) != 1 || n[0] != 7 {
 		t.Fatalf("matches %v want [7]", n)
 	}
 }
@@ -606,7 +608,7 @@ func TestParseExitMarker(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			n, ok := parseExitMarker(tt.out, tt.marker)
+			n, ok := ParseExitMarker(tt.out, tt.marker)
 			if ok != tt.wantOK || n != tt.wantN {
 				t.Fatalf("got %d %v want %d %v", n, ok, tt.wantN, tt.wantOK)
 			}
@@ -621,7 +623,7 @@ func TestSearchGrepsTheRawCaptureFile(t *testing.T) {
 		return "7:hit\n__MPH_GREP_EXIT_abc:0", nil
 	}}
 	s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096)
-	s.handles["abc"] = Handle{ID: "abc", Path: "/tmp/mph-output/run1/raw-abc/output.txt", TotalLines: 7}
+	s.SetHandle("abc", Handle{ID: "abc", Path: "/tmp/mph-output/run1/raw-abc/output.txt", TotalLines: 7})
 
 	res, err := s.Search(context.Background(), SearchArgs{OutputID: "abc", Pattern: "hit"})
 	if err != nil {
@@ -675,7 +677,7 @@ func TestSearchEmptyCapture(t *testing.T) {
 				return "", nil
 			}}
 			s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096)
-			s.handles[tt.handle.ID] = tt.handle
+			s.SetHandle(tt.handle.ID, tt.handle)
 
 			res, err := s.Search(context.Background(), SearchArgs{OutputID: "abc", Pattern: "hit"})
 			if err != nil {
@@ -706,7 +708,7 @@ func TestSearchTruncatesAtTheHeadBound(t *testing.T) {
 		return b.String(), nil
 	}}
 	s := NewStore(f, "vm", "/tmp/mph-output/run1", cfg, 4096)
-	s.handles["abc"] = Handle{ID: "abc", Path: "/tmp/x/output.txt", TotalLines: 5}
+	s.SetHandle("abc", Handle{ID: "abc", Path: "/tmp/x/output.txt", TotalLines: 5})
 
 	res, err := s.Search(context.Background(), SearchArgs{OutputID: "abc", Pattern: "hit"})
 	if err != nil {
@@ -746,7 +748,7 @@ func TestBuildGrepCmd(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := buildGrepCmd("/tmp/x/output.txt", tt.pattern, tt.fixed, tt.ignoreCase, 200, "__MPH_GREP_EXIT_abc:")
+			got := BuildGrepCmd("/tmp/x/output.txt", tt.pattern, tt.fixed, tt.ignoreCase, 200, "__MPH_GREP_EXIT_abc:")
 			for _, want := range tt.wantSubs {
 				if !strings.Contains(got, want) {
 					t.Errorf("missing %q in %q", want, got)
@@ -775,7 +777,7 @@ func TestParseGrepOutput(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			lines, exit, ok := parseGrepOutput(tt.out, "__MPH_GREP_EXIT_abc:")
+			lines, exit, ok := ParseGrepOutput(tt.out, "__MPH_GREP_EXIT_abc:")
 			if ok != tt.wantOK || exit != tt.wantExit {
 				t.Fatalf("got exit %d ok %v want %d %v (lines %v)", exit, ok, tt.wantExit, tt.wantOK, lines)
 			}
@@ -832,7 +834,7 @@ func TestParseGrepLines(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := parseGrepLines(tt.lines); !slices.Equal(got, tt.want) {
+			if got := ParseGrepLines(tt.lines); !slices.Equal(got, tt.want) {
 				t.Fatalf("got %v want %v", got, tt.want)
 			}
 		})
@@ -853,7 +855,7 @@ func TestCapMatches(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			kept, truncated := capMatches(tt.matches, tt.maxM)
+			kept, truncated := CapMatches(tt.matches, tt.maxM)
 			if truncated != tt.wantTruncat {
 				t.Fatalf("truncated %v want %v", truncated, tt.wantTruncat)
 			}
@@ -890,7 +892,7 @@ func TestBuildReadCmd(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := buildReadCmd(tt.path, tt.offset, tt.limit); got != tt.want {
+			if got := BuildReadCmd(tt.path, tt.offset, tt.limit); got != tt.want {
 				t.Fatalf("got %q want %q", got, tt.want)
 			}
 		})
@@ -910,7 +912,7 @@ func TestClampReadLimit(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := clampReadLimit(tt.limit); got != tt.want {
+			if got := ClampReadLimit(tt.limit); got != tt.want {
 				t.Fatalf("got %d want %d", got, tt.want)
 			}
 		})
@@ -995,7 +997,7 @@ func TestStoreRead(t *testing.T) {
 			}}
 			s := NewStore(f, "vm", "/tmp/mph-output/run1", testCfg(), 4096)
 			for id, h := range tt.seed {
-				s.handles[id] = h
+				s.SetHandle(id, h)
 			}
 			if tt.viaSearch {
 				_, err := s.Search(context.Background(), SearchArgs{OutputID: tt.outputID, Pattern: "x"})
@@ -1040,11 +1042,76 @@ func TestStoreRead(t *testing.T) {
 }
 
 func TestWrapCaptureWithNoCapKeepsFullOutput(t *testing.T) {
-	got := wrapCapture("echo hi", "/tmp/raw.txt", "__MPH_EXIT_abc:", 0)
+	got := WrapCapture("echo hi", "/tmp/raw.txt", "__MPH_EXIT_abc:", 0)
 	if strings.Contains(got, "head -c") {
 		t.Fatalf("a disabled cap must not truncate the capture: %q", got)
 	}
 	if !strings.Contains(got, "echo hi") || !strings.Contains(got, "__MPH_EXIT_abc:") {
 		t.Fatalf("capture body or marker lost: %q", got)
+	}
+}
+
+// agent.callExec returns res.Inline verbatim, with no empty-string fallback, so
+// a successful Capture that produces no handle must always carry inline text.
+func TestCaptureNeverReturnsEmptyInline(t *testing.T) {
+	tests := []struct {
+		name    string
+		force   bool
+		respond func(cmd string) (string, error)
+	}{
+		{
+			name:    "direct exec with no output",
+			respond: func(string) (string, error) { return "", nil },
+		},
+		{
+			name:  "captured file is empty",
+			force: true,
+			respond: func(cmd string) (string, error) {
+				switch {
+				case strings.Contains(cmd, "df -P"):
+					return "99999999", nil
+				case strings.Contains(cmd, "__MPH_EXIT_"):
+					return echoMarker(cmd, "0"), nil
+				case strings.Contains(cmd, "wc -c"):
+					return "0", nil
+				default:
+					return "", nil
+				}
+			},
+		},
+		{
+			name:  "captured file reports a size but reads back empty",
+			force: true,
+			respond: func(cmd string) (string, error) {
+				switch {
+				case strings.Contains(cmd, "df -P"):
+					return "99999999", nil
+				case strings.Contains(cmd, "__MPH_EXIT_"):
+					return echoMarker(cmd, "0"), nil
+				case strings.Contains(cmd, "wc -c"):
+					return "12", nil
+				default:
+					return "", nil
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewStore(&fakeExec{fn: func(name, cmd string) (string, error) {
+				return tt.respond(cmd)
+			}}, "vm", "/tmp/mph-output/run1", testCfg(), 4096)
+
+			res, err := s.Capture(context.Background(), "echo hi", tt.force)
+			if err != nil {
+				t.Fatalf("capture: %v", err)
+			}
+			if res.Handle != nil {
+				t.Fatalf("want inline result, got handle %+v", res.Handle)
+			}
+			if res.Inline != NoOutput {
+				t.Fatalf("Inline = %q, want %q", res.Inline, NoOutput)
+			}
+		})
 	}
 }

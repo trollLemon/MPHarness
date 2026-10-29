@@ -226,10 +226,9 @@ func callExec(ctx context.Context, cli *lxd.Client, cfg config.Config, store *ou
 		if res.Handle != nil {
 			return buildCaptureSuccessContent(res.Handle), nil
 		}
+		// res.Inline is never empty here: directExec and materializeInline both
+		// substitute output.NoOutput themselves before returning.
 		out := res.Inline
-		if out == "" {
-			out = output.NoOutput
-		}
 		if res.ExitCode != 0 {
 			out += fmt.Sprintf("\n(exit code: %d)", res.ExitCode)
 		}
@@ -337,32 +336,6 @@ func callOutputRead(ctx context.Context, store *output.Store, args map[string]an
 		return "", err
 	}
 	return buildReadSuccessContent(res), nil
-}
-
-// argInt reads an integer tool argument. kronk decodes tool arguments through
-// json.Decoder.UseNumber, so a JSON integer arrives as json.Number; float64
-// covers callers that build arguments in Go.
-func argInt(args map[string]any, key string) int {
-	switch v := args[key].(type) {
-	case json.Number:
-		n, err := v.Int64()
-		if err != nil {
-			return 0
-		}
-		return int(n)
-	case float64:
-		return int(v)
-	case int:
-		return v
-	case json.RawMessage:
-		var n int
-		if err := json.Unmarshal(v, &n); err != nil {
-			return 0
-		}
-		return n
-	default:
-		return 0
-	}
 }
 
 func buildReadSuccessContent(res output.ReadResult) string {

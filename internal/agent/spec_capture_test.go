@@ -1,16 +1,12 @@
-package agent
+package agent_test
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/ardanlabs/kronk/sdk/kronk/model"
-	"github.com/rs/zerolog"
-
+	"github.com/trollLemon/MPHarness/internal/agent"
 	"github.com/trollLemon/MPHarness/internal/config"
 	"github.com/trollLemon/MPHarness/internal/output"
 )
@@ -21,6 +17,24 @@ type fakeOutputExec struct {
 
 func (f *fakeOutputExec) Exec(_ context.Context, name, command string) (string, error) {
 	return f.fn(name, command)
+}
+
+type toolEnvelope struct {
+	Status string `json:"status"`
+	Data   struct {
+		Result struct {
+			OutputID string `json:"output_id"`
+			Captured bool   `json:"captured"`
+		} `json:"result"`
+	} `json:"data"`
+}
+
+func parseToolEnvelope(s string) (toolEnvelope, bool) {
+	var v toolEnvelope
+	if err := json.Unmarshal([]byte(s), &v); err != nil {
+		return toolEnvelope{}, false
+	}
+	return v, v.Status == "SUCCESS" && v.Data.Result.OutputID != ""
 }
 
 func TestToolSpecs(t *testing.T) {
@@ -46,8 +60,8 @@ func TestToolSpecs(t *testing.T) {
 				cfg.Output.Mode = "auto"
 				cfg.Output.SearchMaxMatches = 200
 			}
-			var found *Spec
-			for _, s := range Specs(cfg) {
+			var found *agent.Spec
+			for _, s := range agent.Specs(cfg) {
 				if s.Name == tt.tool {
 					s := s
 					found = &s
@@ -72,8 +86,8 @@ func TestToolSpecs(t *testing.T) {
 }
 
 func TestTaskStatusSpec(t *testing.T) {
-	var found *Spec
-	for _, s := range Specs(config.Config{}) {
+	var found *agent.Spec
+	for _, s := range agent.Specs(config.Config{}) {
 		if s.Name == "task_status" {
 			s := s
 			found = &s
@@ -105,67 +119,6 @@ func TestTaskStatusSpec(t *testing.T) {
 	required, _ := found.Parameters["required"].([]string)
 	if len(required) != 2 || required[0] != "status" || required[1] != "reason" {
 		t.Errorf("required = %v, want [status reason]", required)
-	}
-}
-
-func TestParseTaskStatus(t *testing.T) {
-	tests := []struct {
-		name    string
-		args    map[string]any
-		want    TaskStatusOutcome
-		wantErr bool
-	}{
-		{
-			name: "completed",
-			args: map[string]any{"status": "Completed", "reason": "kernel string verified"},
-			want: TaskStatusOutcome{CompletedStatus: "Completed", Reason: "kernel string verified"},
-		},
-		{
-			name: "failed",
-			args: map[string]any{"status": "Failed", "reason": "cli lacks the required flag"},
-			want: TaskStatusOutcome{CompletedStatus: "Failed", Reason: "cli lacks the required flag"},
-		},
-		{
-			name: "error",
-			args: map[string]any{"status": "Error", "reason": "permission denied"},
-			want: TaskStatusOutcome{CompletedStatus: "Error", Reason: "permission denied"},
-		},
-		{
-			name: "trims reason",
-			args: map[string]any{"status": "Completed", "reason": "  done  "},
-			want: TaskStatusOutcome{CompletedStatus: "Completed", Reason: "done"},
-		},
-		{
-			name:    "unknown status",
-			args:    map[string]any{"status": "Done", "reason": "x"},
-			wantErr: true,
-		},
-		{
-			name:    "missing status",
-			args:    map[string]any{"reason": "x"},
-			wantErr: true,
-		},
-		{
-			name:    "missing reason",
-			args:    map[string]any{"status": "Completed"},
-			wantErr: true,
-		},
-		{
-			name:    "blank reason",
-			args:    map[string]any{"status": "Completed", "reason": "   "},
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseTaskStatus(tt.args)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
-			}
-			if got != tt.want {
-				t.Errorf("got %+v, want %+v", got, tt.want)
-			}
-		})
 	}
 }
 
@@ -230,7 +183,7 @@ func TestCallVMExecCapture(t *testing.T) {
 				}
 			}}
 			store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, tt.cutoff)
-			got, err := Call(context.Background(), nil, cfg, store, "vm_exec", tt.args)
+			got, err := agent.Call(context.Background(), nil, cfg, store, "vm_exec", tt.args)
 			if err != nil {
 				t.Fatalf("call: %v", err)
 			}
@@ -295,7 +248,7 @@ func TestCallOutputSearchReportsAbsoluteLines(t *testing.T) {
 			}}
 			store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10)
 			id := capturedID(t, captureEnvelope(t, cfg, store))
-			res, err := Call(context.Background(), nil, cfg, store, "output_search", map[string]any{
+			res, err := agent.Call(context.Background(), nil, cfg, store, "output_search", map[string]any{
 				"output_id": id, "pattern": "hit",
 			})
 			if err != nil {
@@ -316,10 +269,31 @@ func TestCallOutputSearchReportsAbsoluteLines(t *testing.T) {
 }
 
 func TestCaptureSuccessContentHasNoChunkFields(t *testing.T) {
-	got := buildCaptureSuccessContent(&output.Handle{
-		ID: "abc", Path: "/tmp/x/output.txt", TotalLines: 64000, TotalBytes: 7340032, ExitCode: 0,
-	})
-	for _, want := range []string{`"output_id":"abc"`, `"total_lines":64000`, `"total_bytes":7340032`} {
+	cfg := config.Config{
+		VM:     config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
+		Model:  "m",
+		Prompt: "p",
+		Output: config.OutputConfig{Enabled: true, Mode: "always", MaxCommandSize: 1 << 30, MaxTotalSize: 1 << 26, SearchMaxMatches: 200},
+	}
+	f := &fakeOutputExec{fn: func(name, cmd string) (string, error) {
+		switch {
+		case strings.Contains(cmd, "df -P"):
+			return "99999999", nil
+		case strings.Contains(cmd, "mkdir"):
+			return "", nil
+		case strings.Contains(cmd, "__MPH_EXIT_"):
+			return exitMarker(cmd) + "0", nil
+		case strings.Contains(cmd, "wc -c"):
+			return "7340032", nil
+		case strings.Contains(cmd, "wc -l"):
+			return "64000", nil
+		default:
+			return "", nil
+		}
+	}}
+	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10)
+	got := captureEnvelope(t, cfg, store)
+	for _, want := range []string{`"captured":true`, `"total_lines":64000`, `"total_bytes":7340032`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in %q", want, got)
 		}
@@ -335,7 +309,7 @@ func TestCaptureSuccessContentHasNoChunkFields(t *testing.T) {
 // the handle envelope, so a test can reuse the registered output_id.
 func captureEnvelope(t *testing.T, cfg config.Config, store *output.Store) string {
 	t.Helper()
-	got, err := Call(context.Background(), nil, cfg, store, "vm_exec", map[string]any{"command": "echo hi"})
+	got, err := agent.Call(context.Background(), nil, cfg, store, "vm_exec", map[string]any{"command": "echo hi"})
 	if err != nil {
 		t.Fatalf("capture: %v", err)
 	}
@@ -376,7 +350,7 @@ func TestCallNilStoreDisabled(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := Call(context.Background(), nil, config.Config{}, nil, tt.tool, tt.args); err == nil {
+			if _, err := agent.Call(context.Background(), nil, config.Config{}, nil, tt.tool, tt.args); err == nil {
 				t.Fatalf("want disabled error for %s with nil store", tt.tool)
 			}
 		})
@@ -397,10 +371,7 @@ func TestCallOutputReadRoundTrip(t *testing.T) {
 		case strings.Contains(cmd, "mkdir"):
 			return "", nil
 		case strings.Contains(cmd, "__MPH_EXIT_"):
-			start := strings.Index(cmd, "__MPH_EXIT_")
-			rest := cmd[start:]
-			end := strings.Index(rest, ":")
-			return rest[:end+1] + "0", nil
+			return exitMarker(cmd) + "0", nil
 		case strings.Contains(cmd, "wc -c"):
 			return "1000", nil
 		case strings.Contains(cmd, "wc -l"):
@@ -412,7 +383,7 @@ func TestCallOutputReadRoundTrip(t *testing.T) {
 		}
 	}}
 	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10)
-	capGot, err := Call(context.Background(), nil, cfg, store, "vm_exec", map[string]any{"command": "echo hi"})
+	capGot, err := agent.Call(context.Background(), nil, cfg, store, "vm_exec", map[string]any{"command": "echo hi"})
 	if err != nil {
 		t.Fatalf("capture: %v", err)
 	}
@@ -420,7 +391,7 @@ func TestCallOutputReadRoundTrip(t *testing.T) {
 	if id == "" {
 		t.Fatalf("no output_id in %q", capGot)
 	}
-	got, err := Call(context.Background(), nil, cfg, store, "output_read", map[string]any{
+	got, err := agent.Call(context.Background(), nil, cfg, store, "output_read", map[string]any{
 		"output_id": id, "offset": json.Number("5"), "limit": json.Number("2"),
 	})
 	if err != nil {
@@ -433,12 +404,130 @@ func TestCallOutputReadRoundTrip(t *testing.T) {
 	}
 }
 
-func TestCaptureLogsAttributionLine(t *testing.T) {
-	var buf bytes.Buffer
+func TestCallUnknownTool(t *testing.T) {
+	if _, err := agent.Call(context.Background(), nil, config.Config{}, nil, "bogus", nil); err == nil {
+		t.Fatal("want error for an unknown tool")
+	}
+}
+
+func TestCallExecError(t *testing.T) {
+	cfg := config.Config{VM: config.VMConfig{Name: "vm"}, AllowedCommands: map[string]bool{"echo": true}}
+	cli := newScriptedTestClient(t, func(command string) (string, int) {
+		switch {
+		case strings.HasPrefix(command, "id -u"), strings.HasPrefix(command, "id -g"):
+			return "1000\n", 0
+		case strings.HasPrefix(command, "getent passwd"):
+			return "ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n", 0
+		default:
+			return "boom", 1
+		}
+	})
+	if _, err := agent.Call(context.Background(), cli, cfg, nil, "vm_exec", map[string]any{"command": "echo"}); err == nil {
+		t.Fatal("want error when the VM command exits non-zero")
+	}
+}
+
+func TestCallExecEmptyCommand(t *testing.T) {
+	_, err := agent.Call(context.Background(), nil, config.Config{}, nil, "vm_exec", map[string]any{"command": "   "})
+	if err == nil {
+		t.Fatal("want error for empty command")
+	}
+}
+
+func TestCallExecDisallowedCommand(t *testing.T) {
+	cfg := config.Config{AllowedCommands: map[string]bool{"echo": true}}
+	_, err := agent.Call(context.Background(), nil, cfg, nil, "vm_exec", map[string]any{"command": "rm -rf /"})
+	if err == nil {
+		t.Fatal("want validation error for a disallowed command")
+	}
+}
+
+func TestCallOutputSearchStoreError(t *testing.T) {
+	cfg := config.Config{Output: config.OutputConfig{Enabled: true, Mode: "auto", SearchMaxMatches: 200}}
+	f := &fakeOutputExec{fn: func(string, string) (string, error) { return "", nil }}
+	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10)
+	_, err := agent.Call(context.Background(), nil, cfg, store, "output_search", map[string]any{
+		"output_id": "does-not-exist", "pattern": "x",
+	})
+	if err == nil {
+		t.Fatal("want lookup error for an unknown output_id")
+	}
+}
+
+func TestCallExecCaptureError(t *testing.T) {
 	cfg := config.Config{
-		VM:     config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
-		Model:  "m",
-		Prompt: "p",
+		VM:     config.VMConfig{Name: "vm"},
+		Output: config.OutputConfig{Enabled: true, Mode: "auto", MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200},
+	}
+	f := &fakeOutputExec{fn: func(name, cmd string) (string, error) {
+		if strings.Contains(cmd, "df -P") {
+			return "0", nil
+		}
+		return "", nil
+	}}
+	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10)
+	_, err := agent.Call(context.Background(), nil, cfg, store, "vm_exec", map[string]any{"command": "echo hi", "capture": true})
+	if err == nil {
+		t.Fatal("want preflight error when there is no free space for the capture")
+	}
+}
+
+func TestCallExecNoStoreEmptyOutput(t *testing.T) {
+	cfg := config.Config{VM: config.VMConfig{Name: "vm"}, AllowedCommands: map[string]bool{"echo": true}}
+	cli := newScriptedTestClient(t, func(command string) (string, int) {
+		switch {
+		case strings.HasPrefix(command, "id -u"), strings.HasPrefix(command, "id -g"):
+			return "1000\n", 0
+		case strings.HasPrefix(command, "getent passwd"):
+			return "ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n", 0
+		default:
+			return "", 0
+		}
+	})
+	got, err := agent.Call(context.Background(), cli, cfg, nil, "vm_exec", map[string]any{"command": "echo"})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if got != output.NoOutput {
+		t.Fatalf("got %q, want %q", got, output.NoOutput)
+	}
+}
+
+// callExec forwards Result.Inline with no empty-string fallback, so the capture
+// path must substitute output.NoOutput itself. output.TestCaptureNeverReturnsEmptyInline
+// pins the other half of this contract.
+func TestCallExecCaptureEmptyOutput(t *testing.T) {
+	cfg := config.Config{
+		VM:              config.VMConfig{Name: "vm"},
+		AllowedCommands: map[string]bool{"echo": true},
+		Output:          config.OutputConfig{Enabled: true, Mode: "auto", MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200},
+	}
+	f := &fakeOutputExec{fn: func(name, cmd string) (string, error) {
+		switch {
+		case strings.Contains(cmd, "df -P"):
+			return "99999999", nil
+		case strings.Contains(cmd, "__MPH_EXIT_"):
+			return exitMarker(cmd) + "0", nil
+		case strings.Contains(cmd, "wc -c"):
+			return "0", nil
+		default:
+			return "", nil
+		}
+	}}
+	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 4096)
+
+	got, err := agent.Call(context.Background(), nil, cfg, store, "vm_exec", map[string]any{"command": "echo", "capture": true})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if got != output.NoOutput {
+		t.Fatalf("got %q, want %q", got, output.NoOutput)
+	}
+}
+
+func TestCallOutputReadCorrectsOffsetBelowOne(t *testing.T) {
+	cfg := config.Config{
+		VM:     config.VMConfig{Name: "vm"},
 		Output: config.OutputConfig{Enabled: true, Mode: "always", MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200},
 	}
 	f := &fakeOutputExec{fn: func(name, cmd string) (string, error) {
@@ -448,36 +537,66 @@ func TestCaptureLogsAttributionLine(t *testing.T) {
 		case strings.Contains(cmd, "mkdir"):
 			return "", nil
 		case strings.Contains(cmd, "__MPH_EXIT_"):
-			start := strings.Index(cmd, "__MPH_EXIT_")
-			rest := cmd[start:]
-			end := strings.Index(rest, ":")
-			return rest[:end+1] + "0", nil
+			return exitMarker(cmd) + "0", nil
+		case strings.Contains(cmd, "wc -c"):
+			return "1000", nil
+		case strings.Contains(cmd, "wc -l"):
+			return "50", nil
+		case strings.Contains(cmd, "sed -n"):
+			return "line1\nline2\n", nil
+		default:
+			return "", nil
+		}
+	}}
+	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10)
+	id := capturedID(t, captureEnvelope(t, cfg, store))
+	got, err := agent.Call(context.Background(), nil, cfg, store, "output_read", map[string]any{"output_id": id, "offset": json.Number("0")})
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(got, `"offset":1`) {
+		t.Fatalf("offset below 1 must be corrected to 1, got %q", got)
+	}
+}
+
+func TestCallOutputReadPastEndReturnsEmptyLines(t *testing.T) {
+	cfg := config.Config{
+		VM:     config.VMConfig{Name: "vm"},
+		Output: config.OutputConfig{Enabled: true, Mode: "always", MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200},
+	}
+	f := &fakeOutputExec{fn: func(name, cmd string) (string, error) {
+		switch {
+		case strings.Contains(cmd, "df -P"):
+			return "99999999", nil
+		case strings.Contains(cmd, "mkdir"):
+			return "", nil
+		case strings.Contains(cmd, "__MPH_EXIT_"):
+			return exitMarker(cmd) + "0", nil
 		case strings.Contains(cmd, "wc -c"):
 			return "1000", nil
 		case strings.Contains(cmd, "wc -l"):
 			return "50", nil
 		default:
-			if strings.Contains(cmd, "split ") {
-				t.Fatalf("chunking must be gone, got %q", cmd)
-			}
 			return "", nil
 		}
 	}}
 	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10)
-	agt := NewAgent(zerolog.New(&buf), &mockKronk{}, Options{
-		MaxIterations: 1,
-		ChatTimeout:   time.Second,
-		TotalTimeout:  time.Second,
-		LLM:           defaultLLMConfig(),
-		RunID:         "run-1",
-	})
-	agt.store = store
-	tc := model.ResponseToolCall{ID: "c1", Type: "function", Function: model.ResponseToolCallFunction{
-		Name: "vm_exec", Arguments: model.ToolCallArguments{"command": "echo hi"},
-	}}
-	agt.executeToolCalls(context.Background(), newTestClient(t), cfg, []model.ResponseToolCall{tc})
-	if !strings.Contains(buf.String(), "too large for inline context") {
-		t.Fatalf("missing capture attribution log line:\n%s", buf.String())
+	id := capturedID(t, captureEnvelope(t, cfg, store))
+	got, err := agent.Call(context.Background(), nil, cfg, store, "output_read", map[string]any{"output_id": id, "offset": json.Number("1000")})
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(got, `"lines":[]`) {
+		t.Fatalf("a read past the end must serialize an empty lines array, got %q", got)
 	}
 }
 
+func TestCallOutputReadStoreError(t *testing.T) {
+	cfg := config.Config{Output: config.OutputConfig{Enabled: true, Mode: "auto", SearchMaxMatches: 200}}
+	f := &fakeOutputExec{fn: func(string, string) (string, error) { return "", nil }}
+	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10)
+	_, err := agent.Call(context.Background(), nil, cfg, store, "output_read", map[string]any{"output_id": "does-not-exist"})
+	if err == nil {
+		t.Fatal("want lookup error for an unknown output_id")
+	}
+}

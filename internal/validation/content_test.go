@@ -1,9 +1,11 @@
-package validation
+package validation_test
 
 import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	. "github.com/trollLemon/MPHarness/internal/validation"
 )
 
 func TestScanContentDir(t *testing.T) {

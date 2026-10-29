@@ -47,3 +47,5 @@ notes/
 
 # Superpowers design specs (drafts, reviewed before committing)
 docs/superpowers/
+
+*.fail

@@ -1,4 +1,4 @@
-package config
+package config_test
 
 import (
 	"errors"
@@ -11,6 +11,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"pgregory.net/rapid"
+
+	. "github.com/trollLemon/MPHarness/internal/config"
 )
 
 func TestVMConfig_Validate(t *testing.T) {
@@ -99,7 +103,7 @@ func TestNormalizeAllowedCommands(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := normalizeAllowedCommands(tt.in)
+			got := NormalizeAllowedCommands(tt.in)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("got %v want %v", got, tt.want)
 			}
@@ -119,8 +123,8 @@ func TestNormalizeAllowedCommandsCoreUtils(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := normalizeAllowedCommands(tt.in)
-			for _, cu := range coreUtils {
+			got := NormalizeAllowedCommands(tt.in)
+			for _, cu := range CoreUtils {
 				if !got[cu] {
 					t.Fatalf("missing coreutils command %q in %v", cu, got)
 				}
@@ -128,8 +132,8 @@ func TestNormalizeAllowedCommandsCoreUtils(t *testing.T) {
 			if got["coreUtils"] {
 				t.Fatalf("meta command coreUtils was not expanded: %v", got)
 			}
-			if len(got) < len(coreUtils) {
-				t.Fatalf("got %d commands, want at least %d", len(got), len(coreUtils))
+			if len(got) < len(CoreUtils) {
+				t.Fatalf("got %d commands, want at least %d", len(got), len(CoreUtils))
 			}
 		})
 	}
@@ -248,7 +252,7 @@ func TestParseEnvBool(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseEnvBool(tt.value)
+			got, err := ParseEnvBool(tt.value)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error for %q", tt.value)
@@ -259,7 +263,7 @@ func TestParseEnvBool(t *testing.T) {
 				t.Fatalf("unexpected err: %v", err)
 			}
 			if got != tt.want {
-				t.Errorf("parseEnvBool(%q) = %v, want %v", tt.value, got, tt.want)
+				t.Errorf("ParseEnvBool(%q) = %v, want %v", tt.value, got, tt.want)
 			}
 		})
 	}
@@ -330,7 +334,7 @@ func TestLoadEnvOverrides(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg, err := load([]byte(fmt.Sprintf(base, tt.yamlEnabled)), Sources{Environ: tt.environ})
+			cfg, err := Load([]byte(fmt.Sprintf(base, tt.yamlEnabled)), Sources{Environ: tt.environ})
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error")
@@ -404,7 +408,7 @@ func TestLoadFlagOverrides(t *testing.T) {
 					t.Fatalf("set flag: %v", err)
 				}
 			}
-			cfg, err := load([]byte(fmt.Sprintf(base, tt.yamlEnabled)), Sources{Environ: tt.environ, Flags: fs})
+			cfg, err := Load([]byte(fmt.Sprintf(base, tt.yamlEnabled)), Sources{Environ: tt.environ, Flags: fs})
 			if err != nil {
 				t.Fatalf("load: %v", err)
 			}
@@ -1140,4 +1144,198 @@ func TestNormalizeSize(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Property-based tests for config using rapid.
+
+// normalizeAllowedCommands returns nil for empty or whitespace-only input.
+func TestNormalizeAllowedCommandsEmptyReturnsNil(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+	}{
+		{"nil", nil},
+		{"empty", []string{}},
+		{"whitespace entries", []string{"", " ", "\t", "  \n  "}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := NormalizeAllowedCommands(tt.in); got != nil {
+				t.Fatalf("NormalizeAllowedCommands(%v) = %v, want nil", tt.in, got)
+			}
+		})
+	}
+}
+
+// normalizeAllowedCommands trims whitespace from entries.
+func TestNormalizeAllowedCommandsTrimsWhitespace(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		cmd := rapid.StringN(1, 20, 50).Draw(t, "cmd")
+		// Skip commands with whitespace
+		if strings.TrimSpace(cmd) != cmd {
+			return
+		}
+		paddedCmd := "   " + cmd + "   "
+		got := NormalizeAllowedCommands([]string{paddedCmd})
+		if got == nil || !got[cmd] {
+			t.Fatalf("NormalizeAllowedCommands([%q]) = %v, want %q present", paddedCmd, got, cmd)
+		}
+	})
+}
+
+// normalizeAllowedCommands deduplicates entries.
+func TestNormalizeAllowedCommandsDedupes(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		cmd := rapid.StringN(1, 20, 50).Draw(t, "cmd")
+		if strings.TrimSpace(cmd) != cmd {
+			return
+		}
+		got := NormalizeAllowedCommands([]string{cmd, cmd, cmd, cmd})
+		if len(got) != 1 {
+			t.Fatalf("NormalizeAllowedCommands(dupes) = %v, want len 1", got)
+		}
+		if !got[cmd] {
+			t.Fatalf("NormalizeAllowedCommands(dupes) missing %q", cmd)
+		}
+	})
+}
+
+// normalizeAllowedCommands is idempotent.
+func TestNormalizeAllowedCommandsIdempotent(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		cmds := rapid.SliceOf(rapid.StringN(0, 20, 50)).Draw(t, "cmds")
+		first := NormalizeAllowedCommands(cmds)
+		// Convert map to slice for second call
+		var asSlice []string
+		for k := range first {
+			asSlice = append(asSlice, k)
+		}
+		second := NormalizeAllowedCommands(asSlice)
+		if !reflect.DeepEqual(first, second) {
+			t.Fatalf("idempotency failed: first=%v, second=%v", first, second)
+		}
+	})
+}
+
+// NormalizeAllowedCommands expands coreUtils.
+func TestNormalizeAllowedCommandsExpandsCoreUtils(t *testing.T) {
+	got := NormalizeAllowedCommands([]string{"coreUtils"})
+	if got == nil {
+		t.Fatalf("NormalizeAllowedCommands([coreUtils]) = nil")
+	}
+	for _, cu := range CoreUtils {
+		if !got[cu] {
+			t.Fatalf("missing coreutils command %q", cu)
+		}
+	}
+	if got["coreUtils"] {
+		t.Fatalf("meta command coreUtils was not expanded")
+	}
+}
+
+// VMConfig validation: valid configs always pass.
+func TestVMConfigValidConfigsPass(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		// Generate valid VM configs with random values
+		disk := rapid.OneOf(rapid.Just("20G"), rapid.Just("50G"), rapid.Just("100G"), rapid.Just("1T")).Draw(t, "disk")
+		ram := rapid.OneOf(rapid.Just("4G"), rapid.Just("8G"), rapid.Just("16G"), rapid.Just("32G")).Draw(t, "ram")
+		cpu := rapid.IntRange(1, 64).Draw(t, "cpu")
+		// Generate valid hostname (alphanumeric + hyphens, starting with letter)
+		prefix := rapid.StringMatching(`[a-z][a-z0-9-]{0,10}`).Draw(t, "prefix")
+		suffix := rapid.IntRange(0, 999).Draw(t, "suffix")
+		name := fmt.Sprintf("%s-%d", prefix, suffix)
+
+		cfg := VMConfig{Disk: disk, RAM: ram, CPU: cpu, Name: name}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("valid config should pass: %v", err)
+		}
+	})
+}
+
+// VMConfig validation: missing fields produce correct errors.
+func TestVMConfigMissingFields(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     VMConfig
+		wantErr error
+	}{
+		{"missing disk", VMConfig{RAM: "4G", CPU: 2, Name: "valid-vm"}, ErrVMDiskRequired},
+		{"missing ram", VMConfig{Disk: "20G", CPU: 2, Name: "valid-vm"}, ErrVMRAMRequired},
+		{"zero cpu", VMConfig{Disk: "20G", RAM: "4G", Name: "valid-vm"}, ErrVMCPURequired},
+		{"negative cpu", VMConfig{Disk: "20G", RAM: "4G", CPU: -1, Name: "valid-vm"}, ErrVMCPURequired},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.cfg.Validate(); !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Validate() = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// IsSafeValue rejects empty strings.
+func TestIsSafeValueRejectsEmpty(t *testing.T) {
+	if IsSafeValue("") {
+		t.Fatal("IsSafeValue(\"\") should be false")
+	}
+}
+
+// IsSafeValue accepts valid alphanumeric strings.
+func TestIsSafeValueAcceptsValid(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		// Generate strings from the allowed character set
+		valid := rapid.StringMatching(`[A-Za-z0-9._+/=:@-]+`).Draw(t, "valid")
+		if valid == "" {
+			return
+		}
+		if !IsSafeValue(valid) {
+			t.Fatalf("IsSafeValue(%q) should be true", valid)
+		}
+	})
+}
+
+// IsSafeValue rejects strings with disallowed characters.
+func TestIsSafeValueRejectsInvalid(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		// Generate strings that contain at least one disallowed char
+		invalid := rapid.StringMatching(`.*[\s$\|`+"`"+`\"'~;<>()\[\]{}\\].*`).Draw(t, "invalid")
+		if invalid == "" {
+			return
+		}
+		if IsSafeValue(invalid) {
+			t.Fatalf("IsSafeValue(%q) should be false", invalid)
+		}
+	})
+}
+
+// Config.Validate requires model and prompt.
+func TestConfigRequiresModelAndPrompt(t *testing.T) {
+	validVM := VMConfig{Disk: "20G", RAM: "4G", CPU: 2, Name: "vm"}
+	cfg := Config{VM: validVM}
+	if err := cfg.Validate(); !errors.Is(err, ErrModelRequired) {
+		t.Fatalf("missing model: got %v, want %v", err, ErrModelRequired)
+	}
+	cfg.Model = "model"
+	if err := cfg.Validate(); !errors.Is(err, ErrPromptRequired) {
+		t.Fatalf("missing prompt: got %v, want %v", err, ErrPromptRequired)
+	}
+}
+
+// AllowedCommandsList returns sorted results.
+func TestAllowedCommandsListSorted(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		// Generate a set of command names
+		cmds := rapid.SliceOf(rapid.StringN(1, 20, 50)).Draw(t, "cmds")
+		set := make(map[string]bool)
+		for _, c := range cmds {
+			if strings.TrimSpace(c) != "" {
+				set[c] = true
+			}
+		}
+		cfg := Config{AllowedCommands: set}
+		got := cfg.AllowedCommandsList()
+		if len(got) > 1 && !sort.StringsAreSorted(got) {
+			t.Fatalf("AllowedCommandsList not sorted: %v", got)
+		}
+	})
 }
