@@ -41,6 +41,7 @@ type loopScenario struct {
 	tokenizeErr   error
 	tokenizeZero  bool
 	enforceWindow bool
+	chatTimeout   time.Duration
 }
 
 type loopResponse struct {
@@ -150,10 +151,15 @@ func runScenario(t testFatal, sc loopScenario) loopRun {
 		krn = enforcer
 	}
 
+	chatTimeout := sc.chatTimeout
+	if chatTimeout == 0 {
+		chatTimeout = time.Second
+	}
+
 	var buf bytes.Buffer
 	agt := agent.NewAgent(zerolog.New(&buf), krn, agent.Options{
 		MaxIterations: sc.maxIterations,
-		ChatTimeout:   time.Second,
+		ChatTimeout:   chatTimeout,
 		TotalTimeout:  30 * time.Second,
 		LLM:           sc.llm,
 		RunID:         "loop",
@@ -1716,4 +1722,421 @@ func TestAgentLoopCaptureAttribution(t *testing.T) {
 			t.Error("next request is missing the vm_exec tool result")
 		}
 	})
+}
+
+// A chat call that outlives ChatTimeout must end the run as a timeout, not hang
+// until the total-run deadline.
+func TestAgentLoopChatTimeout(t *testing.T) {
+	var deadlines []bool
+	start := time.Now()
+	run := runScenario(t, loopScenario{
+		maxIterations: 3,
+		window:        8192,
+		chatTimeout:   20 * time.Millisecond,
+		chatFunc: func(ctx context.Context, _ model.D) (model.ChatResponse, error) {
+			_, ok := ctx.Deadline()
+			deadlines = append(deadlines, ok)
+			<-ctx.Done()
+			return model.ChatResponse{}, ctx.Err()
+		},
+		llm: defaultLLMConfig(),
+	})
+
+	elapsed := time.Since(start)
+	// Proves ChatTimeout ended the call: the 30s total-run deadline would too,
+	// but not this fast.
+	if elapsed > 5*time.Second {
+		t.Errorf("run took %v, want the per-call ChatTimeout to end it", elapsed)
+	}
+	if len(deadlines) != 1 {
+		t.Fatalf("chat calls = %d, want 1: a timed-out call must not be retried", len(deadlines))
+	}
+	if !deadlines[0] {
+		t.Error("chat context carries no deadline, so ChatTimeout is not enforced")
+	}
+	if run.err == nil {
+		t.Fatal("a chat call that never returns must fail the run")
+	}
+	if !errors.Is(run.err, context.DeadlineExceeded) {
+		t.Errorf("error = %v, want a context deadline cause", run.err)
+	}
+	if got := run.summary["outcome"]; got != "timeout" {
+		t.Errorf("outcome = %v, want timeout", got)
+	}
+	if run.status != nil {
+		t.Errorf("status = %+v, want nil", run.status)
+	}
+}
+
+// Dashboards read prefill and cache efficiency off token_usage, so every usage
+// field the backend reports has to reach the event, including a measured zero.
+func TestAgentLoopTokenUsageEventFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		usage  *model.Usage
+		cached float64
+	}{
+		{
+			name: "cache hit",
+			usage: &model.Usage{
+				PromptTokens:            900,
+				PromptTokensDetails:     model.PromptTokensDetails{CachedTokens: 512},
+				CompletionTokens:        40,
+				CompletionTokensDetails: model.CompletionTokensDetails{ReasoningTokens: 12},
+				TotalTokens:             940,
+				TokensPerSecond:         31.5,
+				TimeToFirstTokenMS:      18.25,
+			},
+			cached: 512,
+		},
+		{
+			name: "measured cache miss",
+			usage: &model.Usage{
+				PromptTokens:       900,
+				CompletionTokens:   40,
+				TotalTokens:        940,
+				TokensPerSecond:    31.5,
+				TimeToFirstTokenMS: 18.25,
+			},
+			cached: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			run := runScenario(t, loopScenario{
+				maxIterations: 1,
+				window:        8192,
+				responses: []loopResponse{
+					{finishReason: model.FinishReasonStop, usage: tt.usage},
+				},
+				llm: defaultLLMConfig(),
+			})
+
+			event := onlyEvent(t, run.events, eventTokenUsage)
+			want := map[string]any{
+				"prompt_tokens":     float64(tt.usage.PromptTokens),
+				"completion_tokens": float64(tt.usage.CompletionTokens),
+				"total_tokens":      float64(tt.usage.TotalTokens),
+				"tps":               tt.usage.TokensPerSecond,
+				"ttft_ms":           tt.usage.TimeToFirstTokenMS,
+				"reasoning_tokens":  float64(tt.usage.CompletionTokensDetails.ReasoningTokens),
+				"ctx_window":        float64(8192),
+				"iter":              float64(1),
+			}
+			for k, v := range want {
+				if got, ok := event[k]; !ok || got != v {
+					t.Errorf("token_usage %q = %v (present %v), want %v", k, got, ok, v)
+				}
+			}
+			got, ok := event["cached_tokens"]
+			if !ok {
+				t.Fatal("cached_tokens must be logged even when the cache was not used")
+			}
+			if got != tt.cached {
+				t.Errorf("cached_tokens = %v, want %v", got, tt.cached)
+			}
+			if got, want := run.summary["prompt_tokens"], float64(tt.usage.PromptTokens); got != want {
+				t.Errorf("summary prompt_tokens = %v, want %v", got, want)
+			}
+			if got, want := run.summary["completion_tokens"], float64(tt.usage.CompletionTokens); got != want {
+				t.Errorf("summary completion_tokens = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// Overflow repair discards the biggest tool result first: it buys the most
+// context back per result lost.
+func TestAgentLoopOverflowDiscardsLargestFirst(t *testing.T) {
+	const (
+		smallSize = 1024
+		bigSize   = 8192
+	)
+	run := runScenario(t, loopScenario{
+		maxIterations: 3,
+		window:        16384,
+		responses: []loopResponse{
+			{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{
+				vmExecCall("c1", "small"),
+				vmExecCall("c2", "big"),
+			}, usage: totalUsage(100)},
+			{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{taskStatusCall("ts", agent.TaskStatusCompleted, "done")}, usage: totalUsage(100)},
+		},
+		agent:       config.AgentConfig{MaxOutputBytes: 64 * 1024},
+		overflowAt:  1,
+		overflowErr: overflowErr(20000, 16384),
+		scripted: func(command string) (string, int) {
+			switch {
+			case strings.Contains(command, "small"):
+				return strings.Repeat("s", smallSize), 0
+			case strings.Contains(command, "big"):
+				return strings.Repeat("b", bigSize), 0
+			default:
+				return identityScripted(command)
+			}
+		},
+		llm: defaultLLMConfig(),
+	})
+	if run.err != nil {
+		t.Fatalf("recoverable overflow returned an error: %v", run.err)
+	}
+
+	event := onlyEvent(t, run.events, eventContextOverflow)
+	if event["outcome"] != "recovered" || event["replaced"] != float64(1) {
+		t.Fatalf("overflow outcome/replaced = %v/%v, want recovered/1", event["outcome"], event["replaced"])
+	}
+
+	retry := run.mock.captured[2]
+	msgs, _ := retry["messages"].([]model.D)
+	var results []string
+	for _, m := range msgs {
+		if m["role"] == "tool" {
+			content, _ := m["content"].(string)
+			results = append(results, content)
+		}
+	}
+	if len(results) != 2 {
+		t.Fatalf("retry request carries %d tool results, want 2", len(results))
+	}
+	if !strings.Contains(results[0], strings.Repeat("s", smallSize)) {
+		t.Errorf("the smaller result was discarded: %q", results[0])
+	}
+	if strings.Contains(results[1], strings.Repeat("b", 100)) {
+		t.Error("the larger result survived the overflow repair")
+	}
+	if !strings.Contains(results[1], "was discarded") {
+		t.Errorf("the larger result is missing the replacement notice: %q", results[1])
+	}
+	if got := event["reclaimed_bytes"].(float64); got < bigSize-smallSize {
+		t.Errorf("reclaimed_bytes = %v, want at least the size gap %d", got, bigSize-smallSize)
+	}
+}
+
+// dur_ms on context_compaction is milliseconds. A nanosecond value would be
+// three orders of magnitude out and silently wreck the dashboard.
+func TestAgentLoopCompactionDurationIsMilliseconds(t *testing.T) {
+	const handoverDelay = 20 * time.Millisecond
+	start := time.Now()
+	run := runScenario(t, loopScenario{
+		maxIterations: 3,
+		window:        8192,
+		responses: []loopResponse{
+			{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{vmExecCall("c1", "echo x")}, usage: totalUsage(7000)},
+			{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{taskStatusCall("ts", agent.TaskStatusCompleted, "done")}, usage: totalUsage(100)},
+		},
+		compaction: config.CompactionConfig{Enabled: true, Threshold: 0.8, MaxSummaryTokens: 512, MaxAttempts: 3},
+		handover: func(context.Context, model.D) (model.ChatResponse, error) {
+			time.Sleep(handoverDelay)
+			return chatResp(validHandoverSummary, "", model.FinishReasonStop, nil, nil), nil
+		},
+		llm: defaultLLMConfig(),
+	})
+	elapsed := time.Since(start)
+	if run.err != nil {
+		t.Fatalf("Execute: %v", run.err)
+	}
+
+	event := onlyEvent(t, run.events, eventContextCompaction)
+	durMS, ok := event["dur_ms"].(float64)
+	if !ok {
+		t.Fatalf("dur_ms = %v, want a number", event["dur_ms"])
+	}
+	if durMS < float64(handoverDelay.Milliseconds()) {
+		t.Errorf("dur_ms = %v, want at least the %v the handover took", durMS, handoverDelay)
+	}
+	if durMS > float64(elapsed.Milliseconds()) {
+		t.Errorf("dur_ms = %v exceeds the whole run (%v ms), so it is not milliseconds", durMS, elapsed.Milliseconds())
+	}
+}
+
+// Each tool gets recovery guidance it can act on: capture for vm_exec, paging
+// for output_read, and a generic narrowing hint for everything else.
+func TestAgentLoopOversizedResultGuidance(t *testing.T) {
+	t.Run("output_read is told to page", func(t *testing.T) {
+		const budget = 2048
+		var captured []model.D
+		calls := 0
+		run := runScenario(t, loopScenario{
+			maxIterations: 4,
+			window:        8192,
+			agent:         config.AgentConfig{MaxOutputBytes: budget},
+			output: config.OutputConfig{
+				Enabled: true, Mode: "always",
+				MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200,
+			},
+			chatFunc: func(_ context.Context, req model.D) (model.ChatResponse, error) {
+				captured = append(captured, req)
+				calls++
+				switch calls {
+				case 1:
+					return chatResp("", "", model.FinishReasonTool,
+						[]model.ResponseToolCall{vmExecCall("c1", "echo big")}, totalUsage(100)), nil
+				case 2:
+					id := lastOutputID(t, req)
+					return chatResp("", "", model.FinishReasonTool, []model.ResponseToolCall{{
+						ID: "c2", Type: "function", Function: model.ResponseToolCallFunction{
+							Name:      "output_read",
+							Arguments: model.ToolCallArguments{"output_id": id, "offset": 1, "limit": 200},
+						},
+					}}, totalUsage(100)), nil
+				default:
+					return chatResp("", "", model.FinishReasonTool,
+						[]model.ResponseToolCall{taskStatusCall("ts", agent.TaskStatusCompleted, "done")}, totalUsage(100)), nil
+				}
+			},
+			scripted: func(command string) (string, int) {
+				switch {
+				case strings.Contains(command, "df -P"):
+					return "99999999", 0
+				case strings.Contains(command, "mkdir"):
+					return "", 0
+				case strings.Contains(command, "__MPH_EXIT_"):
+					return exitMarker(command) + "0", 0
+				case strings.Contains(command, "wc -c"):
+					return "40000", 0
+				case strings.Contains(command, "wc -l"):
+					return "200", 0
+				case strings.Contains(command, "sed -n"):
+					return strings.Repeat(strings.Repeat("r", 199)+"\n", 200), 0
+				default:
+					return identityScripted(command)
+				}
+			},
+			llm: defaultLLMConfig(),
+		})
+		if run.err != nil {
+			t.Fatalf("Execute: %v", run.err)
+		}
+
+		event := onlyEvent(t, run.events, eventToolOutputTooLarge)
+		if event["tool"] != "output_read" {
+			t.Fatalf("oversized tool = %v, want output_read", event["tool"])
+		}
+		if event["budget"] != float64(budget) {
+			t.Errorf("budget = %v, want %d", event["budget"], budget)
+		}
+		content := toolResultFor(t, captured[len(captured)-1], "output_read")
+		if !strings.Contains(content, "offset and limit") {
+			t.Errorf("output_read guidance must mention paging: %q", content)
+		}
+		if strings.Contains(content, strings.Repeat("r", 100)) {
+			t.Error("oversized output_read result kept its payload")
+		}
+	})
+
+	t.Run("other tools are told to narrow the request", func(t *testing.T) {
+		const budget = 1024
+		var captured []model.D
+		calls := 0
+		run := runScenario(t, loopScenario{
+			maxIterations: 4,
+			window:        8192,
+			agent:         config.AgentConfig{MaxOutputBytes: budget},
+			output: config.OutputConfig{
+				Enabled: true, Mode: "always",
+				MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200,
+			},
+			chatFunc: func(_ context.Context, req model.D) (model.ChatResponse, error) {
+				captured = append(captured, req)
+				calls++
+				switch calls {
+				case 1:
+					return chatResp("", "", model.FinishReasonTool,
+						[]model.ResponseToolCall{vmExecCall("c1", "echo big")}, totalUsage(100)), nil
+				case 2:
+					id := lastOutputID(t, req)
+					return chatResp("", "", model.FinishReasonTool, []model.ResponseToolCall{{
+						ID: "c2", Type: "function", Function: model.ResponseToolCallFunction{
+							Name:      "output_search",
+							Arguments: model.ToolCallArguments{"output_id": id, "pattern": "match", "fixed_string": true},
+						},
+					}}, totalUsage(100)), nil
+				default:
+					return chatResp("", "", model.FinishReasonTool,
+						[]model.ResponseToolCall{taskStatusCall("ts", agent.TaskStatusCompleted, "done")}, totalUsage(100)), nil
+				}
+			},
+			scripted: func(command string) (string, int) {
+				switch {
+				case strings.Contains(command, "df -P"):
+					return "99999999", 0
+				case strings.Contains(command, "mkdir"):
+					return "", 0
+				case strings.Contains(command, "__MPH_EXIT_"):
+					return exitMarker(command) + "0", 0
+				case strings.Contains(command, "wc -c"):
+					return "900000", 0
+				case strings.Contains(command, "wc -l"):
+					return "200000", 0
+				case strings.Contains(command, "grep") && strings.Contains(command, "__MPH_GREP_EXIT_"):
+					var b strings.Builder
+					for i := range 200 {
+						fmt.Fprintf(&b, "%d:match\n", 100000+i)
+					}
+					b.WriteString(grepMarker(command) + "0")
+					return b.String(), 0
+				default:
+					return identityScripted(command)
+				}
+			},
+			llm: defaultLLMConfig(),
+		})
+		if run.err != nil {
+			t.Fatalf("Execute: %v", run.err)
+		}
+
+		event := onlyEvent(t, run.events, eventToolOutputTooLarge)
+		if event["tool"] != "output_search" {
+			t.Fatalf("oversized tool = %v, want output_search", event["tool"])
+		}
+		content := toolResultFor(t, captured[len(captured)-1], "output_search")
+		if !strings.Contains(content, "Narrow the request") {
+			t.Errorf("generic guidance missing: %q", content)
+		}
+		if !strings.Contains(content, "output_search result was") {
+			t.Errorf("generic guidance must name the tool: %q", content)
+		}
+		if strings.Contains(content, "100001") {
+			t.Error("oversized output_search result kept its payload")
+		}
+	})
+}
+
+// lastOutputID reads the output_id out of the most recent capture envelope in a
+// request, which is the only way a caller learns the id the store minted.
+func lastOutputID(t testFatal, req model.D) string {
+	msgs, _ := req["messages"].([]model.D)
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i]["role"] != "tool" {
+			continue
+		}
+		content, _ := msgs[i]["content"].(string)
+		var env struct {
+			Data struct {
+				Result struct {
+					OutputID string `json:"output_id"`
+				} `json:"result"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(content), &env); err != nil {
+			continue
+		}
+		if env.Data.Result.OutputID != "" {
+			return env.Data.Result.OutputID
+		}
+	}
+	t.Fatalf("no capture envelope with an output_id in %v", req["messages"])
+	return ""
+}
+
+func toolResultFor(t testFatal, req model.D, tool string) string {
+	msgs, _ := req["messages"].([]model.D)
+	for _, m := range msgs {
+		if m["role"] == "tool" && m["name"] == tool {
+			content, _ := m["content"].(string)
+			return content
+		}
+	}
+	t.Fatalf("request has no %q tool result", tool)
+	return ""
 }
