@@ -20,8 +20,8 @@ import (
 	"github.com/canonical/lxd/shared/api"
 	"github.com/rs/zerolog"
 
-	"github.com/trollLemon/MPHarness/internal/config"
-	"github.com/trollLemon/MPHarness/internal/secrets"
+	"github.com/trollLemon/MPHarness/v2/internal/config"
+	"github.com/trollLemon/MPHarness/v2/internal/secrets"
 )
 
 var (

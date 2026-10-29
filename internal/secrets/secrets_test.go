@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/trollLemon/MPHarness/internal/config"
-	"github.com/trollLemon/MPHarness/internal/secrets"
+	"github.com/trollLemon/MPHarness/v2/internal/config"
+	"github.com/trollLemon/MPHarness/v2/internal/secrets"
 	"github.com/zalando/go-keyring"
 )
 

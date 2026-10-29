@@ -27,7 +27,7 @@ Every command the agent tries to run is parsed as shell AST and checked against 
 
 ## Install
 ```bash
-go install github.com/trollLemon/MPHarness/mph@latest
+go install github.com/trollLemon/MPHarness/v2/mph@latest
 ```
 
 ## Quickstart

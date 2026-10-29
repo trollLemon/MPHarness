@@ -11,7 +11,7 @@ import (
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	"github.com/rs/zerolog"
 
-	"github.com/trollLemon/MPHarness/internal/otlp"
+	"github.com/trollLemon/MPHarness/v2/internal/otlp"
 )
 
 // minOverflowReclaimBytes stops the repair loop once replacing a result no

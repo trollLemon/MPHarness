@@ -14,9 +14,9 @@ import (
 	"github.com/rs/zerolog"
 	"pgregory.net/rapid"
 
-	"github.com/trollLemon/MPHarness/internal/agent"
-	"github.com/trollLemon/MPHarness/internal/config"
-	"github.com/trollLemon/MPHarness/internal/textutil"
+	"github.com/trollLemon/MPHarness/v2/internal/agent"
+	"github.com/trollLemon/MPHarness/v2/internal/config"
+	"github.com/trollLemon/MPHarness/v2/internal/textutil"
 )
 
 type loopScenario struct {

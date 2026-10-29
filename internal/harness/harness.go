@@ -12,10 +12,10 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/trollLemon/MPHarness/internal/agent"
-	"github.com/trollLemon/MPHarness/internal/config"
-	"github.com/trollLemon/MPHarness/internal/lxd"
-	"github.com/trollLemon/MPHarness/internal/validation"
+	"github.com/trollLemon/MPHarness/v2/internal/agent"
+	"github.com/trollLemon/MPHarness/v2/internal/config"
+	"github.com/trollLemon/MPHarness/v2/internal/lxd"
+	"github.com/trollLemon/MPHarness/v2/internal/validation"
 )
 
 const commandHistoryFlushTimeout = 30 * time.Second

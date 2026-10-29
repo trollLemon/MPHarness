@@ -21,7 +21,7 @@ import (
 	"github.com/knadh/koanf/providers/rawbytes"
 	"github.com/knadh/koanf/v2"
 
-	mphvalidation "github.com/trollLemon/MPHarness/internal/validation"
+	mphvalidation "github.com/trollLemon/MPHarness/v2/internal/validation"
 )
 
 var (

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/trollLemon/MPHarness/internal/secrets"
+	"github.com/trollLemon/MPHarness/v2/internal/secrets"
 )
 
 func TestEnvironmentProviderLookup(t *testing.T) {

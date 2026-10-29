@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	. "github.com/trollLemon/MPHarness/internal/lxd"
+	. "github.com/trollLemon/MPHarness/v2/internal/lxd"
 	"io"
 	"net/http"
 	"os"
@@ -22,8 +22,8 @@ import (
 	"github.com/canonical/lxd/shared/api"
 	"github.com/rs/zerolog"
 
-	"github.com/trollLemon/MPHarness/internal/config"
-	"github.com/trollLemon/MPHarness/internal/secrets"
+	"github.com/trollLemon/MPHarness/v2/internal/config"
+	"github.com/trollLemon/MPHarness/v2/internal/secrets"
 )
 
 type fakeOperation struct {

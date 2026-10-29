@@ -5,10 +5,10 @@ import (
 	"testing"
 	"uuid"
 
-	"github.com/trollLemon/MPHarness/internal/agent"
-	"github.com/trollLemon/MPHarness/internal/config"
+	"github.com/trollLemon/MPHarness/v2/internal/agent"
+	"github.com/trollLemon/MPHarness/v2/internal/config"
 
-	main "github.com/trollLemon/MPHarness/mph"
+	main "github.com/trollLemon/MPHarness/v2/mph"
 )
 
 func TestExitCode(t *testing.T) {

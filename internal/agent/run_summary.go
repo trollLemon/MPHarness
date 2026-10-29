@@ -7,7 +7,7 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"github.com/trollLemon/MPHarness/internal/otlp"
+	"github.com/trollLemon/MPHarness/v2/internal/otlp"
 )
 
 // runOutcome is the single terminal state of a run. It is logged once, on the
