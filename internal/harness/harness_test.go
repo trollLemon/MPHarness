@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
-	. "github.com/trollLemon/MPHarness/internal/harness"
+	. "github.com/trollLemon/MPHarness/v2/internal/harness"
 	"io"
 	"strings"
 	"testing"

@@ -10,7 +10,7 @@ import (
 
 	"github.com/zalando/go-keyring"
 
-	"github.com/trollLemon/MPHarness/internal/config"
+	"github.com/trollLemon/MPHarness/v2/internal/config"
 )
 
 var (

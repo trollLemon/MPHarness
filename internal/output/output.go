@@ -11,7 +11,7 @@ import (
 	"strings"
 	"uuid"
 
-	"github.com/trollLemon/MPHarness/internal/config"
+	"github.com/trollLemon/MPHarness/v2/internal/config"
 )
 
 type Handle struct {

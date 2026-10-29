@@ -12,7 +12,7 @@ import (
 	otellog "go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 
-	. "github.com/trollLemon/MPHarness/internal/otlp"
+	. "github.com/trollLemon/MPHarness/v2/internal/otlp"
 )
 
 // TestSetup covers the Setup matrix: disabled and SDK-disabled installs

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	. "github.com/trollLemon/MPHarness/internal/validation"
+	. "github.com/trollLemon/MPHarness/v2/internal/validation"
 )
 
 func TestScanContentDir(t *testing.T) {

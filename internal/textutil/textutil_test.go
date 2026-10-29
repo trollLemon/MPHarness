@@ -7,7 +7,7 @@ import (
 
 	"pgregory.net/rapid"
 
-	. "github.com/trollLemon/MPHarness/internal/textutil"
+	. "github.com/trollLemon/MPHarness/v2/internal/textutil"
 )
 
 func TestTruncate(t *testing.T) {

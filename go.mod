@@ -1,4 +1,4 @@
-module github.com/trollLemon/MPHarness
+module github.com/trollLemon/MPHarness/v2
 
 go 1.27.2
 

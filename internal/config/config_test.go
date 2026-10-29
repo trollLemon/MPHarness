@@ -14,7 +14,7 @@ import (
 
 	"pgregory.net/rapid"
 
-	. "github.com/trollLemon/MPHarness/internal/config"
+	. "github.com/trollLemon/MPHarness/v2/internal/config"
 )
 
 func TestVMConfig_Validate(t *testing.T) {

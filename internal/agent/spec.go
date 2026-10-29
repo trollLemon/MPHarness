@@ -8,11 +8,11 @@ import (
 	"strings"
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
-	"github.com/trollLemon/MPHarness/internal/config"
-	"github.com/trollLemon/MPHarness/internal/lxd"
-	"github.com/trollLemon/MPHarness/internal/output"
-	"github.com/trollLemon/MPHarness/internal/textutil"
-	"github.com/trollLemon/MPHarness/internal/validation"
+	"github.com/trollLemon/MPHarness/v2/internal/config"
+	"github.com/trollLemon/MPHarness/v2/internal/lxd"
+	"github.com/trollLemon/MPHarness/v2/internal/output"
+	"github.com/trollLemon/MPHarness/v2/internal/textutil"
+	"github.com/trollLemon/MPHarness/v2/internal/validation"
 )
 
 const (

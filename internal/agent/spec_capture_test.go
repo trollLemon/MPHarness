@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/trollLemon/MPHarness/internal/agent"
-	"github.com/trollLemon/MPHarness/internal/config"
-	"github.com/trollLemon/MPHarness/internal/output"
+	"github.com/trollLemon/MPHarness/v2/internal/agent"
+	"github.com/trollLemon/MPHarness/v2/internal/config"
+	"github.com/trollLemon/MPHarness/v2/internal/output"
 )
 
 type fakeOutputExec struct {

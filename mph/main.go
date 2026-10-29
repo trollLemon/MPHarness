@@ -15,12 +15,12 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 
-	"github.com/trollLemon/MPHarness/internal/agent"
-	"github.com/trollLemon/MPHarness/internal/config"
-	"github.com/trollLemon/MPHarness/internal/harness"
-	"github.com/trollLemon/MPHarness/internal/lxd"
-	"github.com/trollLemon/MPHarness/internal/otlp"
-	"github.com/trollLemon/MPHarness/internal/secrets"
+	"github.com/trollLemon/MPHarness/v2/internal/agent"
+	"github.com/trollLemon/MPHarness/v2/internal/config"
+	"github.com/trollLemon/MPHarness/v2/internal/harness"
+	"github.com/trollLemon/MPHarness/v2/internal/lxd"
+	"github.com/trollLemon/MPHarness/v2/internal/otlp"
+	"github.com/trollLemon/MPHarness/v2/internal/secrets"
 )
 
 var version = "dev"
