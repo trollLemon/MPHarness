@@ -48,6 +48,8 @@ agent:
   max_iterations: 10
   chat_timeout: 30m
   total_timeout: 30m
+  max_output_bytes: 0   # auto-capture inline cutoff; 0 = derive from context window
+  send_reasoning: true  # replay reasoning_content into later turns
 ```
 
 | Key | Default | Effect |
@@ -55,6 +57,8 @@ agent:
 | `max_iterations` | `10` | Maximum agent loop turns. |
 | `chat_timeout` | `300s` | Per-inference-call timeout. It's recommended to set this higher if running on a CPU. |
 | `total_timeout` | `30m` | Overall run timeout for the whole task. |
+| `max_output_bytes` | `0` | Auto-capture inline cutoff (`0` = derive from context window). |
+| `send_reasoning` | `true` | Replay model `reasoning_content` into later turns. |
 
 Timeout values accept **Go duration strings** (`"60s"`, `"10m"`, `"1h"`, `"300s"`) or raw integers (interpreted as seconds). For example, `chat_timeout: 600` = 600 seconds, `chat_timeout: "10m"` = 10 minutes.
 

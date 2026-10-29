@@ -12,6 +12,7 @@ creates the VM, lets an LLM drive a tool-calling loop to complete the task, and 
   - [Provide local content to the VM](how-to/provide_content.md)
   - [Manage the VM lifecycle](how-to/manage_vm_lifecycle.md)
   - [Enable OpenTelemetry](how-to/enable_otel.md)
+  - [Release workflow & SBOMs](how-to/release_workflow.md)
 - **[Reference](reference/)**: precise technical descriptions:
   - [Software architecture](reference/arch.md)
   - [Good models](reference/good_models.md)
