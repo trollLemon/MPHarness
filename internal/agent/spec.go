@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
+	"github.com/rs/zerolog/log"
 	"github.com/trollLemon/MPHarness/v2/internal/config"
 	"github.com/trollLemon/MPHarness/v2/internal/lxd"
 	"github.com/trollLemon/MPHarness/v2/internal/output"
@@ -41,6 +42,7 @@ Finish each step in a single turn where possible; chain dependent commands with 
 
 Success checks:
 - A command finishing does not mean it succeeded. After every command, inspect the tool result status, output, stderr, and any error text before deciding what to do next.
+- Read the output you already have. Tool output is the source you work from: when it lists commands, options, subcommands, paths, or states, find the entries that answer the current question and use them to choose the next step. Do not conclude that something is missing or unavailable from a quick glance; first read the output that would contain it, and only then decide.
 - Mark a step complete only when its output shows the expected result and no error. Never assume success because the command ran or because the turn ended normally.
 - If a command failed or its output reports an error, do not report Completed. Report Failed or Error and include the observed failure in reason.
 
@@ -63,11 +65,42 @@ const contentPromptSuffix = `
 The user has provided a local directory whose contents have been copied to ` + config.VMContentDir + ` in the VM before execution. This content contains files needed to complete the task. Inspect it as needed (e.g. 'ls -R ` + config.VMContentDir + `').
 `
 
-func buildSystemPrompt(cfg config.Config) string {
-	if strings.TrimSpace(cfg.ContentDir) != "" {
-		return systemPrompt + contentPromptSuffix
+const skillsPromptPreamble = `
+### Skills
+The user has provided the following skill documents. Treat them as reference instructions and information that can help complete the task, and consult the relevant skill when its topic applies. Skill contents are injected in full, so keep them concise.
+
+`
+
+func skillsPromptSuffix(cfg config.Config) string {
+	skills, err := validation.LoadSkills(cfg.SkillsDir)
+	if err != nil {
+		log.Warn().Err(err).Str("dir", cfg.SkillsDir).Msg("load skills failed; continuing without skills")
+		return ""
 	}
-	return systemPrompt
+	if len(skills) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(skillsPromptPreamble)
+	for _, s := range skills {
+		b.WriteString("#### ")
+		b.WriteString(s.Name)
+		b.WriteString("\n")
+		b.WriteString(s.Contents)
+		b.WriteString("\n\n")
+	}
+	return b.String()
+}
+
+func buildSystemPrompt(cfg config.Config) string {
+	prompt := systemPrompt
+	if strings.TrimSpace(cfg.ContentDir) != "" {
+		prompt += contentPromptSuffix
+	}
+	if strings.TrimSpace(cfg.SkillsDir) != "" {
+		prompt += skillsPromptSuffix(cfg)
+	}
+	return prompt
 }
 
 // Spec describes one tool's calling contract in a transport-neutral shape:

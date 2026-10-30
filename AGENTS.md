@@ -53,6 +53,11 @@ golangci-lint run
 - Avoid redundant casts and conversions; let the declared types do the work
 - Keep one source of truth for defaults and derive help text or docs from it
 - Do not use em dashes or en dashes in documentation. A sentence that wants one is usually too long: split it, or use a semicolon, colon, or parentheses.
+- Any comments should only exist to convey unclear meaning of something, never including the context of something else. For example, a bad comment is something like:
+ 
+  // os.Root refuses to follow symlinks that escape the tree, so a file
+  // swapped for a symlink mid-walk cannot redirect the read.
+  root, err := os.OpenRoot(clean)
 
 ## Testing OTel Instrumentation
 OTel is disabled by default; when enabled it exports logs via OTLP/gRPC (default `localhost:4317`). There are no OTel traces or metrics: dashboards use LogQL over structured log events.
