@@ -19,9 +19,12 @@ import (
 	lxd "github.com/canonical/lxd/client"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/trollLemon/MPHarness/v2/internal/config"
+	"github.com/trollLemon/MPHarness/v2/internal/otlp"
 	"github.com/trollLemon/MPHarness/v2/internal/secrets"
+	"github.com/trollLemon/MPHarness/v2/internal/textutil"
 )
 
 var (
@@ -143,7 +146,10 @@ func (c *Client) runRoot(ctx context.Context, name, command string) (string, int
 }
 
 // Info returns the LXD instance record as JSON.
-func (c *Client) Info(ctx context.Context, name string) (string, error) {
+func (c *Client) Info(ctx context.Context, name string) (_ string, err error) {
+	_, span := otlp.Start(ctx, "vm.info", attribute.String("mph.vm.name", name))
+	defer otlp.End(span, &err)
+
 	if err := validateName(name); err != nil {
 		return "", err
 	}
@@ -168,7 +174,10 @@ func (c *Client) Info(ctx context.Context, name string) (string, error) {
 
 // EnsureRunning starts an existing stopped instance and waits until it answers,
 // and rejects instances that are not virtual machines.
-func (c *Client) EnsureRunning(ctx context.Context, name string) error {
+func (c *Client) EnsureRunning(ctx context.Context, name string) (err error) {
+	ctx, span := otlp.Start(ctx, "vm.ensure_running", attribute.String("mph.vm.name", name))
+	defer otlp.End(span, &err)
+
 	instance, _, err := c.server.GetInstance(name)
 	if err != nil {
 		if api.StatusErrorCheck(err, http.StatusNotFound) {
@@ -226,7 +235,10 @@ func (c *Client) defaultRootDevice() (map[string]string, error) {
 }
 
 // Launch creates the VM from the configured image and waits for the guest to answer.
-func (c *Client) Launch(ctx context.Context, vm config.VMConfig) error {
+func (c *Client) Launch(ctx context.Context, vm config.VMConfig) (err error) {
+	ctx, span := otlp.Start(ctx, "vm.launch", attribute.String("mph.vm.name", vm.Name))
+	defer otlp.End(span, &err)
+
 	ram, err := config.NormalizeSize(vm.RAM)
 	if err != nil {
 		return fmt.Errorf("vm.ram: %w", err)
@@ -285,7 +297,10 @@ func (c *Client) Launch(ctx context.Context, vm config.VMConfig) error {
 }
 
 // Delete removes the VM; purge maps to the LXD delete force flag.
-func (c *Client) Delete(ctx context.Context, name string, purge bool) error {
+func (c *Client) Delete(ctx context.Context, name string, purge bool) (err error) {
+	ctx, span := otlp.Start(ctx, "vm.delete", attribute.String("mph.vm.name", name))
+	defer otlp.End(span, &err)
+
 	if err := validateName(name); err != nil {
 		return err
 	}
@@ -333,7 +348,13 @@ func (c *Client) WriteCommandHistory(ctx context.Context, w io.Writer) error {
 // the combined stdout and stderr. The record keeps the original command text,
 // including any secret placeholders. It stores the scrubbed command output when
 // the command ran, and the scrubbed error text when execution failed.
-func (c *Client) Exec(ctx context.Context, name string, command string) (string, error) {
+func (c *Client) Exec(ctx context.Context, name string, command string) (_ string, err error) {
+	ctx, span := otlp.Start(ctx, "vm.exec",
+		attribute.String("mph.vm.name", name),
+		attribute.String("mph.command", textutil.Truncate(command, config.DefaultToolResultBytes)),
+	)
+	defer otlp.End(span, &err)
+
 	if err := validateName(name); err != nil {
 		return "", err
 	}
@@ -553,7 +574,10 @@ func (c *Client) resolveIdentity(ctx context.Context, name string) (vmIdentity, 
 }
 
 // Transfer copies a host directory recursively into the VM under vmDest.
-func (c *Client) Transfer(ctx context.Context, vmName, hostPath, vmDest string) error {
+func (c *Client) Transfer(ctx context.Context, vmName, hostPath, vmDest string) (err error) {
+	ctx, span := otlp.Start(ctx, "vm.transfer", attribute.String("mph.vm.name", vmName))
+	defer otlp.End(span, &err)
+
 	if err := validateName(vmName); err != nil {
 		return err
 	}
@@ -644,7 +668,10 @@ func (c *Client) Transfer(ctx context.Context, vmName, hostPath, vmDest string) 
 
 // InstallKernel installs a kernel package in the VM, reboots, and verifies the
 // new kernel is running.
-func (c *Client) InstallKernel(ctx context.Context, name, kernelPkg string) error {
+func (c *Client) InstallKernel(ctx context.Context, name, kernelPkg string) (err error) {
+	ctx, span := otlp.Start(ctx, "vm.install_kernel", attribute.String("mph.vm.name", name))
+	defer otlp.End(span, &err)
+
 	c.log.Info().Str("vm", name).Str("kernel", kernelPkg).Msg("installing kernel")
 
 	installCmd := fmt.Sprintf("sudo apt-get update && sudo apt-get install -y %s", kernelPkg)
@@ -652,7 +679,11 @@ func (c *Client) InstallKernel(ctx context.Context, name, kernelPkg string) erro
 		return fmt.Errorf("failed to install kernel packages: %w", err)
 	}
 
-	if _, err := c.Exec(ctx, name, "sudo update-grub"); err != nil {
+	expectedVersion := strings.TrimPrefix(kernelPkg, "linux-image-unsigned-")
+	expectedVersion = strings.TrimPrefix(expectedVersion, "linux-image-")
+
+	grubCmd := fmt.Sprintf(`printf 'GRUB_DEFAULT="Advanced options for Ubuntu>Ubuntu, with Linux %s"\nGRUB_FORCE_PARTUUID=""\n' | sudo tee /etc/default/grub.d/99-mph-kernel.cfg >/dev/null && sudo update-grub`, expectedVersion)
+	if _, err := c.Exec(ctx, name, grubCmd); err != nil {
 		return fmt.Errorf("failed to update grub: %w", err)
 	}
 
@@ -674,9 +705,6 @@ func (c *Client) InstallKernel(ctx context.Context, name, kernelPkg string) erro
 		return fmt.Errorf("failed to get running kernel version: %w", err)
 	}
 	runningKernel = strings.TrimSpace(runningKernel)
-
-	expectedVersion := strings.TrimPrefix(kernelPkg, "linux-image-unsigned-")
-	expectedVersion = strings.TrimPrefix(expectedVersion, "linux-image-")
 
 	if !strings.Contains(runningKernel, expectedVersion) {
 		return fmt.Errorf("kernel version mismatch: expected %q to contain %q", runningKernel, expectedVersion)
