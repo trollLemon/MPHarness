@@ -26,6 +26,11 @@ exporters:
     tls:
       insecure: true
 
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
   # Optional offline file exporter; uncomment to persist logs to disk.
   # Requires the path's parent dir to exist; pre-create via `mkdir -p` or volume mount.
   # file/logs:
@@ -42,6 +47,10 @@ extensions:
 service:
   extensions: [health_check, pprof, zpages]
   pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug, otlp/tempo]
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch]

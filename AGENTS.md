@@ -60,7 +60,7 @@ golangci-lint run
   root, err := os.OpenRoot(clean)
 
 ## Testing OTel Instrumentation
-OTel is disabled by default; when enabled it exports logs via OTLP/gRPC (default `localhost:4317`). There are no OTel traces or metrics: dashboards use LogQL over structured log events.
+OTel is disabled by default; when enabled it exports logs and traces via OTLP/gRPC (default `localhost:4317`). There are no OTel metrics: dashboards use LogQL over structured log events, and traces are inspected in Grafana Explore via Tempo.
 
 ### Smoke test (tiny deterministic model)
 Uses `testing/test.yaml` (`unsloth/granite-4.0-350m-IQ4_XS`, `llm.temperature: 0.0` so output is stable across runs); the config has no `otel:` block, so enable with `--otel`:

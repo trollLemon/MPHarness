@@ -18,8 +18,24 @@ services:
       - "55679:55679" # zpages
       - "1777:1777"   # pprof
     depends_on:
+      tempo:
+        condition: service_started
       loki:
         condition: service_started
+    networks:
+      - mph-otel
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.10.8
+    container_name: mph-tempo
+    user: root
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "3200:3200"
     networks:
       - mph-otel
     restart: unless-stopped
@@ -65,7 +81,8 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_AUTH_ANONYMOUS_ENABLED: "true"
-      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_EXPLORE_ENABLED: "true"
     volumes:
       - ../example_grafana/provisioning/datasources/datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
       - ../example_grafana/provisioning/dashboards/dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml:ro
@@ -78,6 +95,7 @@ services:
     depends_on:
       - prometheus
       - loki
+      - tempo
     restart: unless-stopped
 
 networks:
@@ -88,3 +106,4 @@ volumes:
   prometheus-data:
   grafana-data:
   loki-data:
+  tempo-data:
