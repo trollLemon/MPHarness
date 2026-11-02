@@ -37,13 +37,6 @@ type summarizer interface {
 	Summarize(ctx context.Context, systemPrompt, renderedHistory string) (string, error)
 }
 
-type handleInfo struct {
-	ID         string
-	TotalLines int
-	TotalBytes int64
-	Command    string
-}
-
 // compactionWindow describes the context budget one compaction decision has to
 // respect: the live window, and the per-request cost outside the messages
 // themselves (tool schemas and template framing).
@@ -95,7 +88,7 @@ func renderHistory(conversation []model.D) string {
 	return b.String()
 }
 
-func buildUserMessage(task, summary string, handles []handleInfo, compactionsApplied int) string {
+func buildUserMessage(task, summary string, compactionsApplied int) string {
 	var b strings.Builder
 	b.WriteString("## Task\n" + strings.TrimSpace(task) + "\n\n")
 	if compactionsApplied == 1 {
@@ -103,16 +96,7 @@ func buildUserMessage(task, summary string, handles []handleInfo, compactionsApp
 	} else {
 		fmt.Fprintf(&b, "## Work completed so far (after %d compactions)\n", compactionsApplied)
 	}
-	b.WriteString(strings.TrimSpace(summary) + "\n\n")
-	b.WriteString("## Active output handles\n")
-	if len(handles) == 0 {
-		b.WriteString("(none; do not call output_search or output_read, run new commands with vm_exec)\n")
-	} else {
-		for _, h := range handles {
-			fmt.Fprintf(&b, "- %s (%d lines, %d bytes) from `%s`\n", h.ID, h.TotalLines, h.TotalBytes, h.Command)
-		}
-		b.WriteString("Only use the output_id values listed above; never invent one.\n")
-	}
+	b.WriteString(strings.TrimSpace(summary) + "\n")
 	return b.String()
 }
 
@@ -142,7 +126,7 @@ func taskText(conversation []model.D) string {
 // only reaches this after shouldCompact confirms a positive context size, so
 // conversation is always non-empty: Execute seeds it with a system and user
 // message before the first call.
-func compactConversation(ctx context.Context, conversation []model.D, handles []handleInfo, maxSummaryTokens, budget int, win compactionWindow, s summarizer, compactionsApplied int) ([]model.D, string, int, error) {
+func compactConversation(ctx context.Context, conversation []model.D, maxSummaryTokens, budget int, win compactionWindow, s summarizer, compactionsApplied int) ([]model.D, string, int, error) {
 	system := conversation[0]
 	task := taskText(conversation)
 
@@ -160,7 +144,7 @@ func compactConversation(ctx context.Context, conversation []model.D, handles []
 			return conversation, "failed", 0, fmt.Errorf("summary rejected after repair: %w", reason)
 		}
 	}
-	userMsg := model.D{"role": "user", "content": buildUserMessage(task, summary, handles, compactionsApplied)}
+	userMsg := model.D{"role": "user", "content": buildUserMessage(task, summary, compactionsApplied)}
 	return []model.D{system, userMsg}, "applied", len(summary), nil
 }
 

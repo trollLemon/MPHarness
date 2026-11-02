@@ -850,24 +850,6 @@ func TestSearchMaxMatchesZeroMeansUnlimited(t *testing.T) {
 	}
 }
 
-func TestOutputRunDir(t *testing.T) {
-	tests := []struct {
-		name    string
-		runID   string
-		wantDir string
-	}{
-		{"simple id", "run-123", "/tmp/mph-output/run-123"},
-		{"uuid id", "01a0ec35-3962-7a15-be5e-a9372f3401b7", "/tmp/mph-output/01a0ec35-3962-7a15-be5e-a9372f3401b7"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if dir := OutputRunDir(tt.runID); dir != tt.wantDir {
-				t.Fatalf("got %q want %q", dir, tt.wantDir)
-			}
-		})
-	}
-}
-
 func TestParseDecodesEveryKey(t *testing.T) {
 	cfg, err := Parse([]byte(`
 vm:

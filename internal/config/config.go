@@ -39,16 +39,6 @@ var (
 // The harness creates this path and transfers the local directory there before the agent starts.
 const VMContentDir = "/home/ubuntu/content"
 
-// OutputBaseDir is the host-side root for captured command output. One run owns
-// one subdirectory of it. The harness creates that subdirectory inside the VM
-// before the agent starts writing captures.
-const OutputBaseDir = "/tmp/mph-output"
-
-// OutputRunDir is the capture directory for one run.
-func OutputRunDir(runID string) string {
-	return OutputBaseDir + "/" + runID
-}
-
 // Agent defaults. Named so the help text in mph cannot drift from the values
 // applyDefaults actually installs.
 const (

@@ -27,12 +27,6 @@ var (
 	errPromptRead        = errors.New("could not read answer")
 )
 
-func outputRunDirCommand(runID string) string {
-	// mkdir only: wiping the base dir here would delete live captures of
-	// concurrent runs sharing one VM.
-	return fmt.Sprintf("mkdir -p %q", config.OutputRunDir(runID))
-}
-
 func promptExistingVM(r *bufio.Reader, w io.Writer, name string) error {
 	_, _ = fmt.Fprintf(w, "VM with name %s already exists, continue with the current VM? [y/n] ", name)
 
@@ -60,7 +54,6 @@ func promptExistingVM(r *bufio.Reader, w io.Writer, name string) error {
 type Options struct {
 	IgnoreExisting bool
 	Keep           bool
-	RunID          string
 	CmdOutput      io.Writer // optional JSONL command history destination
 }
 
@@ -131,12 +124,6 @@ func Start(ctx context.Context, agt *agent.Agent, client *lxd.Client, cfg config
 	if existing {
 		if err := client.EnsureRunning(ctx, cfg.VM.Name); err != nil {
 			return nil, err
-		}
-	}
-
-	if rid := strings.TrimSpace(opts.RunID); rid != "" {
-		if _, err := client.Exec(ctx, cfg.VM.Name, outputRunDirCommand(rid)); err != nil {
-			return nil, fmt.Errorf("output run dir setup failed: %w", err)
 		}
 	}
 

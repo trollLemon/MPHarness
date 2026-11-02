@@ -24,16 +24,6 @@ type fakeServer struct {
 	lxdclient.InstanceServer
 }
 
-func TestOutputRunDirCommand(t *testing.T) {
-	cmd := OutputRunDirCommand("run-123")
-	if strings.Contains(cmd, "rm ") {
-		t.Fatalf("setup must not delete other runs' captures: %q", cmd)
-	}
-	if !strings.Contains(cmd, "run-123") {
-		t.Fatalf("setup must target this run, got %q", cmd)
-	}
-}
-
 // The retry loop must share one buffered reader: a fresh bufio.Reader per prompt
 // discards whatever the previous one read past the first newline, so a piped
 // second answer is lost.

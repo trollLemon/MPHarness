@@ -1,13 +1,10 @@
 package output
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"path"
-	"regexp/syntax"
-	"sort"
-	"strconv"
+	"regexp"
+	"slices"
 	"strings"
 	"uuid"
 
@@ -16,17 +13,13 @@ import (
 
 type Handle struct {
 	ID         string
-	Path       string
-	TotalLines int
 	TotalBytes int64
-	ExitCode   int
-	Command    string
+	Content    string
 }
 
 type Result struct {
-	Inline   string
-	Handle   *Handle
-	ExitCode int
+	Inline string
+	Handle *Handle
 }
 
 type SearchArgs struct {
@@ -39,535 +32,125 @@ type SearchArgs struct {
 type SearchResult struct {
 	OutputID     string
 	TotalMatches int
-	Matches      []int
-	Truncated    bool
-}
-
-type ReadResult struct {
-	OutputID   string
-	Offset     int
-	Limit      int
-	TotalLines int
-	Lines      []string
-	Truncated  bool
+	Matches      []string
 }
 
 const (
 	NoOutput = "(no output)"
 
 	defaultReadLimit = 50
-	maxReadLines     = 200
-	maxLineWidth     = 2000
 )
 
-type ExecClient interface {
-	Exec(ctx context.Context, name, command string) (string, error)
-}
-
-// Store keeps every command output capture for one run.
+// Store keeps every captured command output in memory for one run.
 type Store struct {
-	client       ExecClient
-	vm           string
-	runDir       string
 	cfg          config.OutputConfig
 	inlineCutoff int64
-	handles      map[string]Handle
-	totalBytes   int64
+	handles      map[string]*Handle
 }
 
-// NewStore returns a new Store instance.
-func NewStore(client ExecClient, vm, runDir string, cfg config.OutputConfig, inlineCutoff int64) *Store {
+// NewStore returns an in-memory Store configured with cfg and inlineCutoff.
+func NewStore(cfg config.OutputConfig, inlineCutoff int64) *Store {
 	return &Store{
-		client: client, vm: vm, runDir: runDir, cfg: cfg,
+		cfg:          cfg,
 		inlineCutoff: inlineCutoff,
-		handles:      map[string]Handle{},
+		handles:      make(map[string]*Handle),
 	}
 }
 
-// Handles returns a list of Handle objects.
-func (s *Store) Handles() []Handle {
-	out := make([]Handle, 0, len(s.handles))
-	for _, h := range s.handles {
-		out = append(out, h)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out
-}
+// Capture decides whether out is returned inline or stored in memory via a handle.
+func (s *Store) Capture(out string) (Result, error) {
+	size := int64(len(out))
 
-// decideInline reports whether a captured command's output should be returned
-// inline to the agent rather than as a handle. Callers reach this only once the
-// output has actually been captured, so the non-forced "auto" case (run it
-// directly instead) is handled by Capture before any bytes are written.
-func decideInline(mode string, size, cutoff int64) bool {
-	if mode == "always" {
-		return false
-	}
-	if cutoff <= 0 {
-		cutoff = 1 << 30
-	}
-	return size < cutoff
-}
-
-// ValidatePattern validates a regex search pattern.
-func ValidatePattern(pattern string) error {
-	if strings.TrimSpace(pattern) == "" {
-		return fmt.Errorf("pattern is required")
-	}
-	for _, bad := range []string{`\d`, `\w`, `\s`, `\b`, `(?`, `\A`, `\z`} {
-		if strings.Contains(pattern, bad) {
-			return fmt.Errorf("invalid pattern %q: %q is PCRE, not POSIX ERE; use [[:digit:]] etc. or fixed_string for literal text", pattern, bad)
-		}
-	}
-	if _, err := syntax.Parse(pattern, syntax.POSIX); err != nil {
-		return fmt.Errorf("invalid pattern %q: %v", pattern, err)
-	}
-	return nil
-}
-
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-func (s *Store) mode() string {
-	if s.cfg.Mode == "" {
-		return "auto"
-	}
-	return s.cfg.Mode
-}
-
-func (s *Store) directExec(ctx context.Context, cmd string) (Result, error) {
-	out, err := s.client.Exec(ctx, s.vm, cmd)
-	if err != nil {
-		return Result{}, err
-	}
 	if out == "" {
 		return Result{Inline: NoOutput}, nil
 	}
+
+	if s.cfg.Mode == "always" || (s.inlineCutoff > 0 && size > s.inlineCutoff) {
+		id := uuid.NewV7().String()
+
+		handle := &Handle{
+			ID:         id,
+			TotalBytes: size,
+			Content:    out,
+		}
+
+		s.handles[id] = handle
+		return Result{Handle: handle}, nil
+	}
+
 	return Result{Inline: out}, nil
 }
 
-func capturePaths(runDir, oid string) (subdir, raw string) {
-	subdir = path.Join(runDir, "raw-"+oid)
-	return subdir, path.Join(subdir, "output.txt")
-}
-
-func (s *Store) preflight(ctx context.Context) error {
-	maxCmd := int64(s.cfg.MaxCommandSize)
-	if maxCmd <= 0 {
-		return nil
-	}
-	freeOut, err := s.client.Exec(ctx, s.vm, fmt.Sprintf("df -P %s | awk 'NR==2 {print $4}'", shellQuote(s.runDir)))
-	if err != nil {
-		return nil
-	}
-	kb, perr := strconv.ParseInt(strings.TrimSpace(freeOut), 10, 64)
-	if perr != nil {
-		return nil
-	}
-	if kb*1024 < maxCmd {
-		return fmt.Errorf("not enough free space for capture: need %d bytes", maxCmd)
-	}
-	return nil
-}
-
-func (s *Store) ensureSubdir(ctx context.Context, subdir string) error {
-	_, err := s.client.Exec(ctx, s.vm, fmt.Sprintf("mkdir -p %s", shellQuote(subdir)))
-	return err
-}
-
-func (s *Store) removeSubdir(ctx context.Context, subdir string) {
-	_, _ = s.client.Exec(ctx, s.vm, fmt.Sprintf("rm -rf %s", shellQuote(subdir)))
-}
-
-func parseMarkerLine(line, marker string) (exit int, found, valid bool) {
-	v, found := strings.CutPrefix(strings.TrimSpace(line), marker)
-	if !found {
-		return 0, false, false
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(v))
-	return n, true, err == nil
-}
-
-func parseExitMarker(out, marker string) (int, bool) {
-	for _, line := range strings.Split(out, "\n") {
-		if n, found, valid := parseMarkerLine(line, marker); found && valid {
-			return n, true
-		}
-	}
-	return 0, false
-}
-
-// errNoExitMarker means the harness's own marker never reached the output, so
-// the command's real exit status is unknown. Reporting 0 would tell the model a
-// failed command succeeded.
-var errNoExitMarker = errors.New("command produced no exit marker")
-
-// wrapCapture isolates the model-supplied command in its own shell group and
-// pipes it through `head -c` so a runaway command is cut off near the cap
-// rather than filling the VM disk. PIPESTATUS carries the command's own status
-// rather than head's.
-func wrapCapture(cmd, raw, marker string, maxBytes int64) string {
-	var b strings.Builder
-	b.WriteString("{\n")
-	b.WriteString(cmd)
-	b.WriteString("\n} 2>&1")
-	if maxBytes > 0 {
-		b.WriteString(" | head -c ")
-
-		// The cap is read one byte over: a file of exactly maxBytes is indistinguishable
-		// from a silently truncated one, whereas maxBytes+1 proves the command ran past
-		// the limit and lets checkCaps reject it with a real error.
-		b.WriteString(strconv.FormatInt(maxBytes+1, 10))
-	}
-	b.WriteString(" > ")
-	b.WriteString(shellQuote(raw))
-	b.WriteString("\necho ")
-	b.WriteString(marker)
-	b.WriteString("${PIPESTATUS[0]}\n")
-	return b.String()
-}
-
-func (s *Store) runRedirect(ctx context.Context, cmd, raw, marker string) (int, error) {
-	execOut, execErr := s.client.Exec(ctx, s.vm, wrapCapture(cmd, raw, marker, int64(s.cfg.MaxCommandSize)))
-	if strings.Contains(execOut, "No space left on device") {
-		return 0, fmt.Errorf("capture failed: no space left on device")
-	}
-	if exit, ok := parseExitMarker(execOut, marker); ok {
-		return exit, nil
-	}
-	if execErr != nil {
-		return 0, execErr
-	}
-	return 0, errNoExitMarker
-}
-
-func (s *Store) rawSize(ctx context.Context, raw string) (int64, error) {
-	sizeOut, err := s.client.Exec(ctx, s.vm, fmt.Sprintf("wc -c < %s", shellQuote(raw)))
-	if err != nil {
-		if strings.Contains(err.Error(), "No space left on device") || strings.Contains(sizeOut, "No space left on device") {
-			return 0, fmt.Errorf("capture failed: no space left on device")
-		}
-		return 0, fmt.Errorf("capture stat failed: %w", err)
-	}
-	size, err := strconv.ParseInt(strings.TrimSpace(sizeOut), 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("capture stat failed: unexpected size %q", strings.TrimSpace(sizeOut))
-	}
-	return size, nil
-}
-
-func (s *Store) checkCaps(size int64) error {
-	if maxCmd := int64(s.cfg.MaxCommandSize); maxCmd > 0 && size > maxCmd {
-		return fmt.Errorf("capture of %d bytes exceeds output.max_command_size %d", size, maxCmd)
-	}
-	total := s.totalBytes
-	if maxTotal := int64(s.cfg.MaxTotalSize); maxTotal > 0 && total+size > maxTotal {
-		return fmt.Errorf("capture would exceed output.max_total_size %d", maxTotal)
-	}
-	return nil
-}
-
-func (s *Store) materializeInline(ctx context.Context, subdir, raw string, size int64, exit int) (Result, error) {
-	inline := ""
-	if size > 0 {
-		catOut, err := s.client.Exec(ctx, s.vm, fmt.Sprintf("cat %s", shellQuote(raw)))
-		if err != nil {
-			return Result{}, err
-		}
-		inline = catOut
-	}
-	s.removeSubdir(ctx, subdir)
-	if inline == "" {
-		inline = NoOutput
-	}
-	return Result{Inline: inline, ExitCode: exit}, nil
-}
-
-func (s *Store) materializeHandle(ctx context.Context, cmd, oid, raw string, size int64, exit int) (Result, error) {
-	linesOut, err := s.client.Exec(ctx, s.vm, fmt.Sprintf("wc -l < %s", shellQuote(raw)))
-	if err != nil {
-		return Result{}, fmt.Errorf("capture line count failed: %w", err)
-	}
-	// A zero here would make every later Read silently return nothing while
-	// still reporting total_lines: 0, so the parse failure has to surface.
-	totalLines, err := strconv.Atoi(strings.TrimSpace(linesOut))
-	if err != nil {
-		return Result{}, fmt.Errorf("capture line count failed: unexpected line count %q", strings.TrimSpace(linesOut))
-	}
-	h := Handle{
-		ID: oid, Path: raw,
-		TotalLines: totalLines, TotalBytes: size,
-		ExitCode: exit, Command: cmd,
-	}
-	s.handles[oid] = h
-	s.totalBytes += size
-	return Result{Handle: &h}, nil
-}
-
-func (s *Store) Capture(ctx context.Context, command string, force bool) (Result, error) {
-	mode := s.mode()
-	if mode == "auto" && !force {
-		return s.directExec(ctx, command)
-	}
-	oid := uuid.NewV7().String()
-	subdir, raw := capturePaths(s.runDir, oid)
-	if err := s.preflight(ctx); err != nil {
-		return Result{}, err
-	}
-	if err := s.ensureSubdir(ctx, subdir); err != nil {
-		return Result{}, err
-	}
-	cleanup := func() { s.removeSubdir(ctx, subdir) }
-	fail := func(err error) (Result, error) {
-		cleanup()
-		return Result{}, err
-	}
-	marker := "__MPH_EXIT_" + strings.ReplaceAll(oid, "-", "") + ":"
-	exit, err := s.runRedirect(ctx, command, raw, marker)
-	// Once the command's context is done, follow-up work must not reuse it or
-	// the stat below fails on a cancelled context and the partial output that
-	// was already written gets thrown away.
-	workCtx := ctx
-	if err != nil {
-		if ctx.Err() == nil {
-			return fail(err)
-		}
-		// Timed out mid-write: keep the partial file as-is and report 124,
-		// the `timeout(1)` convention for a timed-out command.
-		exit = 124
-		workCtx = context.WithoutCancel(ctx)
-	}
-	size, err := s.rawSize(workCtx, raw)
-	if err != nil {
-		return fail(err)
-	}
-	if err := s.checkCaps(size); err != nil {
-		return fail(err)
-	}
-	cutoff := s.inlineCutoff
-	if s.cfg.InlineMaxSize > 0 {
-		cutoff = int64(s.cfg.InlineMaxSize)
-	}
-	if decideInline(mode, size, cutoff) {
-		res, err := s.materializeInline(workCtx, subdir, raw, size, exit)
-		if err != nil {
-			return fail(err)
-		}
-		return res, nil
-	}
-	res, err := s.materializeHandle(workCtx, command, oid, raw, size, exit)
-	if err != nil {
-		return fail(err)
-	}
-	return res, nil
-}
-
-func (s *Store) lookup(outputID string) (Handle, error) {
-	id := strings.TrimSpace(outputID)
-	if h, ok := s.handles[id]; ok {
-		return h, nil
-	}
+// unknownOutputID reports a lookup failure with enough context for the model
+// to recover: the handles it could have used, or that none exist yet.
+func (s *Store) unknownOutputID(id string) error {
 	if len(s.handles) == 0 {
-		return Handle{}, fmt.Errorf("unknown output_id %q (no active handles; use vm_exec for new commands, not output_search/output_read)", outputID)
+		return fmt.Errorf("unknown output_id %q; no output is captured yet, never invent an output_id", id)
 	}
 	ids := make([]string, 0, len(s.handles))
-	for k := range s.handles {
-		ids = append(ids, k)
+	for id := range s.handles {
+		ids = append(ids, id)
 	}
-	sort.Strings(ids)
-	return Handle{}, fmt.Errorf("unknown output_id %q (active handles: %s; never invent an output_id)", outputID, strings.Join(ids, ", "))
+	slices.Sort(ids)
+	return fmt.Errorf("unknown output_id %q; active output_ids: %s", id, strings.Join(ids, ", "))
 }
 
-func writeGrepPattern(b *strings.Builder, rawPath, pattern string, fixed, ignoreCase bool) {
-	if fixed {
-		b.WriteString("-F ")
-	} else {
-		b.WriteString("-E ")
+// Search returns every line of the captured output that matches args.Pattern.
+func (s *Store) Search(args SearchArgs) (SearchResult, error) {
+	if strings.TrimSpace(args.Pattern) == "" {
+		return SearchResult{}, errors.New("pattern is required")
 	}
-	if ignoreCase {
-		b.WriteString("-i ")
+
+	h, ok := s.handles[strings.TrimSpace(args.OutputID)]
+	if !ok {
+		return SearchResult{}, s.unknownOutputID(args.OutputID)
 	}
-	// -e keeps a pattern that starts with '-' from being read as an option.
-	b.WriteString("-e ")
-	b.WriteString(shellQuote(pattern))
-	b.WriteString(" ")
-	b.WriteString(shellQuote(rawPath))
-}
 
-func buildGrepCmd(rawPath, pattern string, fixed, ignoreCase bool, maxM int, marker string) string {
-	var b strings.Builder
-	b.WriteString("{ grep -a -n ")
-	writeGrepPattern(&b, rawPath, pattern, fixed, ignoreCase)
-	b.WriteString("; echo " + marker + "$?; }")
-	// head is the only bound. It trims the stream to maxM+1 lines, so the exit
-	// marker surviving the trim is how Search tells "exactly maxM" from "more".
-	// maxM 0 means unlimited, so no trim is applied.
-	if maxM > 0 {
-		b.WriteString(" | head -n ")
-		b.WriteString(strconv.Itoa(maxM + 1))
+	expr := args.Pattern
+	if args.FixedString {
+		expr = regexp.QuoteMeta(expr)
 	}
-	return b.String()
-}
-
-// buildGrepCountCmd counts every match in the capture. The list of line numbers
-// is bounded, but the total must be the real number: a sentinel like maxM+1 is
-// indistinguishable from a genuine count and tells the model nothing.
-func buildGrepCountCmd(rawPath, pattern string, fixed, ignoreCase bool) string {
-	var b strings.Builder
-	b.WriteString("grep -a -c ")
-	writeGrepPattern(&b, rawPath, pattern, fixed, ignoreCase)
-	return b.String()
-}
-
-func parseGrepOutput(out, marker string) (lines []string, exit int, hasMarker bool) {
-	all := strings.Split(out, "\n")
-	// The harness always emits the marker last, so only a trailing line is
-	// trusted. Model-written content that merely looks like the marker must
-	// not be able to dictate the exit status.
-	for i := len(all) - 1; i >= 0; i-- {
-		line := strings.TrimSpace(all[i])
-		if line == "" {
-			continue
-		}
-		if n, found, valid := parseMarkerLine(line, marker); found {
-			hasMarker = true
-			if valid {
-				exit = n
-			}
-			all = all[:i]
-			break
-		}
-		break
+	flags := "(?m)"
+	if args.IgnoreCase {
+		flags = "(?mi)"
 	}
-	lines = append(lines, all...)
-	return lines, exit, hasMarker
-}
-
-// parseGrepLines turns the `line:text` records grep emits for the raw capture
-// into absolute line numbers.
-func parseGrepLines(lines []string) []int {
-	out := make([]int, 0, len(lines))
-	for _, line := range lines {
-		num, _, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
-		}
-		n, err := strconv.Atoi(num)
-		if err != nil {
-			continue
-		}
-		out = append(out, n)
-	}
-	sort.Ints(out)
-	return out
-}
-
-// capMatches keeps the first maxM matches. maxM 0 means unlimited, matching a
-// disabled cap rather than "keep nothing".
-func capMatches(matches []int, maxM int) (kept []int, truncated bool) {
-	if maxM <= 0 || len(matches) <= maxM {
-		return matches, false
-	}
-	return matches[:maxM], true
-}
-
-func (s *Store) Search(ctx context.Context, args SearchArgs) (SearchResult, error) {
-	h, err := s.lookup(args.OutputID)
+	re, err := regexp.Compile(flags + "^.*(?:" + expr + ").*$")
 	if err != nil {
-		return SearchResult{}, err
+		return SearchResult{}, fmt.Errorf("invalid pattern %q: %w", args.Pattern, err)
 	}
 
-	if !args.FixedString {
-		if err := ValidatePattern(args.Pattern); err != nil {
-			return SearchResult{}, err
-		}
-	}
-	maxM := s.cfg.SearchMaxMatches
-	marker := "__MPH_GREP_EXIT_" + strings.ReplaceAll(h.ID, "-", "") + ":"
-
-	out, execErr := s.client.Exec(ctx, s.vm, buildGrepCmd(h.Path, args.Pattern, args.FixedString, args.IgnoreCase, maxM, marker))
-	lines, grepExit, hasMarker := parseGrepOutput(out, marker)
-
-	if !hasMarker && execErr != nil {
-		return SearchResult{}, fmt.Errorf("search exec failed for output %q: %w", h.ID, execErr)
-	}
-
-	if grepExit == 2 {
-		return SearchResult{}, fmt.Errorf("search failed for output %q", h.ID)
-	}
-
-	if grepExit == 1 || len(lines) == 0 || (len(lines) == 1 && strings.TrimSpace(lines[0]) == "") {
-		return SearchResult{OutputID: h.ID}, nil
-	}
-
-	matches, truncated := capMatches(parseGrepLines(lines), maxM)
-	total := s.countMatches(ctx, h, args, grepExit, len(matches))
-
+	matches := re.FindAllString(h.Content, -1)
 	return SearchResult{
-		OutputID: h.ID, TotalMatches: total,
-		Matches: matches, Truncated: truncated,
+		OutputID:     h.ID,
+		TotalMatches: len(matches),
+		Matches:      matches,
 	}, nil
 }
 
-// countMatches returns the true number of matches in the capture, falling back
-// to the number actually listed when the count cannot be obtained.
-func (s *Store) countMatches(ctx context.Context, h Handle, args SearchArgs, grepExit, listed int) int {
-	if grepExit == 1 {
-		return 0
+// Read returns the bytes of the captured output between offset (inclusive) and
+// limit (exclusive).
+func (s *Store) Read(outputID string, offset, limit int) (string, error) {
+	h, ok := s.handles[strings.TrimSpace(outputID)]
+	if !ok {
+		return "", s.unknownOutputID(outputID)
 	}
-	out, err := s.client.Exec(ctx, s.vm, buildGrepCountCmd(h.Path, args.Pattern, args.FixedString, args.IgnoreCase))
-	if err != nil {
-		return listed
-	}
-	// grep -c prints a single number and nothing else.
-	n, perr := strconv.Atoi(strings.TrimSpace(out))
-	if perr != nil || n < listed {
-		return listed
-	}
-	return n
-}
 
-func clampReadLimit(limit int) int {
+	if offset < 0 {
+		return "", errors.New("offset must be >=0")
+	}
+	if offset > len(h.Content) {
+		return "", fmt.Errorf("offset %d is beyond the captured output of %d bytes", offset, len(h.Content))
+	}
+
 	if limit <= 0 {
-		return defaultReadLimit
+		limit = defaultReadLimit
 	}
-	if limit > maxReadLines {
-		return maxReadLines
+	if limit > len(h.Content) {
+		limit = len(h.Content)
 	}
-	return limit
-}
+	if offset > limit {
+		return "", nil
+	}
 
-func buildReadCmd(rawPath string, offset, limit int) string {
-	end := offset + limit - 1
-	return fmt.Sprintf("sed -n '%d,%dp' %s | cut -c1-%d", offset, end, shellQuote(rawPath), maxLineWidth)
-}
-
-func (s *Store) Read(ctx context.Context, outputID string, offset, limit int) (ReadResult, error) {
-	h, err := s.lookup(outputID)
-	if err != nil {
-		return ReadResult{}, err
-	}
-	if offset < 1 {
-		return ReadResult{}, fmt.Errorf("offset must be >= 1, got %d", offset)
-	}
-	limit = clampReadLimit(limit)
-	if offset > h.TotalLines {
-		return ReadResult{OutputID: h.ID, Offset: offset, Limit: limit, TotalLines: h.TotalLines}, nil
-	}
-	out, err := s.client.Exec(ctx, s.vm, buildReadCmd(h.Path, offset, limit))
-	if err != nil {
-		return ReadResult{}, fmt.Errorf("read failed for output %q: %w", h.ID, err)
-	}
-	lines := strings.Split(out, "\n")
-	if n := len(lines); n > 0 && lines[n-1] == "" {
-		lines = lines[:n-1]
-	}
-	if len(lines) > limit {
-		lines = lines[:limit]
-	}
-	return ReadResult{
-		OutputID: h.ID, Offset: offset, Limit: limit,
-		TotalLines: h.TotalLines, Lines: lines,
-		Truncated: offset+len(lines)-1 < h.TotalLines,
-	}, nil
+	return h.Content[offset:limit], nil
 }

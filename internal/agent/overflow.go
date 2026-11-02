@@ -63,17 +63,13 @@ func asContextOverflow(err error) (*contextOverflowError, bool) {
 // buildContextOverflowContent is the tool result the model sees in place of a
 // payload that cannot fit. It stays short because reclaiming context is the
 // whole point.
-func buildContextOverflowContent(tool string, bytes, budget int, captures bool) string {
+func buildContextOverflowContent(tool string, bytes, budget int) string {
 	var msg string
 	switch tool {
 	case "vm_exec":
-		if captures {
-			msg = fmt.Sprintf("vm_exec output was %d bytes, over the %d-byte context budget, so it was discarded. Re-run with capture: true and read it with output_search/output_read.", bytes, budget)
-		} else {
-			msg = fmt.Sprintf("vm_exec output was %d bytes, over the %d-byte context budget, so it was discarded. Re-run with a narrower command using head, tail, or grep.", bytes, budget)
-		}
+		msg = fmt.Sprintf("vm_exec output was %d bytes, over the %d-byte context budget, so it was discarded. Re-run with a narrower command using head, tail, or grep.", bytes, budget)
 	case "output_read":
-		msg = fmt.Sprintf("output_read returned %d bytes, over the %d-byte context budget, so it was discarded. Request fewer lines with offset and limit, or use output_search first.", bytes, budget)
+		msg = fmt.Sprintf("output_read returned %d bytes, over the %d-byte context budget, so it was discarded. Request a smaller byte range with offset and limit, or use output_search first.", bytes, budget)
 	default:
 		msg = fmt.Sprintf("%s result was %d bytes, over the %d-byte context budget, so it was discarded. Narrow the request.", tool, bytes, budget)
 	}
@@ -84,7 +80,6 @@ func buildContextOverflowContent(tool string, bytes, budget int, captures bool) 
 // envelope and reports what it reclaimed. A replacement always shrinks the
 // conversation, so repeated calls make progress without a retry counter.
 func (a *Agent) discardLargestToolResult() (tool string, bytes, reclaimed int, ok bool) {
-	captures := a.store != nil
 	bestIdx := -1
 	var bestContent, bestName, bestReplacement string
 
@@ -97,7 +92,7 @@ func (a *Agent) discardLargestToolResult() (tool string, bytes, reclaimed int, o
 		if name == "" {
 			name = "tool"
 		}
-		replacement := buildContextOverflowContent(name, len(content), a.toolResultBudget, captures)
+		replacement := buildContextOverflowContent(name, len(content), a.toolResultBudget)
 		if len(content)-len(replacement) < minOverflowReclaimBytes {
 			continue
 		}

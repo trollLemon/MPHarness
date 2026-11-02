@@ -5,7 +5,6 @@ import (
 	"io"
 )
 
-var OutputRunDirCommand = outputRunDirCommand
 var WriteCommandHistory = writeCommandHistory
 var ErrInvalidInput = errInvalidInput
 var ErrVMShouldNotBeUsed = errVMShouldNotBeUsed

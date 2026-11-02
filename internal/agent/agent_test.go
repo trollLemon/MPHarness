@@ -1152,7 +1152,7 @@ func TestAgentLoopCompaction(t *testing.T) {
 				t.Fatalf("post-compaction request has %d messages", len(nextMsgs))
 			}
 			user, _ := nextMsgs[1]["content"].(string)
-			for _, want := range []string{"## Task", "## Work completed so far", "## Active output handles"} {
+			for _, want := range []string{"## Task", "## Work completed so far"} {
 				if !strings.Contains(user, want) {
 					t.Errorf("post-compaction user message missing %q: %q", want, user)
 				}
@@ -1358,24 +1358,10 @@ func TestAgentLoopCompactionWithOutputHandles(t *testing.T) {
 				MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200,
 			},
 			scripted: func(command string) (string, int) {
-				switch {
-				case strings.HasPrefix(command, "id -u"), strings.HasPrefix(command, "id -g"):
-					return "1000\n", 0
-				case strings.HasPrefix(command, "getent passwd"):
-					return "ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n", 0
-				case strings.Contains(command, "df -P"):
-					return "99999999", 0
-				case strings.Contains(command, "mkdir"):
-					return "", 0
-				case strings.Contains(command, "__MPH_EXIT_"):
-					return exitMarker(command) + "0", 0
-				case strings.Contains(command, "wc -c"):
-					return fmt.Sprintf("%d", size), 0
-				case strings.Contains(command, "wc -l"):
-					return "1", 0
-				default:
-					return "", 0
+				if command == "echo hi" {
+					return strings.Repeat("x", size), 0
 				}
+				return identityScripted(command)
 			},
 			llm: defaultLLMConfig(),
 		})
@@ -1400,7 +1386,7 @@ func TestAgentLoopCompactionWithOutputHandles(t *testing.T) {
 
 		nextMsgs, _ := run.mock.captured[2]["messages"].([]model.D)
 		user, _ := nextMsgs[1]["content"].(string)
-		for _, want := range []string{"## Active output handles", "from `echo hi`", "Only use the output_id values listed above"} {
+		for _, want := range []string{"## Task", "## Work completed so far"} {
 			if !strings.Contains(user, want) {
 				t.Errorf("post-compaction user message missing %q: %q", want, user)
 			}
@@ -1621,15 +1607,7 @@ func TestAgentLoopOverflowClassification(t *testing.T) {
 func TestAgentLoopToolOutputTooLarge(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		size := rapid.IntRange(4097, 65536).Draw(t, "outputBytes")
-		captures := rapid.Bool().Draw(t, "outputEnabled")
 
-		output := config.OutputConfig{}
-		if captures {
-			output = config.OutputConfig{
-				Enabled: true, Mode: "auto",
-				MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200,
-			}
-		}
 		run := runScenario(t, loopScenario{
 			maxIterations: 3,
 			window:        8192,
@@ -1638,18 +1616,12 @@ func TestAgentLoopToolOutputTooLarge(t *testing.T) {
 				{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{taskStatusCall("ts", agent.TaskStatusCompleted, "done")}, usage: totalUsage(100)},
 			},
 			agent:  config.AgentConfig{MaxOutputBytes: 4096},
-			output: output,
+			output: config.OutputConfig{Enabled: false},
 			scripted: func(command string) (string, int) {
-				switch {
-				case strings.HasPrefix(command, "id -u"), strings.HasPrefix(command, "id -g"):
-					return "1000\n", 0
-				case strings.HasPrefix(command, "getent passwd"):
-					return "ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n", 0
-				case strings.Contains(command, "big"):
+				if command == "big" {
 					return strings.Repeat("z", size), 0
-				default:
-					return "", 0
 				}
+				return identityScripted(command)
 			},
 			llm: defaultLLMConfig(),
 		})
@@ -1686,9 +1658,6 @@ func TestAgentLoopToolOutputTooLarge(t *testing.T) {
 			if !strings.Contains(content, "was discarded") {
 				t.Errorf("oversized tool result = %q, want a discard notice", content)
 			}
-			if got := strings.Contains(content, "capture: true"); got != captures {
-				t.Errorf("capture guidance present = %v, want %v: %q", got, captures, content)
-			}
 			if strings.Contains(content, strings.Repeat("z", 100)) {
 				t.Error("oversized tool result kept the payload")
 			}
@@ -1701,7 +1670,7 @@ func TestAgentLoopToolOutputTooLarge(t *testing.T) {
 
 func TestAgentLoopCaptureAttribution(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
-		size := rapid.IntRange(1, 8192).Draw(t, "capturedBytes")
+		size := rapid.IntRange(10, 8192).Draw(t, "capturedBytes")
 
 		run := runScenario(t, loopScenario{
 			maxIterations: 3,
@@ -1713,27 +1682,13 @@ func TestAgentLoopCaptureAttribution(t *testing.T) {
 			agent: config.AgentConfig{MaxOutputBytes: 4096},
 			output: config.OutputConfig{
 				Enabled: true, Mode: "always",
-				MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200,
+				MaxCommandSize: 5, MaxTotalSize: 1 << 26, SearchMaxMatches: 200,
 			},
 			scripted: func(command string) (string, int) {
-				switch {
-				case strings.HasPrefix(command, "id -u"), strings.HasPrefix(command, "id -g"):
-					return "1000\n", 0
-				case strings.HasPrefix(command, "getent passwd"):
-					return "ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n", 0
-				case strings.Contains(command, "df -P"):
-					return "99999999", 0
-				case strings.Contains(command, "mkdir"):
-					return "", 0
-				case strings.Contains(command, "__MPH_EXIT_"):
-					return exitMarker(command) + "0", 0
-				case strings.Contains(command, "wc -c"):
-					return fmt.Sprintf("%d", size), 0
-				case strings.Contains(command, "wc -l"):
-					return "1", 0
-				default:
-					return "", 0
+				if command == "echo hi" {
+					return strings.Repeat("x", size), 0
 				}
+				return identityScripted(command)
 			},
 			llm: defaultLLMConfig(),
 		})
@@ -1752,7 +1707,7 @@ func TestAgentLoopCaptureAttribution(t *testing.T) {
 
 		attributed := false
 		for _, e := range run.events {
-			if e["message"] != "command output too large for inline context, captured to file" {
+			if e["message"] != "command output too large for inline context, captured to memory" {
 				continue
 			}
 			attributed = true
@@ -2012,8 +1967,9 @@ func TestAgentLoopCompactionDurationIsMilliseconds(t *testing.T) {
 	}
 }
 
-// Each tool gets recovery guidance it can act on: capture for vm_exec, paging
-// for output_read, and a generic narrowing hint for everything else.
+// Each tool gets recovery guidance it can act on: a narrower command for
+// vm_exec, a smaller byte range for output_read, and a generic narrowing hint
+// for everything else.
 func TestAgentLoopOversizedResultGuidance(t *testing.T) {
 	t.Run("output_read is told to page", func(t *testing.T) {
 		const budget = 2048
@@ -2025,7 +1981,7 @@ func TestAgentLoopOversizedResultGuidance(t *testing.T) {
 			agent:         config.AgentConfig{MaxOutputBytes: budget},
 			output: config.OutputConfig{
 				Enabled: true, Mode: "always",
-				MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200,
+				MaxCommandSize: 5, MaxTotalSize: 1 << 26, SearchMaxMatches: 200,
 			},
 			chatFunc: func(_ context.Context, req model.D) (model.ChatResponse, error) {
 				captured = append(captured, req)
@@ -2039,7 +1995,7 @@ func TestAgentLoopOversizedResultGuidance(t *testing.T) {
 					return chatResp("", "", model.FinishReasonTool, []model.ResponseToolCall{{
 						ID: "c2", Type: "function", Function: model.ResponseToolCallFunction{
 							Name:      "output_read",
-							Arguments: model.ToolCallArguments{"output_id": id, "offset": 1, "limit": 200},
+							Arguments: model.ToolCallArguments{"output_id": id, "offset": 0, "limit": 3000},
 						},
 					}}, totalUsage(100)), nil
 				default:
@@ -2048,22 +2004,10 @@ func TestAgentLoopOversizedResultGuidance(t *testing.T) {
 				}
 			},
 			scripted: func(command string) (string, int) {
-				switch {
-				case strings.Contains(command, "df -P"):
-					return "99999999", 0
-				case strings.Contains(command, "mkdir"):
-					return "", 0
-				case strings.Contains(command, "__MPH_EXIT_"):
-					return exitMarker(command) + "0", 0
-				case strings.Contains(command, "wc -c"):
-					return "40000", 0
-				case strings.Contains(command, "wc -l"):
-					return "200", 0
-				case strings.Contains(command, "sed -n"):
+				if command == "echo big" {
 					return strings.Repeat(strings.Repeat("r", 199)+"\n", 200), 0
-				default:
-					return identityScripted(command)
 				}
+				return identityScripted(command)
 			},
 			llm: defaultLLMConfig(),
 		})
@@ -2097,7 +2041,7 @@ func TestAgentLoopOversizedResultGuidance(t *testing.T) {
 			agent:         config.AgentConfig{MaxOutputBytes: budget},
 			output: config.OutputConfig{
 				Enabled: true, Mode: "always",
-				MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200,
+				MaxCommandSize: 5, MaxTotalSize: 1 << 26, SearchMaxMatches: 200,
 			},
 			chatFunc: func(_ context.Context, req model.D) (model.ChatResponse, error) {
 				captured = append(captured, req)
@@ -2120,27 +2064,14 @@ func TestAgentLoopOversizedResultGuidance(t *testing.T) {
 				}
 			},
 			scripted: func(command string) (string, int) {
-				switch {
-				case strings.Contains(command, "df -P"):
-					return "99999999", 0
-				case strings.Contains(command, "mkdir"):
-					return "", 0
-				case strings.Contains(command, "__MPH_EXIT_"):
-					return exitMarker(command) + "0", 0
-				case strings.Contains(command, "wc -c"):
-					return "900000", 0
-				case strings.Contains(command, "wc -l"):
-					return "200000", 0
-				case strings.Contains(command, "grep") && strings.Contains(command, "__MPH_GREP_EXIT_"):
+				if command == "echo big" {
 					var b strings.Builder
 					for i := range 200 {
 						fmt.Fprintf(&b, "%d:match\n", 100000+i)
 					}
-					b.WriteString(grepMarker(command) + "0")
 					return b.String(), 0
-				default:
-					return identityScripted(command)
 				}
+				return identityScripted(command)
 			},
 			llm: defaultLLMConfig(),
 		})
