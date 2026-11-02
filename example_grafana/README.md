@@ -31,10 +31,10 @@ not *Join by labels*. Token counts
 are shown without pricing or cost estimates; the application does not calculate
 monetary costs.
 
-**Context over time** plots context used and remaining context (window minus
-used) from each `token_usage` event, with applied compactions as points. It is an
-XY chart over the raw log lines, so its time axis spans the run itself rather
-than the dashboard range; the range only has to include the run.
+**Context over time** is a stacked bar chart with one bar per `token_usage`
+event: context used on the bottom and remaining context (window minus used) on
+top, so each bar sums to the context window. Compaction events appear in the
+compaction panels instead of on this chart.
 
 To discard only this stack's stored telemetry and Grafana state and restart
 with empty storage:

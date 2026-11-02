@@ -1057,10 +1057,9 @@
   },
   {
    "id": 231,
-   "type": "xychart",
-   "pluginVersion": "12.2.0",
+   "type": "barchart",
    "title": "Context over time",
-   "description": "One point per token_usage event: context used (total_tokens) and remaining context (ctx_window minus total_tokens), plus tok_after of each applied context_compaction. Points are raw log lines rather than time buckets, so the time axis spans the run itself, not the dashboard range; the range only has to include the run.",
+   "description": "One bar per token_usage event: context used (total_tokens) stacked under remaining context (ctx_window minus total_tokens), so each bar sums to the context window. Compaction events are not plotted here; see the compaction panels below.",
    "datasource": {
     "type": "loki",
     "uid": "mph-loki"
@@ -1079,9 +1078,9 @@
       "mode": "palette-classic"
      },
      "custom": {
-      "show": "lines",
-      "lineWidth": 2,
-      "fillOpacity": 0,
+      "lineWidth": 1,
+      "fillOpacity": 80,
+      "gradientMode": "none",
       "axisPlacement": "auto"
      }
     },
@@ -1089,53 +1088,47 @@
      {
       "matcher": {
        "id": "byName",
-       "options": "Time"
+       "options": "iteration"
       },
       "properties": [
        {
         "id": "unit",
-        "value": "time:HH:mm:ss"
-       },
-       {
-        "id": "custom.axisLabel",
-        "value": "Time"
+        "value": "none"
        }
       ]
      },
      {
       "matcher": {
        "id": "byName",
-       "options": "After compaction"
+       "options": "Remaining context"
       },
       "properties": [
        {
-        "id": "custom.show",
-        "value": "points"
+        "id": "color",
+        "value": {
+         "mode": "fixed",
+         "fixedColor": "gray"
+        }
        }
       ]
      }
     ]
    },
    "options": {
-    "mapping": "auto",
-    "series": [
-     {
-      "x": {
-       "matcher": {
-        "id": "byName",
-        "options": "Time"
-       }
-      }
-     }
-    ],
+    "xField": "iteration",
+    "orientation": "vertical",
+    "showValue": "auto",
+    "stacking": "normal",
+    "groupWidth": 0.7,
+    "width": 0.9,
     "legend": {
-     "showLegend": true,
      "displayMode": "list",
-     "placement": "bottom"
+     "placement": "bottom",
+     "calcs": []
     },
     "tooltip": {
      "mode": "multi",
-     "sort": "desc"
+     "sort": "none"
     }
    },
    "targets": [
@@ -1146,9 +1139,8 @@
       "uid": "mph-loki"
      },
      "editorMode": "code",
-     "queryType": "range",
-     "maxLines": 5000,
-     "expr": "{instance=\"$run\"} |= \"token_usage\" | json | attributes_event=\"token_usage\" | label_format remaining=\"{{ sub .attributes_ctx_window .attributes_total_tokens }}\" | keep attributes_total_tokens, remaining"
+     "expr": "max by (attributes_iter) (max_over_time({instance=\"$run\"} |= \"token_usage\" | json | attributes_event=\"token_usage\" | unwrap attributes_total_tokens | __error__=\"\" [$__range]))",
+     "queryType": "instant"
     },
     {
      "refId": "B",
@@ -1157,37 +1149,34 @@
       "uid": "mph-loki"
      },
      "editorMode": "code",
-     "queryType": "range",
-     "maxLines": 5000,
-     "expr": "{instance=\"$run\"} |= \"context_compaction\" | json | attributes_event=\"context_compaction\" | attributes_outcome=\"applied\" | keep attributes_tok_after"
+     "expr": "max by (attributes_iter) (max_over_time({instance=\"$run\"} |= \"token_usage\" | json | attributes_event=\"token_usage\" | label_format remaining=\"{{ sub .attributes_ctx_window .attributes_total_tokens }}\" | unwrap remaining | __error__=\"\" [$__range]))",
+     "queryType": "instant"
     }
    ],
    "transformations": [
     {
-     "id": "extractFields",
-     "options": {
-      "source": "labels",
-      "format": "auto",
-      "replace": false,
-      "keepTime": false
-     }
+     "id": "merge",
+     "options": {}
     },
     {
      "id": "convertFieldType",
      "options": {
-      "fields": {},
       "conversions": [
        {
-        "targetField": "attributes_total_tokens",
+        "targetField": "attributes_iter",
         "destinationType": "number"
-       },
+       }
+      ],
+      "fields": {}
+     }
+    },
+    {
+     "id": "sortBy",
+     "options": {
+      "sort": [
        {
-        "targetField": "remaining",
-        "destinationType": "number"
-       },
-       {
-        "targetField": "attributes_tok_after",
-        "destinationType": "number"
+        "field": "attributes_iter",
+        "desc": false
        }
       ]
      }
@@ -1196,28 +1185,28 @@
      "id": "organize",
      "options": {
       "excludeByName": {
-       "labels": true,
-       "Line": true,
-       "tsNs": true,
-       "id": true,
-       "labelTypes": true
+       "Time": true
       },
       "renameByName": {
-       "attributes_total_tokens": "Context used",
-       "remaining": "Remaining context",
-       "attributes_tok_after": "After compaction"
+       "attributes_iter": "iteration",
+       "Value #A": "Context used",
+       "Value #B": "Remaining context"
+      },
+      "indexByName": {
+       "attributes_iter": 0
       }
      }
     },
     {
-     "id": "sortBy",
+     "id": "convertFieldType",
      "options": {
-      "sort": [
+      "conversions": [
        {
-        "field": "Time",
-        "desc": false
+        "targetField": "iteration",
+        "destinationType": "string"
        }
-      ]
+      ],
+      "fields": {}
      }
     }
    ]

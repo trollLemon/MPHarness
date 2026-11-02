@@ -124,11 +124,12 @@ all runs in the selected time range. Runs are selected by the Loki `instance`
 stream label (the `service.instance.id` resource), which combines the run
 name and UUID, so repeated runs with the same name stay distinct.
 
-**Context over time** plots context used and remaining context (window minus
-used) from each `token_usage` event, with applied compactions as points. Its time
-axis spans the run itself, not the dashboard range; the range only has to
-include the run. Token counts remain available, but there are no pricing controls or
-monetary cost calculations in the dashboard or application.
+**Context over time** is a stacked bar chart with one bar per `token_usage`
+event: context used on the bottom and remaining context (window minus used) on
+top, so each bar sums to the context window. Compaction events appear in the
+compaction panels instead of on this chart. Token counts remain available, but
+there are no pricing controls or monetary cost calculations in the dashboard or
+application.
 
 ### Data retention
 
