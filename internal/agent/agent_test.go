@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +32,7 @@ type loopScenario struct {
 	allowed       map[string]bool
 	prompt        string
 	contentDir    string
+	skillsDir     string
 	vmName        string
 	llm           config.LLMConfig
 	scripted      func(command string) (string, int)
@@ -181,6 +184,7 @@ func runScenario(t testFatal, sc loopScenario) loopRun {
 	conf.VM = config.VMConfig{Name: vmName, CPU: 1, RAM: "1G", Disk: "5G"}
 	conf.Prompt = prompt
 	conf.ContentDir = sc.contentDir
+	conf.SkillsDir = sc.skillsDir
 	conf.AllowedCommands = sc.allowed
 	conf.Compaction = sc.compaction
 	conf.Agent = sc.agent
@@ -421,6 +425,61 @@ func TestAgentLoopInitialPrompt(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestAgentLoopSkillsPrompt(t *testing.T) {
+	skillsDir := t.TempDir()
+	for name, body := range map[string]string{
+		"alpha/SKILL.md":   "# Alpha guide\nuse alpha carefully\n",
+		"beta/SKILL.md":    "# Beta guide\nbeta details\n",
+		"ignored/notes.md": "not a skill",
+	} {
+		path := filepath.Join(skillsDir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sc := loopScenario{
+		maxIterations: 1,
+		window:        8192,
+		skillsDir:     skillsDir,
+		responses:     []loopResponse{{finishReason: model.FinishReasonStop, usage: totalUsage(10)}},
+		llm:           defaultLLMConfig(),
+	}
+	run := runScenario(t, sc)
+
+	req := run.mock.captured[0]
+	msgs, _ := req["messages"].([]model.D)
+	system, _ := msgs[0]["content"].(string)
+	for _, want := range []string{"### Skills", "#### Alpha guide", "use alpha carefully", "#### Beta guide", "beta details"} {
+		if !strings.Contains(system, want) {
+			t.Errorf("system prompt missing skill content %q", want)
+		}
+	}
+	for _, unwanted := range []string{"not a skill", "ignored"} {
+		if strings.Contains(system, unwanted) {
+			t.Errorf("system prompt includes non-skill content %q", unwanted)
+		}
+	}
+	if strings.Index(system, "Alpha guide") > strings.Index(system, "Beta guide") {
+		t.Errorf("skills not sorted by name")
+	}
+
+	without := runScenario(t, loopScenario{
+		maxIterations: 1,
+		window:        8192,
+		responses:     []loopResponse{{finishReason: model.FinishReasonStop, usage: totalUsage(10)}},
+		llm:           defaultLLMConfig(),
+	})
+	msgs, _ = without.mock.captured[0]["messages"].([]model.D)
+	system, _ = msgs[0]["content"].(string)
+	if strings.Contains(system, "### Skills") {
+		t.Errorf("system prompt includes skills section without --skills-dir")
+	}
 }
 
 func TestAgentLoopRequestShape(t *testing.T) {

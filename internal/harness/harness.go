@@ -78,6 +78,20 @@ func writeCommandHistory(ctx context.Context, hist commandHistoryWriter, w io.Wr
 	return hist.WriteCommandHistory(flushCtx, w)
 }
 
+func scanSkillsDir(dir string) error {
+	if strings.TrimSpace(dir) == "" {
+		return nil
+	}
+	findings, err := validation.ScanContentDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, f := range findings {
+		log.Warn().Str("file", f.File).Str("pattern", f.Pattern).Str("snippet", f.Snippet).Msg("skills_dir prompt injection scan: suspicious pattern detected")
+	}
+	return nil
+}
+
 func Start(ctx context.Context, agt *agent.Agent, client *lxd.Client, cfg config.Config, opts Options) (*agent.TaskStatusOutcome, error) {
 	_, infoErr := client.Info(ctx, cfg.VM.Name)
 	existing := infoErr == nil
@@ -120,6 +134,10 @@ func Start(ctx context.Context, agt *agent.Agent, client *lxd.Client, cfg config
 		if _, err := client.Exec(ctx, cfg.VM.Name, outputRunDirCommand(rid)); err != nil {
 			return nil, fmt.Errorf("output run dir setup failed: %w", err)
 		}
+	}
+
+	if err := scanSkillsDir(cfg.SkillsDir); err != nil {
+		return nil, fmt.Errorf("skills_dir scan failed: %w", err)
 	}
 
 	if strings.TrimSpace(cfg.ContentDir) != "" {

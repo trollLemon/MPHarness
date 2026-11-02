@@ -10,6 +10,7 @@ creates the VM, lets an LLM drive a tool-calling loop to complete the task, and 
   - [Restrict commands the agent may run](how-to/restrict_commands.md)
   - [Pass secrets to the agent](how-to/use_secrets.md)
   - [Provide local content to the VM](how-to/provide_content.md)
+  - [Add skills to the agent](how-to/use_skills.md)
   - [Manage the VM lifecycle](how-to/manage_vm_lifecycle.md)
   - [Enable OpenTelemetry](how-to/enable_otel.md)
   - [Release workflow & SBOMs](how-to/release_workflow.md)

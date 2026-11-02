@@ -488,6 +488,7 @@ type Config struct {
 	Prompt          string           `yaml:"prompt"`
 	AllowedCommands map[string]bool  `yaml:"-"`
 	ContentDir      string           `yaml:"content_dir"`
+	SkillsDir       string           `yaml:"-"`
 	LLM             LLMConfig        `yaml:"llm"`
 	Agent           AgentConfig      `yaml:"agent"`
 	Truncation      TruncationConfig `yaml:"truncation"`
@@ -518,6 +519,11 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.ContentDir) != "" {
 		if _, err := mphvalidation.ContentDirPath(c.ContentDir); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(c.SkillsDir) != "" {
+		if _, err := mphvalidation.SkillsDirPath(c.SkillsDir); err != nil {
 			return err
 		}
 	}
@@ -620,6 +626,7 @@ func load(data []byte, sources Sources) (Config, error) {
 	}
 	cfg.AllowedCommands = normalizeAllowedCommands(allowed)
 	cfg.ContentDir = strings.TrimSpace(cfg.ContentDir)
+	cfg.SkillsDir = strings.TrimSpace(cfg.SkillsDir)
 
 	applyDefaults(k, &cfg)
 
@@ -628,6 +635,9 @@ func load(data []byte, sources Sources) (Config, error) {
 	}
 	if cfg.ContentDir != "" {
 		cfg.ContentDir = filepath.Clean(cfg.ContentDir)
+	}
+	if cfg.SkillsDir != "" {
+		cfg.SkillsDir = filepath.Clean(cfg.SkillsDir)
 	}
 
 	return cfg, nil

@@ -42,6 +42,7 @@ allowed_commands:
 
 ## Related
 
+- [Add skills to the agent](use_skills.md)
 - [Configure the VM](configure_vm.md)
 - [Restrict commands](restrict_commands.md)
 - [Software architecture](../reference/arch.md)

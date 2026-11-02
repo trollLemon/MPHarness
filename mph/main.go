@@ -21,6 +21,7 @@ import (
 	"github.com/trollLemon/MPHarness/v2/internal/lxd"
 	"github.com/trollLemon/MPHarness/v2/internal/otlp"
 	"github.com/trollLemon/MPHarness/v2/internal/secrets"
+	"github.com/trollLemon/MPHarness/v2/internal/validation"
 )
 
 var version = "dev"
@@ -109,6 +110,7 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "  model: <id>           # LLM, e.g. unsloth/Qwen3-0.6B-Q8_0 (downloaded on first run)\n")
 	_, _ = fmt.Fprintf(w, "  prompt: \"do stuff in the VM\"\n")
 	_, _ = fmt.Fprintf(w, "  content_dir: ./path   # optional, local dir to copy to %s in VM\n", config.VMContentDir)
+	_, _ = fmt.Fprintf(w, "  (skills are flag-only; pass --skills-dir <path> to add skill markdown to the system prompt)\n")
 	_, _ = fmt.Fprintf(w, "  allowed_commands:     # optional, restrict VM commands\n")
 	_, _ = fmt.Fprintf(w, "    - apt\n")
 	_, _ = fmt.Fprintf(w, "    - git\n")
@@ -166,6 +168,7 @@ func run() int {
 		ignoreExisting bool
 		keep           bool
 		cmdOutputFile  string
+		skillsDir      string
 	)
 
 	flag.StringVar(&configPath, "config", "", "path to yaml config file (or positional arg)")
@@ -179,6 +182,7 @@ func run() int {
 	flag.BoolVar(&ignoreExisting, "i", false, "ignore that a VM with the given name exists already and run against that VM")
 	flag.BoolVar(&keep, "k", false, "keep the VM after execution rather than deleting it")
 	flag.StringVar(&cmdOutputFile, "cmd-output-file", "", "write a JSONL transcript of vm_exec commands and outputs to this file")
+	flag.StringVar(&skillsDir, "skills-dir", "", "path to a directory of skills (one subdirectory per skill, each with SKILL.md) appended to the system prompt")
 	flag.Bool("otel", false, "enable or disable OpenTelemetry logging (default: YAML otel.enabled or MPH_OTEL)")
 
 	flag.Usage = func() { printUsage(os.Stderr) }
@@ -211,6 +215,14 @@ func run() int {
 	})
 	if err != nil {
 		return fail(err)
+	}
+
+	if strings.TrimSpace(skillsDir) != "" {
+		clean, err := validation.SkillsDirPath(skillsDir)
+		if err != nil {
+			return fail(err)
+		}
+		cfg.SkillsDir = clean
 	}
 
 	var cmdOutput io.Writer
@@ -274,6 +286,7 @@ func run() int {
 		Str("vm", cfg.VM.Name).
 		Str("model", cfg.Model).
 		Str("dir", cfg.ContentDir).
+		Str("skills_dir", cfg.SkillsDir).
 		Int("cmds", len(cfg.AllowedCommandsList())).
 		Float64("temp", cfg.LLM.Temperature).
 		Float64("top_p", cfg.LLM.TopP).
