@@ -140,11 +140,7 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintf(w, "      environment: dev\n")
 	_, _ = fmt.Fprintf(w, "  output:               # optional, captured command output\n")
 	_, _ = fmt.Fprintf(w, "    enabled: true\n")
-	_, _ = fmt.Fprintf(w, "    mode: auto          # auto|always\n")
-	_, _ = fmt.Fprintf(w, "    inline_max_size: 0     # 0 = derive from tool-result budget\n")
-	_, _ = fmt.Fprintf(w, "    max_command_size: \"%dMiB\"\n", config.DefaultOutputMaxCommandBytes/(1<<20))
-	_, _ = fmt.Fprintf(w, "    max_total_size: \"%dMiB\"\n", config.DefaultOutputMaxTotalBytes/(1<<20))
-	_, _ = fmt.Fprintf(w, "    search_max_matches: %d\n", config.DefaultOutputSearchMatches)
+	_, _ = fmt.Fprintf(w, "    mode: auto          # auto = capture over the inline cutoff; always = capture every command\n")
 	_, _ = fmt.Fprintf(w, "  compaction:           # optional, conversation compaction\n")
 	_, _ = fmt.Fprintf(w, "    enabled: true\n")
 	_, _ = fmt.Fprintf(w, "    threshold: 0.8      # fraction of context window, (0.5, 0.95]\n")
@@ -329,7 +325,6 @@ func run() int {
 	outcome, err := harness.Start(ctx, agt, client, cfg, harness.Options{
 		IgnoreExisting: ignoreExisting,
 		Keep:           keep,
-		RunID:          ident.ID,
 		CmdOutput:      cmdOutput,
 	})
 	if err != nil {
@@ -368,9 +363,8 @@ func setupLogger(verbose, pretty bool) {
 }
 
 // runIdentity splits one run's identity into the three forms the codebase
-// needs: a bare uuid for output paths (a composite containing ":" would be an
-// invalid path), a self-describing composite for telemetry, and the bare
-// human-readable name.
+// needs: a bare uuid identifying the run, a self-describing composite for
+// telemetry, and the bare human-readable name.
 type runIdentity struct {
 	ID    string
 	Label string

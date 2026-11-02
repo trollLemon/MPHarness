@@ -38,6 +38,11 @@ const (
 	minToolResultBytes = 2 * 1024
 	maxToolResultBytes = 64 * 1024
 
+	// toolResultEnvelopeBytes is the JSON envelope wrapped around an inline
+	// tool result. Reserving it from the capture cutoff keeps a result just
+	// under the cutoff from exceeding the budget once enveloped.
+	toolResultEnvelopeBytes = 64
+
 	// assumedContextWindow is used when the model reports no window, so the
 	// budget is still bounded rather than falling back to an unbounded payload.
 	assumedContextWindow = 8192
@@ -143,7 +148,7 @@ type Agent struct {
 	chatTimeout   time.Duration    // Budget for one chat call; guards a stalled model.
 	totalTimeout  time.Duration    // Budget for the whole run; bounds every iteration.
 	llmConfig     config.LLMConfig // Sampling and output limits sent with each request.
-	runID         string           // Bare uuid: the output directory name.
+	runID         string           // Bare uuid identifying the run in logs.
 
 	conversation       []model.D     // Full message history, including tool results.
 	toolDocs           []model.D     // Tool schemas sent alongside every request.
@@ -203,7 +208,8 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *lxd.Client
 	a.toolResultBudget = toolResultBudgetBytes(conf, a.krn.ModelConfig().ContextWindow())
 
 	if conf.Output.Enabled {
-		a.store = output.NewStore(cli, conf.VM.Name, config.OutputRunDir(a.runID), conf.Output, int64(a.toolResultBudget))
+		cutoff := max(int64(a.toolResultBudget-toolResultEnvelopeBytes), 0)
+		a.store = output.NewStore(conf.Output, cutoff)
 	}
 
 	a.log.Info().Int("tools", len(a.toolDocs)).Msg("tool documents built")
@@ -513,7 +519,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 		case isEnvelope:
 			if env.Data.Result.Captured {
 				id := env.Data.Result.OutputID
-				otlp.LogEvent(ctx, a.log, zerolog.InfoLevel, "command output too large for inline context, captured to file", map[string]any{
+				otlp.LogEvent(ctx, a.log, zerolog.InfoLevel, "command output too large for inline context, captured to memory", map[string]any{
 					"tool":   tc.Function.Name,
 					"id":     tc.ID,
 					"out_id": id,
@@ -525,7 +531,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 		}
 
 		if a.toolResultBudget > 0 && resultSize > a.toolResultBudget {
-			content = buildContextOverflowContent(tc.Function.Name, resultSize, a.toolResultBudget, a.store != nil)
+			content = buildContextOverflowContent(tc.Function.Name, resultSize, a.toolResultBudget)
 			if err == nil {
 				err = fmt.Errorf("tool result too large: %d bytes over the %d-byte context budget", resultSize, a.toolResultBudget)
 				a.totals.ToolFailures++
@@ -629,17 +635,6 @@ func (a *Agent) schemaOverheadTokens(ctx context.Context) int64 {
 	return int64(a.estimateTokens(ctx, string(schemas)))
 }
 
-func outputHandleInfos(handles []output.Handle) []handleInfo {
-	infos := make([]handleInfo, 0, len(handles))
-	for _, h := range handles {
-		infos = append(infos, handleInfo{
-			ID: h.ID, TotalLines: h.TotalLines,
-			TotalBytes: h.TotalBytes, Command: h.Command,
-		})
-	}
-	return infos
-}
-
 // maybeCompact rewrites the conversation in place when the measured context has
 // reached the threshold. All state it reads and updates lives on the Agent.
 func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
@@ -650,10 +645,6 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
 	window := a.krn.ModelConfig().ContextWindow()
 	if !shouldCompact(a.contextTokens, int64(window), cc.Threshold) {
 		return
-	}
-	var infos []handleInfo
-	if a.store != nil {
-		infos = outputHandleInfos(a.store.Handles())
 	}
 
 	compCtx, span := otlp.Start(ctx, "mph.agent.compact")
@@ -669,7 +660,7 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
 	newConv, outcome, summaryLen, compactErr := func() ([]model.D, string, int, error) {
 		cancel := heartbeatWithCancel(heartbeatLog, "still compacting")
 		defer cancel()
-		return compactConversation(compCtx, a.conversation, infos, cc.MaxSummaryTokens, a.toolResultBudget, win, summarizer, a.compactionsApplied)
+		return compactConversation(compCtx, a.conversation, cc.MaxSummaryTokens, a.toolResultBudget, win, summarizer, a.compactionsApplied)
 	}()
 	duration := time.Since(start)
 
@@ -686,7 +677,7 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
 		a.contextTokens = after
 	}
 	compLog := a.log.With().Ctx(compCtx).Logger()
-	a.logCompaction(compCtx, compLog, cc, before, after, summaryBytes, len(infos), duration, outcome, compactErr)
+	a.logCompaction(compCtx, compLog, cc, before, after, summaryBytes, duration, outcome, compactErr)
 
 	switch outcome {
 	case "applied":
@@ -713,11 +704,11 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
 	}
 }
 
-func (a *Agent) logCompaction(ctx context.Context, log zerolog.Logger, cc config.CompactionConfig, before, after int64, summaryBytes, handles int, duration time.Duration, outcome string, compactErr error) {
+func (a *Agent) logCompaction(ctx context.Context, log zerolog.Logger, cc config.CompactionConfig, before, after int64, summaryBytes int, duration time.Duration, outcome string, compactErr error) {
 	fields := map[string]any{
 		"event": eventContextCompaction,
 		"iter":  a.iteration + 1, "outcome": outcome, "tok_before": before, "tok_after": after,
-		"reclaimed": before - after, "thr": cc.Threshold, "summary": summaryBytes, "handles": handles,
+		"reclaimed": before - after, "thr": cc.Threshold, "summary": summaryBytes,
 		"compacted": a.compactionsApplied,
 		"try":       a.compactionAttempts + 1, "dur_ms": duration.Milliseconds(),
 	}

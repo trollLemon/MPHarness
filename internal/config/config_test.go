@@ -689,49 +689,20 @@ func TestParseAgentOutputBudget(t *testing.T) {
 	}
 }
 
-func TestSizeParsing(t *testing.T) {
-	base := "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\n"
-	tests := []struct {
-		name    string
-		yaml    string
-		want    int64
-		wantErr bool
-	}{
-		{"mebibytes", base + "output:\n  max_command_size: 64MiB\n", 64 * 1024 * 1024, false},
-		{"larger mebibytes", base + "output:\n  max_command_size: 512MiB\n", 512 * 1024 * 1024, false},
-		{"gibibytes", base + "output:\n  max_command_size: 1GiB\n", 1024 * 1024 * 1024, false},
-		{"quoted bytes", base + "output:\n  max_command_size: \"1024\"\n", 1024, false},
-		{"empty string", base + "output:\n  max_command_size: \"\"\n", 0, false},
-		{"unquoted bytes", base + "output:\n  max_command_size: 1024\n", 1024, false},
-		{"unquoted zero", base + "output:\n  max_command_size: 0\n", 0, false},
-		{"negative bytes rejected", base + "output:\n  max_command_size: -1\n", 0, true},
-		{"unquoted overflow", base + "output:\n  max_command_size: 9223372036854775808\n", 0, true},
-		{"kilobytes are binary", base + "output:\n  max_command_size: 1024K\n", 1024 * 1024, false},
-		{"kilobyte suffix is binary", base + "output:\n  max_command_size: 1KB\n", 1024, false},
-		{"terabytes", base + "output:\n  max_command_size: 1T\n", 1 << 40, false},
-		{"fractional with unit", base + "output:\n  max_command_size: 1.5K\n", 1536, false},
-		{"fractional string bytes", base + "output:\n  max_command_size: \"1.5\"\n", 0, true},
-		{"unquoted fractional rejected", base + "output:\n  max_command_size: 1.5\n", 0, true},
-		{"overflow", base + "output:\n  max_command_size: \"99999999999999999999T\"\n", 0, true},
-		{"float overflow", base + "output:\n  max_command_size: \"9223372036854775808.0\"\n", 0, true},
-		{"invalid suffix", base + "output:\n  max_command_size: 10XB\n", 0, true},
+// Configs written for earlier versions still carry the removed output size
+// keys. They must load whatever their values are, because nothing interprets
+// them any more.
+func TestParseIgnoresRemovedOutputKeys(t *testing.T) {
+	yaml := "vm:\n  disk: 20G\n  ram: 4G\n  cpu: 2\nmodel: m\nprompt: p\n" +
+		"output:\n  mode: always\n  inline_max_size: 0\n  max_command_size: 10XB\n" +
+		"  max_total_size: -1\n  search_max_matches: -7\n"
+
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("legacy output keys must not fail the load: %v", err)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg, err := Parse([]byte(tt.yaml))
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("expected error for invalid size")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected err: %v", err)
-			}
-			if int64(cfg.Output.MaxCommandSize) != tt.want {
-				t.Errorf("got %d want %d", cfg.Output.MaxCommandSize, tt.want)
-			}
-		})
+	if !cfg.Output.Enabled || cfg.Output.Mode != "always" {
+		t.Fatalf("output = %+v, want enabled with mode always", cfg.Output)
 	}
 }
 
@@ -748,15 +719,6 @@ func TestParseOutputCompaction(t *testing.T) {
 			check: func(t *testing.T, cfg Config) {
 				if !cfg.Output.Enabled || cfg.Output.Mode != "auto" {
 					t.Errorf("output defaults: %+v", cfg.Output)
-				}
-				if cfg.Output.MaxCommandSize != DefaultOutputMaxCommandBytes {
-					t.Errorf("max_command_size %d", cfg.Output.MaxCommandSize)
-				}
-				if cfg.Output.MaxTotalSize != DefaultOutputMaxTotalBytes {
-					t.Errorf("max_total_size %d", cfg.Output.MaxTotalSize)
-				}
-				if cfg.Output.SearchMaxMatches != 200 {
-					t.Errorf("search_max_matches %d", cfg.Output.SearchMaxMatches)
 				}
 				if !cfg.Compaction.Enabled || cfg.Compaction.Threshold != 0.8 || cfg.Compaction.MaxSummaryTokens != 2048 {
 					t.Errorf("compaction defaults: %+v", cfg.Compaction)
@@ -787,15 +749,6 @@ func TestParseOutputCompaction(t *testing.T) {
 				}
 			},
 		},
-		{
-			name: "explicit zero size disables cap",
-			yaml: base + "output:\n  max_command_size: \"0\"\n  max_total_size: \"0\"\n",
-			check: func(t *testing.T, cfg Config) {
-				if cfg.Output.MaxCommandSize != 0 || cfg.Output.MaxTotalSize != 0 {
-					t.Errorf("explicit 0 must stay disabled, got %+v", cfg.Output)
-				}
-			},
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -821,48 +774,6 @@ func TestOutputValidation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if _, err := Parse([]byte(tt.yaml)); err == nil {
 				t.Errorf("expected validation error for %q", tt.yaml)
-			}
-		})
-	}
-}
-
-func TestSearchMaxMatchesZeroMeansUnlimited(t *testing.T) {
-	base := "vm:\n  name: vm\n  cpu: 1\n  ram: 1G\n  disk: 5G\nmodel: m\nprompt: p\noutput:\n  enabled: true\n"
-	tests := []struct {
-		name string
-		yaml string
-		want int
-	}{
-		{"omitted falls back to the default", base, DefaultOutputSearchMatches},
-		{"explicit zero is honoured", base + "  search_max_matches: 0\n", 0},
-		{"explicit value is honoured", base + "  search_max_matches: 7\n", 7},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg, err := Parse([]byte(tt.yaml))
-			if err != nil {
-				t.Fatalf("parse: %v", err)
-			}
-			if cfg.Output.SearchMaxMatches != tt.want {
-				t.Fatalf("search_max_matches %d want %d", cfg.Output.SearchMaxMatches, tt.want)
-			}
-		})
-	}
-}
-
-func TestOutputRunDir(t *testing.T) {
-	tests := []struct {
-		name    string
-		runID   string
-		wantDir string
-	}{
-		{"simple id", "run-123", "/tmp/mph-output/run-123"},
-		{"uuid id", "01a0ec35-3962-7a15-be5e-a9372f3401b7", "/tmp/mph-output/01a0ec35-3962-7a15-be5e-a9372f3401b7"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if dir := OutputRunDir(tt.runID); dir != tt.wantDir {
-				t.Fatalf("got %q want %q", dir, tt.wantDir)
 			}
 		})
 	}
@@ -905,7 +816,6 @@ otel:
 output:
   enabled: true
   mode: always
-  search_max_matches: 7
 compaction:
   enabled: true
   threshold: 0.7
@@ -945,7 +855,6 @@ compaction:
 		{"otel.service_name", cfg.Otel.ServiceName, "svc"},
 		{"output.enabled", cfg.Output.Enabled, true},
 		{"output.mode", cfg.Output.Mode, "always"},
-		{"output.search_max_matches", cfg.Output.SearchMaxMatches, 7},
 		{"compaction.enabled", cfg.Compaction.Enabled, true},
 		{"compaction.threshold", cfg.Compaction.Threshold, 0.7},
 	}
@@ -1126,6 +1035,7 @@ func TestNormalizeSize(t *testing.T) {
 		{"fractional bare bytes", "0.5", "", true},
 		{"fractional bare bytes above one", "1.5", "", true},
 		{"overflow", "99999999999999999999T", "", true},
+		{"float overflow", "9223372036854775808.0", "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

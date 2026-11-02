@@ -39,16 +39,6 @@ var (
 // The harness creates this path and transfers the local directory there before the agent starts.
 const VMContentDir = "/home/ubuntu/content"
 
-// OutputBaseDir is the host-side root for captured command output. One run owns
-// one subdirectory of it. The harness creates that subdirectory inside the VM
-// before the agent starts writing captures.
-const OutputBaseDir = "/tmp/mph-output"
-
-// OutputRunDir is the capture directory for one run.
-func OutputRunDir(runID string) string {
-	return OutputBaseDir + "/" + runID
-}
-
 // Agent defaults. Named so the help text in mph cannot drift from the values
 // applyDefaults actually installs.
 const (
@@ -71,13 +61,9 @@ const (
 	DefaultNudgeBytes         = 2000
 )
 
-// Output and compaction defaults. Copying this example unchanged gets current
-// behaviour plus the new features at their default settings.
+// Compaction defaults. Copying this example unchanged gets current behaviour
+// plus the new features at their default settings.
 const (
-	DefaultOutputMaxCommandBytes = 64 * 1024 * 1024
-	DefaultOutputMaxTotalBytes   = 512 * 1024 * 1024
-	DefaultOutputSearchMatches   = 200
-
 	DefaultCompactionThreshold   = 0.8
 	DefaultCompactionMaxTokens   = 2048
 	DefaultCompactionMaxAttempts = 3
@@ -273,7 +259,6 @@ type Duration time.Duration
 
 var (
 	durationType = reflect.TypeOf(Duration(0))
-	sizeType     = reflect.TypeOf(Size(0))
 )
 
 const (
@@ -349,50 +334,9 @@ type OtelConfig struct {
 	ResourceAttributes map[string]string `yaml:"resource_attributes"`
 }
 
-// Size is a byte count. It accepts a unit string such as "64MiB" or a bare
-// integer byte count such as 1024, and the empty string as zero. 0 means
-// "derive" for inline_max_size and "disabled" for the caps.
-type Size int64
-
-func sizeDecodeHook(_, to reflect.Type, data any) (any, error) {
-	if to != sizeType {
-		return data, nil
-	}
-	switch value := data.(type) {
-	case string:
-		n, err := parseSize(value)
-		if err != nil {
-			return nil, err
-		}
-		return Size(n), nil
-	case int:
-		return Size(value), nil
-	case int64:
-		return Size(value), nil
-	case uint64:
-		if value > math.MaxInt64 {
-			return nil, fmt.Errorf("size %d overflows", value)
-		}
-		return Size(value), nil
-	default:
-		return nil, fmt.Errorf("size must be a string like %q or a whole number of bytes, got %T", "64MiB", data)
-	}
-}
-
-func parseSize(s string) (int64, error) {
-	if strings.TrimSpace(s) == "" {
-		return 0, nil
-	}
-	return parseSizeBytes(s, true)
-}
-
 type OutputConfig struct {
-	Enabled          bool   `yaml:"enabled"`
-	Mode             string `yaml:"mode"`
-	InlineMaxSize    Size   `yaml:"inline_max_size"`
-	MaxCommandSize   Size   `yaml:"max_command_size"`
-	MaxTotalSize     Size   `yaml:"max_total_size"`
-	SearchMaxMatches int    `yaml:"search_max_matches"`
+	Enabled bool   `yaml:"enabled"`
+	Mode    string `yaml:"mode"`
 }
 
 func (o OutputConfig) Validate() error {
@@ -401,12 +345,6 @@ func (o OutputConfig) Validate() error {
 	}
 	if o.Mode != "auto" && o.Mode != "always" {
 		return fmt.Errorf("output.mode must be auto or always, got %q", o.Mode)
-	}
-	if o.SearchMaxMatches < 0 {
-		return fmt.Errorf("output.search_max_matches must be >= 0, got %d", o.SearchMaxMatches)
-	}
-	if o.InlineMaxSize < 0 || o.MaxCommandSize < 0 || o.MaxTotalSize < 0 {
-		return fmt.Errorf("output sizes must be >= 0")
 	}
 	return nil
 }
@@ -647,7 +585,7 @@ func unmarshalConf() koanf.UnmarshalConf {
 	return koanf.UnmarshalConf{
 		Tag: "yaml",
 		DecoderConfig: &mapstructure.DecoderConfig{
-			DecodeHook: mapstructure.ComposeDecodeHookFunc(durationDecodeHook, sizeDecodeHook, scalarDecodeHook),
+			DecodeHook: mapstructure.ComposeDecodeHookFunc(durationDecodeHook, scalarDecodeHook),
 		},
 	}
 }
@@ -747,11 +685,7 @@ func applyDefaults(k *koanf.Koanf, cfg *Config) {
 	defaultIfNotPositive(&cfg.Truncation.Nudge, DefaultNudgeBytes)
 
 	if !k.Exists("output") {
-		cfg.Output = OutputConfig{
-			Enabled: true, Mode: "auto",
-			MaxCommandSize: DefaultOutputMaxCommandBytes, MaxTotalSize: DefaultOutputMaxTotalBytes,
-			SearchMaxMatches: DefaultOutputSearchMatches,
-		}
+		cfg.Output = OutputConfig{Enabled: true, Mode: "auto"}
 	} else {
 		// A present block without `enabled:` opts in; only an explicit
 		// `enabled: false` opts out.
@@ -759,16 +693,6 @@ func applyDefaults(k *koanf.Koanf, cfg *Config) {
 			cfg.Output.Enabled = true
 		}
 		defaultIfZero(&cfg.Output.Mode, "auto")
-		if !k.Exists("output.max_command_size") {
-			defaultIfZero(&cfg.Output.MaxCommandSize, DefaultOutputMaxCommandBytes)
-		}
-		if !k.Exists("output.max_total_size") {
-			defaultIfZero(&cfg.Output.MaxTotalSize, DefaultOutputMaxTotalBytes)
-		}
-		// An explicit 0 disables the cap, so only default an absent key.
-		if !k.Exists("output.search_max_matches") {
-			defaultIfZero(&cfg.Output.SearchMaxMatches, DefaultOutputSearchMatches)
-		}
 	}
 
 	if !k.Exists("compaction") {

@@ -11,14 +11,6 @@ import (
 	"github.com/trollLemon/MPHarness/v2/internal/output"
 )
 
-type fakeOutputExec struct {
-	fn func(name, command string) (string, error)
-}
-
-func (f *fakeOutputExec) Exec(_ context.Context, name, command string) (string, error) {
-	return f.fn(name, command)
-}
-
 type toolEnvelope struct {
 	Status string `json:"status"`
 	Data   struct {
@@ -46,7 +38,7 @@ func TestToolSpecs(t *testing.T) {
 		wantPresent bool
 	}{
 		{"vm_exec always present", "vm_exec", "command", true, true},
-		{"capture flag on vm_exec", "vm_exec", "capture", true, true},
+		{"capture flag removed from vm_exec", "vm_exec", "capture", true, false},
 		{"output_search when enabled", "output_search", "output_id", true, true},
 		{"output_search pattern when enabled", "output_search", "pattern", true, true},
 		{"output_search omitted when disabled", "output_search", "output_id", false, false},
@@ -58,7 +50,6 @@ func TestToolSpecs(t *testing.T) {
 			cfg := config.Config{Output: config.OutputConfig{Enabled: tt.enabled}}
 			if tt.enabled {
 				cfg.Output.Mode = "auto"
-				cfg.Output.SearchMaxMatches = 200
 			}
 			var found *agent.Spec
 			for _, s := range agent.Specs(cfg) {
@@ -68,18 +59,16 @@ func TestToolSpecs(t *testing.T) {
 					break
 				}
 			}
-			if !tt.wantPresent {
-				if found != nil {
-					t.Fatalf("%s must be omitted when output.enabled=false", tt.tool)
+			if found == nil {
+				if tt.wantPresent {
+					t.Fatalf("missing %s", tt.tool)
 				}
 				return
 			}
-			if found == nil {
-				t.Fatalf("missing %s", tt.tool)
-			}
 			props, _ := found.Parameters["properties"].(map[string]any)
-			if _, ok := props[tt.prop]; !ok {
-				t.Fatalf("%s lacks %s: %v", tt.tool, tt.prop, found.Parameters)
+			_, hasProp := props[tt.prop]
+			if hasProp != tt.wantPresent {
+				t.Fatalf("%s property %q present = %v, want %v: %v", tt.tool, tt.prop, hasProp, tt.wantPresent, found.Parameters)
 			}
 		})
 	}
@@ -125,65 +114,64 @@ func TestTaskStatusSpec(t *testing.T) {
 func TestCallVMExecCapture(t *testing.T) {
 	tests := []struct {
 		name        string
+		mode        string
 		cutoff      int64
-		args        map[string]any
-		sizeOut     string
-		exitCode    string
+		vmOutput    string
 		wantCapture bool
 		wantSubs    []string
 	}{
 		{
-			name:        "always mode captures without flag",
-			cutoff:      10,
-			args:        map[string]any{"command": "echo hi"},
-			sizeOut:     "1000",
-			exitCode:    "0",
-			wantCapture: true,
+			name:        "auto mode small output below cutoff returns inline",
+			mode:        "auto",
+			cutoff:      100,
+			vmOutput:    "hello\n",
+			wantCapture: false,
+			wantSubs:    []string{"hello\n"},
 		},
 		{
-			name:        "inline nonzero exit reports code",
-			cutoff:      1 << 20,
-			args:        map[string]any{"command": "false", "capture": true},
-			sizeOut:     "5",
-			exitCode:    "3",
+			name:        "auto mode output over cutoff automatically returns handle",
+			mode:        "auto",
+			cutoff:      5,
+			vmOutput:    "line1\nline2\nline3\n",
+			wantCapture: true,
+			wantSubs:    []string{`"captured":true`, `"total_bytes":18`},
+		},
+		{
+			name:        "always mode captures even small output",
+			mode:        "always",
+			cutoff:      1000,
+			vmOutput:    "hi\n",
+			wantCapture: true,
+			wantSubs:    []string{`"captured":true`, `"total_bytes":3`},
+		},
+		{
+			name:        "empty output returns NoOutput sentinel",
+			mode:        "auto",
+			cutoff:      100,
+			vmOutput:    "",
 			wantCapture: false,
-			wantSubs:    []string{"(exit code: 3)"},
+			wantSubs:    []string{output.NoOutput},
 		},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := config.Config{
 				VM:     config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
 				Model:  "m",
 				Prompt: "p",
-				Output: config.OutputConfig{Enabled: true, Mode: "auto", MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200},
+				Output: config.OutputConfig{
+					Enabled: true, Mode: tt.mode,
+				},
 			}
-			if tt.wantCapture {
-				cfg.Output.Mode = "always"
-			}
-			f := &fakeOutputExec{fn: func(name, cmd string) (string, error) {
-				switch {
-				case strings.Contains(cmd, "df -P"):
-					return "99999999", nil
-				case strings.Contains(cmd, "mkdir"):
-					return "", nil
-				case strings.Contains(cmd, "__MPH_EXIT_"):
-					start := strings.Index(cmd, "__MPH_EXIT_")
-					rest := cmd[start:]
-					end := strings.Index(rest, ":")
-					return rest[:end+1] + tt.exitCode, nil
-				case strings.Contains(cmd, "wc -c"):
-					return tt.sizeOut, nil
-				case strings.Contains(cmd, "wc -l"):
-					return "50", nil
-				case strings.HasPrefix(strings.TrimSpace(cmd), "cat "):
-					return "oops", nil
-				default:
-					return "", nil
+			cli := newScriptedTestClient(t, func(command string) (string, int) {
+				if command == "echo test" {
+					return tt.vmOutput, 0
 				}
-			}}
-			store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, tt.cutoff)
-			got, err := agent.Call(context.Background(), nil, cfg, store, "vm_exec", tt.args)
+				return identityScripted(command)
+			})
+			store := output.NewStore(cfg.Output, tt.cutoff)
+			got, err := agent.Call(context.Background(), cli, cfg, store, "vm_exec", map[string]any{"command": "echo test"})
 			if err != nil {
 				t.Fatalf("call: %v", err)
 			}
@@ -200,143 +188,107 @@ func TestCallVMExecCapture(t *testing.T) {
 	}
 }
 
-func TestCallOutputSearchReportsAbsoluteLines(t *testing.T) {
+func TestCallOutputSearchAndReadRoundTrip(t *testing.T) {
 	tests := []struct {
 		name      string
-		grepLines string
-		grepExit  string
+		tool      string
+		args      func(id string) map[string]any
 		wantSubs  []string
 		wantNotIn []string
+		wantErr   bool
 	}{
 		{
-			name:      "flat line numbers, no chunk grouping",
-			grepLines: "1513:hit\n2000000:last",
-			grepExit:  "0",
-			wantSubs:  []string{`"matches":[1513,2000000]`, `"total_matches":2`, `"truncated":false`},
-			wantNotIn: []string{`"chunk"`, `"chunks_matched"`, `"lines"`},
+			name: "output_search returns matching lines",
+			tool: "output_search",
+			args: func(id string) map[string]any {
+				return map[string]any{"output_id": id, "pattern": `patch state:\s+applied`}
+			},
+			wantSubs:  []string{`"total_matches":1`, `"matches":["patch state:  applied"]`},
+			wantNotIn: []string{`"chunk"`, `"chunks_matched"`},
 		},
 		{
-			name:      "no match serializes an empty list",
-			grepExit:  "1",
+			name: "output_search with no match serializes empty matches array",
+			tool: "output_search",
+			args: func(id string) map[string]any {
+				return map[string]any{"output_id": id, "pattern": "absent"}
+			},
 			wantSubs:  []string{`"matches":[]`, `"total_matches":0`},
 			wantNotIn: []string{"null"},
 		},
+		{
+			name: "output_search rejects unknown output_id",
+			tool: "output_search",
+			args: func(string) map[string]any {
+				return map[string]any{"output_id": "does-not-exist", "pattern": "x"}
+			},
+			wantErr: true,
+		},
+		{
+			name: "output_read returns requested slice",
+			tool: "output_read",
+			args: func(id string) map[string]any {
+				return map[string]any{"output_id": id, "offset": json.Number("0"), "limit": json.Number("6")}
+			},
+			wantSubs: []string{`"offset":0`, `"length":6`, `"content":"kernel"`},
+		},
+		{
+			name: "output_read rejects unknown output_id",
+			tool: "output_read",
+			args: func(string) map[string]any {
+				return map[string]any{"output_id": "does-not-exist"}
+			},
+			wantErr: true,
+		},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := config.Config{
 				VM:     config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
 				Model:  "m",
 				Prompt: "p",
-				Output: config.OutputConfig{Enabled: true, Mode: "always", MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200},
+				Output: config.OutputConfig{
+					Enabled: true, Mode: "always",
+				},
 			}
-			f := &fakeOutputExec{fn: func(name, cmd string) (string, error) {
-				switch {
-				case strings.Contains(cmd, "__MPH_GREP_EXIT_"):
-					return tt.grepLines + "\n" + grepMarker(cmd) + tt.grepExit, nil
-				case strings.Contains(cmd, "grep -a -c"):
-					return "2", nil
-				case strings.Contains(cmd, "__MPH_EXIT_"):
-					return exitMarker(cmd) + "0", nil
-				case strings.Contains(cmd, "wc -c"):
-					return "1000", nil
-				case strings.Contains(cmd, "wc -l"):
-					return "2000000", nil
-				default:
-					return "", nil
+			cli := newScriptedTestClient(t, func(command string) (string, int) {
+				if command == "status" {
+					return "kernel: 5.15.0-25-generic\npatch state:  applied\nversion: 105.1\n", 0
 				}
-			}}
-			store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10)
-			id := capturedID(t, captureEnvelope(t, cfg, store))
-			res, err := agent.Call(context.Background(), nil, cfg, store, "output_search", map[string]any{
-				"output_id": id, "pattern": "hit",
+				return identityScripted(command)
 			})
+			store := output.NewStore(cfg.Output, 0)
+			capGot, err := agent.Call(context.Background(), cli, cfg, store, "vm_exec", map[string]any{"command": "status"})
 			if err != nil {
-				t.Fatalf("search: %v", err)
+				t.Fatalf("capture: %v", err)
+			}
+			env, ok := parseToolEnvelope(capGot)
+			if !ok || env.Data.Result.OutputID == "" {
+				t.Fatalf("expected capture envelope, got %q", capGot)
+			}
+
+			got, err := agent.Call(context.Background(), cli, cfg, store, tt.tool, tt.args(env.Data.Result.OutputID))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %s, got %q", tt.tool, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", tt.tool, err)
 			}
 			for _, want := range tt.wantSubs {
-				if !strings.Contains(res, want) {
-					t.Errorf("missing %q in %q", want, res)
+				if !strings.Contains(got, want) {
+					t.Errorf("missing %q in %q", want, got)
 				}
 			}
 			for _, absent := range tt.wantNotIn {
-				if strings.Contains(res, absent) {
-					t.Errorf("must not contain %q: %q", absent, res)
+				if strings.Contains(got, absent) {
+					t.Errorf("must not contain %q in %q", absent, got)
 				}
 			}
 		})
 	}
-}
-
-func TestCaptureSuccessContentHasNoChunkFields(t *testing.T) {
-	cfg := config.Config{
-		VM:     config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
-		Model:  "m",
-		Prompt: "p",
-		Output: config.OutputConfig{Enabled: true, Mode: "always", MaxCommandSize: 1 << 30, MaxTotalSize: 1 << 26, SearchMaxMatches: 200},
-	}
-	f := &fakeOutputExec{fn: func(name, cmd string) (string, error) {
-		switch {
-		case strings.Contains(cmd, "df -P"):
-			return "99999999", nil
-		case strings.Contains(cmd, "mkdir"):
-			return "", nil
-		case strings.Contains(cmd, "__MPH_EXIT_"):
-			return exitMarker(cmd) + "0", nil
-		case strings.Contains(cmd, "wc -c"):
-			return "7340032", nil
-		case strings.Contains(cmd, "wc -l"):
-			return "64000", nil
-		default:
-			return "", nil
-		}
-	}}
-	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10)
-	got := captureEnvelope(t, cfg, store)
-	for _, want := range []string{`"captured":true`, `"total_lines":64000`, `"total_bytes":7340032`} {
-		if !strings.Contains(got, want) {
-			t.Errorf("missing %q in %q", want, got)
-		}
-	}
-	for _, absent := range []string{"chunk", "chunks"} {
-		if strings.Contains(got, absent) {
-			t.Errorf("must not contain %q: %q", absent, got)
-		}
-	}
-}
-
-// captureEnvelope captures "echo hi" through the agent dispatcher and returns
-// the handle envelope, so a test can reuse the registered output_id.
-func captureEnvelope(t *testing.T, cfg config.Config, store *output.Store) string {
-	t.Helper()
-	got, err := agent.Call(context.Background(), nil, cfg, store, "vm_exec", map[string]any{"command": "echo hi"})
-	if err != nil {
-		t.Fatalf("capture: %v", err)
-	}
-	if env, ok := parseToolEnvelope(got); !ok || !env.Data.Result.Captured {
-		t.Fatalf("want capture envelope, got %q", got)
-	}
-	return got
-}
-
-func capturedID(t *testing.T, envelope string) string {
-	t.Helper()
-	env, ok := parseToolEnvelope(envelope)
-	if !ok {
-		t.Fatalf("want tool envelope, got %q", envelope)
-	}
-	return env.Data.Result.OutputID
-}
-
-// grepMarker extracts the per-capture exit marker the search command echoes.
-func grepMarker(cmd string) string { return markerIn(cmd, "__MPH_GREP_EXIT_") }
-
-// exitMarker extracts the per-capture exit marker the capture command echoes.
-func exitMarker(cmd string) string { return markerIn(cmd, "__MPH_EXIT_") }
-
-func markerIn(cmd, prefix string) string {
-	rest := cmd[strings.Index(cmd, prefix):]
-	return rest[:strings.Index(rest, ":")+1]
 }
 
 func TestCallNilStoreDisabled(t *testing.T) {
@@ -354,53 +306,6 @@ func TestCallNilStoreDisabled(t *testing.T) {
 				t.Fatalf("want disabled error for %s with nil store", tt.tool)
 			}
 		})
-	}
-}
-
-func TestCallOutputReadRoundTrip(t *testing.T) {
-	cfg := config.Config{
-		VM:     config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"},
-		Model:  "m",
-		Prompt: "p",
-		Output: config.OutputConfig{Enabled: true, Mode: "always", MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200},
-	}
-	f := &fakeOutputExec{fn: func(name, cmd string) (string, error) {
-		switch {
-		case strings.Contains(cmd, "df -P"):
-			return "99999999", nil
-		case strings.Contains(cmd, "mkdir"):
-			return "", nil
-		case strings.Contains(cmd, "__MPH_EXIT_"):
-			return exitMarker(cmd) + "0", nil
-		case strings.Contains(cmd, "wc -c"):
-			return "1000", nil
-		case strings.Contains(cmd, "wc -l"):
-			return "50", nil
-		case strings.Contains(cmd, "sed -n"):
-			return "line5\nline6\n", nil
-		default:
-			return "", nil
-		}
-	}}
-	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10)
-	capGot, err := agent.Call(context.Background(), nil, cfg, store, "vm_exec", map[string]any{"command": "echo hi"})
-	if err != nil {
-		t.Fatalf("capture: %v", err)
-	}
-	id := capturedID(t, capGot)
-	if id == "" {
-		t.Fatalf("no output_id in %q", capGot)
-	}
-	got, err := agent.Call(context.Background(), nil, cfg, store, "output_read", map[string]any{
-		"output_id": id, "offset": json.Number("5"), "limit": json.Number("2"),
-	})
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	for _, want := range []string{`"offset":5`, "line5", "line6", `"total_lines":50`} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("missing %q in %q", want, got)
-		}
 	}
 }
 
@@ -442,36 +347,6 @@ func TestCallExecDisallowedCommand(t *testing.T) {
 	}
 }
 
-func TestCallOutputSearchStoreError(t *testing.T) {
-	cfg := config.Config{Output: config.OutputConfig{Enabled: true, Mode: "auto", SearchMaxMatches: 200}}
-	f := &fakeOutputExec{fn: func(string, string) (string, error) { return "", nil }}
-	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10)
-	_, err := agent.Call(context.Background(), nil, cfg, store, "output_search", map[string]any{
-		"output_id": "does-not-exist", "pattern": "x",
-	})
-	if err == nil {
-		t.Fatal("want lookup error for an unknown output_id")
-	}
-}
-
-func TestCallExecCaptureError(t *testing.T) {
-	cfg := config.Config{
-		VM:     config.VMConfig{Name: "vm"},
-		Output: config.OutputConfig{Enabled: true, Mode: "auto", MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200},
-	}
-	f := &fakeOutputExec{fn: func(name, cmd string) (string, error) {
-		if strings.Contains(cmd, "df -P") {
-			return "0", nil
-		}
-		return "", nil
-	}}
-	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10)
-	_, err := agent.Call(context.Background(), nil, cfg, store, "vm_exec", map[string]any{"command": "echo hi", "capture": true})
-	if err == nil {
-		t.Fatal("want preflight error when there is no free space for the capture")
-	}
-}
-
 func TestCallExecNoStoreEmptyOutput(t *testing.T) {
 	cfg := config.Config{VM: config.VMConfig{Name: "vm"}, AllowedCommands: map[string]bool{"echo": true}}
 	cli := newScriptedTestClient(t, func(command string) (string, int) {
@@ -490,113 +365,5 @@ func TestCallExecNoStoreEmptyOutput(t *testing.T) {
 	}
 	if got != output.NoOutput {
 		t.Fatalf("got %q, want %q", got, output.NoOutput)
-	}
-}
-
-// callExec forwards Result.Inline with no empty-string fallback, so the capture
-// path must substitute output.NoOutput itself. output.TestCaptureNeverReturnsEmptyInline
-// pins the other half of this contract.
-func TestCallExecCaptureEmptyOutput(t *testing.T) {
-	cfg := config.Config{
-		VM:              config.VMConfig{Name: "vm"},
-		AllowedCommands: map[string]bool{"echo": true},
-		Output:          config.OutputConfig{Enabled: true, Mode: "auto", MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200},
-	}
-	f := &fakeOutputExec{fn: func(name, cmd string) (string, error) {
-		switch {
-		case strings.Contains(cmd, "df -P"):
-			return "99999999", nil
-		case strings.Contains(cmd, "__MPH_EXIT_"):
-			return exitMarker(cmd) + "0", nil
-		case strings.Contains(cmd, "wc -c"):
-			return "0", nil
-		default:
-			return "", nil
-		}
-	}}
-	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 4096)
-
-	got, err := agent.Call(context.Background(), nil, cfg, store, "vm_exec", map[string]any{"command": "echo", "capture": true})
-	if err != nil {
-		t.Fatalf("call: %v", err)
-	}
-	if got != output.NoOutput {
-		t.Fatalf("got %q, want %q", got, output.NoOutput)
-	}
-}
-
-func TestCallOutputReadCorrectsOffsetBelowOne(t *testing.T) {
-	cfg := config.Config{
-		VM:     config.VMConfig{Name: "vm"},
-		Output: config.OutputConfig{Enabled: true, Mode: "always", MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200},
-	}
-	f := &fakeOutputExec{fn: func(name, cmd string) (string, error) {
-		switch {
-		case strings.Contains(cmd, "df -P"):
-			return "99999999", nil
-		case strings.Contains(cmd, "mkdir"):
-			return "", nil
-		case strings.Contains(cmd, "__MPH_EXIT_"):
-			return exitMarker(cmd) + "0", nil
-		case strings.Contains(cmd, "wc -c"):
-			return "1000", nil
-		case strings.Contains(cmd, "wc -l"):
-			return "50", nil
-		case strings.Contains(cmd, "sed -n"):
-			return "line1\nline2\n", nil
-		default:
-			return "", nil
-		}
-	}}
-	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10)
-	id := capturedID(t, captureEnvelope(t, cfg, store))
-	got, err := agent.Call(context.Background(), nil, cfg, store, "output_read", map[string]any{"output_id": id, "offset": json.Number("0")})
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if !strings.Contains(got, `"offset":1`) {
-		t.Fatalf("offset below 1 must be corrected to 1, got %q", got)
-	}
-}
-
-func TestCallOutputReadPastEndReturnsEmptyLines(t *testing.T) {
-	cfg := config.Config{
-		VM:     config.VMConfig{Name: "vm"},
-		Output: config.OutputConfig{Enabled: true, Mode: "always", MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200},
-	}
-	f := &fakeOutputExec{fn: func(name, cmd string) (string, error) {
-		switch {
-		case strings.Contains(cmd, "df -P"):
-			return "99999999", nil
-		case strings.Contains(cmd, "mkdir"):
-			return "", nil
-		case strings.Contains(cmd, "__MPH_EXIT_"):
-			return exitMarker(cmd) + "0", nil
-		case strings.Contains(cmd, "wc -c"):
-			return "1000", nil
-		case strings.Contains(cmd, "wc -l"):
-			return "50", nil
-		default:
-			return "", nil
-		}
-	}}
-	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10)
-	id := capturedID(t, captureEnvelope(t, cfg, store))
-	got, err := agent.Call(context.Background(), nil, cfg, store, "output_read", map[string]any{"output_id": id, "offset": json.Number("1000")})
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if !strings.Contains(got, `"lines":[]`) {
-		t.Fatalf("a read past the end must serialize an empty lines array, got %q", got)
-	}
-}
-
-func TestCallOutputReadStoreError(t *testing.T) {
-	cfg := config.Config{Output: config.OutputConfig{Enabled: true, Mode: "auto", SearchMaxMatches: 200}}
-	f := &fakeOutputExec{fn: func(string, string) (string, error) { return "", nil }}
-	store := output.NewStore(f, "vm", "/tmp/mph-output/run1", cfg.Output, 10)
-	_, err := agent.Call(context.Background(), nil, cfg, store, "output_read", map[string]any{"output_id": "does-not-exist"})
-	if err == nil {
-		t.Fatal("want lookup error for an unknown output_id")
 	}
 }

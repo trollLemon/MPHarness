@@ -57,13 +57,13 @@ attach %{PRO_TOKEN}     # agent's command
 pro attach: bad token %{PRO_TOKEN}   # what the model sees back
 ```
 
-This matters most for captured output: `capture: true` redirects stdout to a raw file in the VM, and a later `output_read` carries no markers at all, yet a secret sitting in that file is still masked before the model sees it. The trade is deliberate: the agent cannot read back a secret it printed.
+This matters most for captured output: oversized output is captured after scrubbing, so a later `output_read` or `output_search` still carries the placeholder instead of the value. The trade is deliberate: the agent cannot read back a secret it printed.
 
 ## Scope and limitations
 
 - Substitution happens only inside commands run in the VM (`vm_exec` and the harness's own VM commands). `prompt`, `model`, `content_dir`, `otel.*`, `allowed_commands`, and the VM resource fields (`vm.name`, `vm.disk`, `vm.ram`, `vm.cpu`, `vm.image`) are never substituted. (`vm.kernel` is the exception: the harness installs it via a command run in the VM, so a marker there would be substituted.)
 - One source per run; there is no per-marker override.
-- The VM-side raw capture file still holds the secret on disk. Redaction stops it coming back through `mph`, not `mph` un-writing it: any command the agent runs in the VM (`cat`, `env`) can still read what was printed there.
+- Redaction only masks what comes back through `mph`; it does not un-write anything in the VM. Anything the command printed inside the VM (a file it wrote, `env` output) still holds the real value, and any command the agent runs there (`cat`, `env`) can read it.
 
 ## Related
 

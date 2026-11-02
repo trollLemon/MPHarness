@@ -1171,7 +1171,6 @@ func TestInstallKernel(t *testing.T) {
 			}
 			replies["sudo apt-get update && sudo apt-get install -y "+kernelPkg] = reply{}
 			replies[grubCmd] = reply{}
-			replies["sudo systemctl reboot --no-block"] = reply{}
 			replies["uname -r"] = reply{out: tt.kernelOut}
 			exec := commandReplies(replies)
 			server.exec = func(name string, post api.InstanceExecPost, args *lxdclient.InstanceExecArgs) (lxdclient.Operation, error) {
@@ -1182,21 +1181,17 @@ func TestInstallKernel(t *testing.T) {
 				mu.Unlock()
 				return exec(name, post, args)
 			}
-			polls := 0
-			server.getInstanceState = func(string) (*api.InstanceState, string, error) {
+			server.updateInstanceState = func(_ string, state api.InstanceStatePut, _ string) (lxdclient.Operation, error) {
 				mu.Lock()
-				defer mu.Unlock()
-				polls++
-				events = append(events, "state")
-				status := api.Running
-				if polls > 1 {
-					status = api.Stopped
-				}
-				return &api.InstanceState{StatusCode: status}, "", nil
+				events = append(events, "action:"+state.Action)
+				mu.Unlock()
+				return fakeOperation{}, nil
 			}
 			client := newTestClient(server, nil)
 
-			err := client.InstallKernel(context.Background(), "vm", kernelPkg)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			err := client.InstallKernel(ctx, "vm", kernelPkg)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("InstallKernel error = %v, want %q", err, tt.wantErr)
@@ -1205,67 +1200,72 @@ func TestInstallKernel(t *testing.T) {
 				t.Fatalf("InstallKernel: %v", err)
 			}
 
-			grub, reboot, down, ready, uname := -1, -1, -1, -1, -1
+			grub, restart, ready, uname := -1, -1, -1, -1
 			for i, event := range events {
 				switch event {
 				case "exec:" + grubCmd:
 					grub = i
-				case "exec:sudo systemctl reboot --no-block":
-					reboot = i
-				case "state":
-					if down == -1 {
-						down = i
-					}
+				case "action:restart":
+					restart = i
 				case "exec:echo ready":
 					if ready == -1 {
 						ready = i
 					}
 				case "exec:uname -r":
 					uname = i
+				case "exec:sudo systemctl reboot --no-block":
+					t.Error("kernel install must restart through LXD, not ask the guest to reboot itself")
 				}
 			}
-			if grub == -1 || reboot == -1 || down == -1 || ready == -1 || uname == -1 {
-				t.Fatalf("events = %v, want grub, reboot, state poll, readiness poll and uname", events)
+			if grub == -1 || restart == -1 || ready == -1 || uname == -1 {
+				t.Fatalf("events = %v, want grub, restart action, readiness poll and uname", events)
 			}
-			if grub >= reboot || reboot >= down || down >= ready || ready >= uname {
-				t.Fatalf("events = %v, want grub < reboot < down wait < readiness < uname", events)
+			if grub >= restart || restart >= ready || ready >= uname {
+				t.Fatalf("events = %v, want grub < restart < readiness < uname", events)
 			}
-			if polls < 2 {
-				t.Fatalf("instance state polled %d times, want running then down", polls)
+			for _, action := range server.actions {
+				if action.Action != "restart" {
+					continue
+				}
+				if action.Force {
+					t.Error("restart must not force: a forced stop can corrupt the guest mid-write")
+				}
+				if action.Timeout <= 0 {
+					t.Errorf("restart timeout = %d, want a bounded graceful shutdown", action.Timeout)
+				}
 			}
 		})
 	}
 }
 
-func TestInstallKernelFailsWhenGuestDoesNotGoDown(t *testing.T) {
+func TestInstallKernelFailsWhenRestartFails(t *testing.T) {
 	const (
 		kernelPkg = "linux-image-6.8.0-51-generic"
 		grubCmd   = `printf 'GRUB_DEFAULT="Advanced options for Ubuntu>Ubuntu, with Linux 6.8.0-51-generic"\nGRUB_FORCE_PARTUUID=""\n' | sudo tee /etc/default/grub.d/99-mph-kernel.cfg >/dev/null && sudo update-grub`
 	)
 
 	server := &fakeServer{}
-	replies := make(map[string]reply, len(identityReplies)+3)
+	replies := make(map[string]reply, len(identityReplies)+2)
 	for k, v := range identityReplies {
 		replies[k] = v
 	}
 	replies["sudo apt-get update && sudo apt-get install -y "+kernelPkg] = reply{}
 	replies[grubCmd] = reply{}
-	replies["sudo systemctl reboot --no-block"] = reply{}
 	server.exec = commandReplies(replies)
-	server.getInstanceState = func(string) (*api.InstanceState, string, error) {
-		return &api.InstanceState{StatusCode: api.Running}, "", nil
+	server.updateInstanceState = func(string, api.InstanceStatePut, string) (lxdclient.Operation, error) {
+		return nil, errors.New("instance is busy")
 	}
 	client := newTestClient(server, nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	err := client.InstallKernel(ctx, "vm", kernelPkg)
-	if err == nil || !strings.Contains(err.Error(), "did not shut down for reboot") {
-		t.Fatalf("InstallKernel error = %v, want a down-wait timeout", err)
+	if err == nil || !strings.Contains(err.Error(), "restart") {
+		t.Fatalf("InstallKernel error = %v, want a restart failure", err)
 	}
 	for _, post := range server.posts() {
 		if len(post.Command) == 3 && (post.Command[2] == "echo ready" || post.Command[2] == "uname -r") {
-			t.Fatalf("InstallKernel ran %q after the guest failed to go down", post.Command[2])
+			t.Fatalf("InstallKernel ran %q after the restart failed", post.Command[2])
 		}
 	}
 }
