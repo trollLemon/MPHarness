@@ -3,14 +3,19 @@ package otlp_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	otellog "go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	. "github.com/trollLemon/MPHarness/v2/internal/otlp"
 )
@@ -84,8 +89,8 @@ func TestSetup(t *testing.T) {
 				}
 				return
 			}
-			if got := otel.GetTracerProvider(); got != origTP {
-				t.Fatalf("tracer provider installed; mph exports no traces")
+			if _, ok := otel.GetTracerProvider().(*sdktrace.TracerProvider); !ok {
+				t.Fatalf("unexpected tracer provider type %T", otel.GetTracerProvider())
 			}
 			if got := otel.GetMeterProvider(); got != origMP {
 				t.Fatalf("meter provider installed; mph exports no metrics")
@@ -97,9 +102,39 @@ func TestSetup(t *testing.T) {
 	}
 }
 
+func TestStartEnd(t *testing.T) {
+	origTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(origTP)
+
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
+	otel.SetTracerProvider(tp)
+
+	ctx, parent := Start(context.Background(), "parent", attribute.Int("n", 1))
+	childErr := errors.New("boom")
+	_, child := Start(ctx, "child")
+	End(child, &childErr)
+	End(parent, nil)
+
+	spans := exp.GetSpans()
+	if len(spans) != 2 {
+		t.Fatalf("spans = %d, want 2", len(spans))
+	}
+	if spans[0].Name != "child" || spans[0].Status.Code != codes.Error || spans[0].Parent.SpanID() != spans[1].SpanContext.SpanID() {
+		t.Fatalf("unexpected child span: %+v", spans[0])
+	}
+	if spans[1].Name != "parent" || spans[1].Status.Code == codes.Error {
+		t.Fatalf("unexpected parent span: %+v", spans[1])
+	}
+}
+
 func TestHookRun(t *testing.T) {
+	origTP := otel.GetTracerProvider()
 	origLP := otel.GetLoggerProvider()
-	defer otel.SetLoggerProvider(origLP)
+	defer func() {
+		otel.SetTracerProvider(origTP)
+		otel.SetLoggerProvider(origLP)
+	}()
 
 	// The hook only needs a real LoggerProvider, which Setup installs offline, so
 	// the returned shutdown is never called and no socket is opened. See
@@ -229,6 +264,12 @@ func TestPayloadKeysMatchEmittedKeys(t *testing.T) {
 }
 
 func TestSetupAddsRunNameResourceAttribute(t *testing.T) {
+	origTP := otel.GetTracerProvider()
+	origLP := otel.GetLoggerProvider()
+	defer func() {
+		otel.SetTracerProvider(origTP)
+		otel.SetLoggerProvider(origLP)
+	}()
 	shutdown, err := Setup(t.Context(), Config{
 		Enabled:     true,
 		Endpoint:    DefaultEndpoint,
@@ -239,5 +280,7 @@ func TestSetupAddsRunNameResourceAttribute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
-	t.Cleanup(func() { _ = shutdown(t.Context()) })
+	if shutdown == nil {
+		t.Fatalf("shutdown nil")
+	}
 }

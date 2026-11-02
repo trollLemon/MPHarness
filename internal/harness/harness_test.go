@@ -4,11 +4,25 @@ import (
 	"bufio"
 	"context"
 	"errors"
-	. "github.com/trollLemon/MPHarness/v2/internal/harness"
 	"io"
 	"strings"
 	"testing"
+
+	lxdclient "github.com/canonical/lxd/client"
+	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+
+	"github.com/trollLemon/MPHarness/v2/internal/config"
+	. "github.com/trollLemon/MPHarness/v2/internal/harness"
+	"github.com/trollLemon/MPHarness/v2/internal/lxd"
 )
+
+type fakeServer struct {
+	lxdclient.InstanceServer
+}
 
 func TestOutputRunDirCommand(t *testing.T) {
 	cmd := OutputRunDirCommand("run-123")
@@ -154,5 +168,29 @@ func TestWriteCommandHistory(t *testing.T) {
 				t.Fatalf("flush context deadline present = %v, want %v", hist.gotDeadline, tt.wantDeadline)
 			}
 		})
+	}
+}
+
+func TestStartRootSpan(t *testing.T) {
+	origTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(origTP)
+
+	exp := tracetest.NewInMemoryExporter()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp)))
+
+	cfg := config.Config{VM: config.VMConfig{Name: ""}, Prompt: "task"}
+	if _, err := Start(context.Background(), nil, lxd.NewWithServer(fakeServer{}, zerolog.Nop(), nil), cfg, Options{}); err == nil {
+		t.Fatal("Start expected error with empty VM name")
+	}
+
+	spans := exp.GetSpans()
+	if len(spans) != 2 || spans[0].Name != "vm.info" || spans[1].Name != "mph.run" {
+		t.Fatalf("spans = %v, want [vm.info, mph.run]", spans)
+	}
+	if spans[0].Parent.SpanID() != spans[1].SpanContext.SpanID() {
+		t.Fatalf("vm.info parent = %v, want mph.run %v", spans[0].Parent.SpanID(), spans[1].SpanContext.SpanID())
+	}
+	if spans[1].Status.Code != codes.Error {
+		t.Fatalf("mph.run status = %v, want Error", spans[1].Status.Code)
 	}
 }

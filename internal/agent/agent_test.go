@@ -14,6 +14,10 @@ import (
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"pgregory.net/rapid"
 
 	"github.com/trollLemon/MPHarness/v2/internal/agent"
@@ -2198,4 +2202,62 @@ func toolResultFor(t testFatal, req model.D, tool string) string {
 	}
 	t.Fatalf("request has no %q tool result", tool)
 	return ""
+}
+
+func TestAgentLoopSpans(t *testing.T) {
+	origTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(origTP)
+
+	exp := tracetest.NewInMemoryExporter()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp)))
+
+	runScenario(t, loopScenario{
+		maxIterations: 2,
+		window:        4096,
+		compaction:    config.CompactionConfig{Enabled: true, Threshold: 0.5, MaxSummaryTokens: 512, MaxAttempts: 3},
+		responses: []loopResponse{
+			{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{vmExecCall("c1", "echo x")}, usage: totalUsage(3000)},
+			{finishReason: model.FinishReasonTool, toolCalls: []model.ResponseToolCall{taskStatusCall("ts", agent.TaskStatusCompleted, "done")}, usage: totalUsage(100)},
+		},
+		llm: defaultLLMConfig(),
+	})
+
+	byName := map[string][]tracetest.SpanStub{}
+	for _, s := range exp.GetSpans() {
+		byName[s.Name] = append(byName[s.Name], s)
+	}
+	iters := byName["mph.agent.iteration"]
+	if len(iters) != 2 {
+		t.Fatalf("iteration spans = %d, want 2 (all: %v)", len(iters), exp.GetSpans())
+	}
+	if len(byName["mph.agent.chat"]) != 2 || len(byName["vm.exec"]) != 1 || len(byName["mph.agent.compact"]) != 1 || len(byName["mph.agent.compact.chat"]) != 1 {
+		t.Fatalf("unexpected span counts: chat=%d exec=%d compact=%d compact.chat=%d",
+			len(byName["mph.agent.chat"]), len(byName["vm.exec"]), len(byName["mph.agent.compact"]), len(byName["mph.agent.compact.chat"]))
+	}
+	iter0, iter1 := iters[0].SpanContext.SpanID(), iters[1].SpanContext.SpanID()
+	if byName["vm.exec"][0].Parent.SpanID() != iter0 {
+		t.Fatalf("exec parent = %v, want iter 1 %v", byName["vm.exec"][0].Parent.SpanID(), iter0)
+	}
+	compact := byName["mph.agent.compact"][0]
+	if compact.Parent.SpanID() != iter1 {
+		t.Fatalf("compact parent = %v, want iter 2 %v", compact.Parent.SpanID(), iter1)
+	}
+	if byName["mph.agent.compact.chat"][0].Parent.SpanID() != compact.SpanContext.SpanID() {
+		t.Fatalf("compact.chat parent = %v, want compact %v", byName["mph.agent.compact.chat"][0].Parent.SpanID(), compact.SpanContext.SpanID())
+	}
+
+	exp.Reset()
+	runScenario(t, loopScenario{
+		maxIterations: 1,
+		window:        4096,
+		chatFunc: func(context.Context, model.D) (model.ChatResponse, error) {
+			return model.ChatResponse{}, errors.New("backend down")
+		},
+		llm: defaultLLMConfig(),
+	})
+	for _, s := range exp.GetSpans() {
+		if (s.Name == "mph.agent.iteration" || s.Name == "mph.agent.chat") && s.Status.Code != codes.Error {
+			t.Fatalf("span %s status = %v, want Error", s.Name, s.Status.Code)
+		}
+	}
 }

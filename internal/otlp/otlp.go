@@ -3,6 +3,7 @@ package otlp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -13,10 +14,14 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	otellog "go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type ctxKey string
@@ -34,6 +39,7 @@ const (
 // Exporter and batcher tunables.
 const (
 	exporterTimeout = 10 * time.Second
+	batchTimeout    = 2 * time.Second
 	exportTimeout   = 5 * time.Second
 	logInterval     = 1 * time.Second
 )
@@ -92,12 +98,27 @@ func Setup(ctx context.Context, cfg Config) (func(context.Context) error, error)
 		return nil, err
 	}
 
+	traceExp, err := otlptracegrpc.New(ctx,
+		otlptracegrpc.WithEndpoint(cfg.Endpoint),
+		otlptracegrpc.WithInsecure(),
+		otlptracegrpc.WithTimeout(exporterTimeout),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(traceExp, sdktrace.WithBatchTimeout(batchTimeout), sdktrace.WithExportTimeout(exportTimeout)),
+		sdktrace.WithResource(res),
+	)
+
 	logExp, err := otlploggrpc.New(ctx,
 		otlploggrpc.WithEndpoint(cfg.Endpoint),
 		otlploggrpc.WithInsecure(),
 		otlploggrpc.WithTimeout(exporterTimeout),
 	)
 	if err != nil {
+		_ = tp.Shutdown(ctx)
 		return nil, err
 	}
 
@@ -108,9 +129,24 @@ func Setup(ctx context.Context, cfg Config) (func(context.Context) error, error)
 		)),
 		sdklog.WithResource(res),
 	)
+	otel.SetTracerProvider(tp)
 	otel.SetLoggerProvider(lp)
 
-	return lp.Shutdown, nil
+	return func(ctx context.Context) error {
+		return errors.Join(tp.Shutdown(ctx), lp.Shutdown(ctx))
+	}, nil
+}
+
+func Start(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	return otel.Tracer("mph").Start(ctx, name, trace.WithAttributes(attrs...))
+}
+
+func End(span trace.Span, err *error) {
+	if err != nil && *err != nil {
+		span.RecordError(*err)
+		span.SetStatus(codes.Error, (*err).Error())
+	}
+	span.End()
 }
 
 type Hook struct {

@@ -15,6 +15,7 @@ import (
 	"github.com/trollLemon/MPHarness/v2/internal/agent"
 	"github.com/trollLemon/MPHarness/v2/internal/config"
 	"github.com/trollLemon/MPHarness/v2/internal/lxd"
+	"github.com/trollLemon/MPHarness/v2/internal/otlp"
 	"github.com/trollLemon/MPHarness/v2/internal/validation"
 )
 
@@ -92,7 +93,10 @@ func scanSkillsDir(dir string) error {
 	return nil
 }
 
-func Start(ctx context.Context, agt *agent.Agent, client *lxd.Client, cfg config.Config, opts Options) (*agent.TaskStatusOutcome, error) {
+func Start(ctx context.Context, agt *agent.Agent, client *lxd.Client, cfg config.Config, opts Options) (_ *agent.TaskStatusOutcome, err error) {
+	ctx, span := otlp.Start(ctx, "mph.run")
+	defer otlp.End(span, &err)
+
 	_, infoErr := client.Info(ctx, cfg.VM.Name)
 	existing := infoErr == nil
 	switch {

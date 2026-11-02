@@ -21,6 +21,10 @@ import (
 	lxdclient "github.com/canonical/lxd/client"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/trollLemon/MPHarness/v2/internal/config"
 	"github.com/trollLemon/MPHarness/v2/internal/secrets"
@@ -1143,7 +1147,10 @@ func TestLaunchSecureBootConfig(t *testing.T) {
 }
 
 func TestInstallKernel(t *testing.T) {
-	const kernelPkg = "linux-image-unsigned-6.8.0-51-generic"
+	const (
+		kernelPkg = "linux-image-unsigned-6.8.0-51-generic"
+		grubCmd   = `printf 'GRUB_DEFAULT="Advanced options for Ubuntu>Ubuntu, with Linux 6.8.0-51-generic"\nGRUB_FORCE_PARTUUID=""\n' | sudo tee /etc/default/grub.d/99-mph-kernel.cfg >/dev/null && sudo update-grub`
+	)
 
 	tests := []struct {
 		name      string
@@ -1163,7 +1170,7 @@ func TestInstallKernel(t *testing.T) {
 				replies[k] = v
 			}
 			replies["sudo apt-get update && sudo apt-get install -y "+kernelPkg] = reply{}
-			replies["sudo update-grub"] = reply{}
+			replies[grubCmd] = reply{}
 			replies["sudo systemctl reboot --no-block"] = reply{}
 			replies["uname -r"] = reply{out: tt.kernelOut}
 			exec := commandReplies(replies)
@@ -1198,9 +1205,11 @@ func TestInstallKernel(t *testing.T) {
 				t.Fatalf("InstallKernel: %v", err)
 			}
 
-			reboot, down, ready, uname := -1, -1, -1, -1
+			grub, reboot, down, ready, uname := -1, -1, -1, -1, -1
 			for i, event := range events {
 				switch event {
+				case "exec:" + grubCmd:
+					grub = i
 				case "exec:sudo systemctl reboot --no-block":
 					reboot = i
 				case "state":
@@ -1215,11 +1224,11 @@ func TestInstallKernel(t *testing.T) {
 					uname = i
 				}
 			}
-			if reboot == -1 || down == -1 || ready == -1 || uname == -1 {
-				t.Fatalf("events = %v, want reboot, state poll, readiness poll and uname", events)
+			if grub == -1 || reboot == -1 || down == -1 || ready == -1 || uname == -1 {
+				t.Fatalf("events = %v, want grub, reboot, state poll, readiness poll and uname", events)
 			}
-			if reboot >= down || down >= ready || ready >= uname {
-				t.Fatalf("events = %v, want reboot < down wait < readiness < uname", events)
+			if grub >= reboot || reboot >= down || down >= ready || ready >= uname {
+				t.Fatalf("events = %v, want grub < reboot < down wait < readiness < uname", events)
 			}
 			if polls < 2 {
 				t.Fatalf("instance state polled %d times, want running then down", polls)
@@ -1229,7 +1238,10 @@ func TestInstallKernel(t *testing.T) {
 }
 
 func TestInstallKernelFailsWhenGuestDoesNotGoDown(t *testing.T) {
-	const kernelPkg = "linux-image-6.8.0-51-generic"
+	const (
+		kernelPkg = "linux-image-6.8.0-51-generic"
+		grubCmd   = `printf 'GRUB_DEFAULT="Advanced options for Ubuntu>Ubuntu, with Linux 6.8.0-51-generic"\nGRUB_FORCE_PARTUUID=""\n' | sudo tee /etc/default/grub.d/99-mph-kernel.cfg >/dev/null && sudo update-grub`
+	)
 
 	server := &fakeServer{}
 	replies := make(map[string]reply, len(identityReplies)+3)
@@ -1237,7 +1249,7 @@ func TestInstallKernelFailsWhenGuestDoesNotGoDown(t *testing.T) {
 		replies[k] = v
 	}
 	replies["sudo apt-get update && sudo apt-get install -y "+kernelPkg] = reply{}
-	replies["sudo update-grub"] = reply{}
+	replies[grubCmd] = reply{}
 	replies["sudo systemctl reboot --no-block"] = reply{}
 	server.exec = commandReplies(replies)
 	server.getInstanceState = func(string) (*api.InstanceState, string, error) {
@@ -1617,5 +1629,34 @@ func TestWriteCommandHistoryErrors(t *testing.T) {
 				t.Fatalf("writes = %d, want %d", counter.writes, tt.wantWrites)
 			}
 		})
+	}
+}
+
+func TestExecSpan(t *testing.T) {
+	origTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(origTP)
+
+	exp := tracetest.NewInMemoryExporter()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp)))
+
+	server := &fakeServer{exec: commandReplies(repliesWithIdentity(map[string]reply{
+		"echo ok":   {out: "ok\n"},
+		"echo fail": {out: "boom\n", exit: 1},
+	}))}
+	client := newTestClient(server, nil)
+
+	if _, err := client.Exec(context.Background(), "vm", "echo ok"); err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if _, err := client.Exec(context.Background(), "vm", "echo fail"); err == nil {
+		t.Fatal("Exec expected error")
+	}
+
+	spans := exp.GetSpans()
+	if len(spans) != 2 || spans[0].Name != "vm.exec" || spans[1].Name != "vm.exec" {
+		t.Fatalf("spans = %v, want 2 vm.exec", spans)
+	}
+	if spans[0].Status.Code == codes.Error || spans[1].Status.Code != codes.Error {
+		t.Fatalf("statuses = (%v, %v), want (Unset, Error)", spans[0].Status.Code, spans[1].Status.Code)
 	}
 }

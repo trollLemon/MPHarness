@@ -1,6 +1,6 @@
 # Enable OpenTelemetry in MPHarness
 
-OTel is **disabled by default**; when off, `mph` has zero behavioural change and near-zero overhead. When enabled it exports **logs** over OTLP/gRPC (default `localhost:4317`) to any OTLP collector.
+OTel is **disabled by default**; when off, `mph` has zero behavioural change and near-zero overhead. When enabled it exports **logs and traces** over OTLP/gRPC (default `localhost:4317`) to any OTLP collector.
 
 This page covers the three ways to enable it, the precedence rules, the bundled observability stack, and how to verify the setup.
 
@@ -77,19 +77,21 @@ make otel-down  # stop it, keep the data
 ### Topology
 
 ```text
-mph ──OTLP/gRPC :4317──▶ otel-collector ──logs──▶ Loki ──▶ Grafana :3000
+mph --OTLP/gRPC :4317--> otel-collector --logs----> Loki  --> Grafana :3000
+                                        --traces--> Tempo --> Grafana :3000 (Explore)
 ```
 
-`docker-compose/collector-config.yaml` routes logs that way and also prints everything to the collector's own stdout via the `debug` exporter, which is the fastest way to confirm data is arriving before worrying about a UI.
+`docker-compose/collector-config.yaml` routes logs to Loki and traces to Tempo, and also prints everything to the collector's own stdout via the `debug` exporter, which is the fastest way to confirm data is arriving before worrying about a UI.
 
 ### Services
 
 | Service | Port | Purpose |
 |---|---|---|
-| `otel-collector` | 4317 | OTLP/gRPC receiver, forwards logs to Loki |
+| `otel-collector` | 4317 | OTLP/gRPC receiver, forwards logs to Loki and traces to Tempo |
 | `grafana` | 3000 | Dashboards (admin/admin) and Explore |
 | `prometheus` | 9090 | Collector self-telemetry only (receiver/exporter health panels); `mph` exports no metrics |
 | `loki` | 3100 | Log storage, pushed to by the collector's `loki` exporter |
+| `tempo` | 3200 | Trace storage, pushed to by the collector's `otlp/tempo` exporter (view in Explore) |
 
 ### Dashboard
 
@@ -218,12 +220,12 @@ Any value of `0` or less is replaced by the default in `config.DefaultCommandOut
 
 ## 6. Where it lives in code
 
-- `internal/otlp/otlp.go`: `Config`, `Setup` (creates the `otlploggrpc` exporter and logger provider, installs `global.SetLoggerProvider`), returns `shutdown`, `Hook` (zerolog → `otellog.Record`), and `LogEvent` (structured fields to both zerolog and OTLP).
+- `internal/otlp/otlp.go`: `Config`, `Setup` (creates the OTLP log and trace exporters and providers), returns `shutdown`, `Start`/`End` span helpers, `Hook` (zerolog to `otellog.Record`), and `LogEvent` (structured fields to both zerolog and OTLP).
 - `internal/config/config.go`: `OtelConfig`, `TruncationConfig`, YAML/env/flag merging via `LoadFileWithSources`, and the default constants.
 - `mph/main.go`: `--otel` flag, `resolveOtelConfig` (defaults and `otlp.Config` mapping), `otlp.Setup`, and `log.Logger.Hook(NewHook("mph"))` with a deferred shutdown.
-- `internal/lxd/lxd.go`: LXD operations and command execution; no tracing.
-- `internal/harness/harness.go`: VM lifecycle orchestration; no tracing.
-- `internal/agent/agent.go`: `Execute` (ctx threaded from harness), the length-limit nudge, and the `token_usage`/`iteration`/tool log events.
+- `internal/lxd/lxd.go`: LXD operations and command execution (`vm.*` spans on public methods).
+- `internal/harness/harness.go`: VM lifecycle orchestration (`mph.run` root span).
+- `internal/agent/agent.go`: `Execute` (`mph.agent.iteration`, `mph.agent.chat`, `mph.agent.compact`, `mph.agent.compact.chat`), the length-limit nudge, and the `token_usage`/`iteration`/tool log events.
 - `internal/agent/compaction.go`: the `context_compaction`/`context_compaction_applied` events.
 - `internal/agent/run_summary.go`: the run outcome and the `run_summary` event.
 - `internal/agent/model.go`: `zerologAdapter` maps kronk SDK messages onto zerolog.

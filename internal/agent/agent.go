@@ -10,6 +10,7 @@ import (
 
 	"github.com/ardanlabs/kronk/sdk/kronk/model"
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/trollLemon/MPHarness/v2/internal/config"
 	"github.com/trollLemon/MPHarness/v2/internal/lxd"
@@ -212,9 +213,12 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *lxd.Client
 		// Counted before the round runs, so an iteration that aborts the run is
 		// still tallied and cannot disagree with outcome="error".
 		a.totals.Iterations++
-		a.maybeCompact(ctx, conf)
-		if err := a.runIteration(ctx, cli, conf); err != nil {
-			return nil, err
+		iterCtx, iterSpan := otlp.Start(ctx, "mph.agent.iteration", attribute.Int("mph.iteration", a.iteration+1))
+		a.maybeCompact(iterCtx, conf)
+		iterErr := a.runIteration(iterCtx, cli, conf)
+		otlp.End(iterSpan, &iterErr)
+		if iterErr != nil {
+			return nil, iterErr
 		}
 	}
 
@@ -402,7 +406,10 @@ func buildInitialConversation(conf config.Config) []model.D {
 	}
 }
 
-func (a *Agent) callChat(ctx context.Context, req model.D, iter int) (model.ChatResponse, error) {
+func (a *Agent) callChat(ctx context.Context, req model.D, iter int) (_ model.ChatResponse, err error) {
+	ctx, span := otlp.Start(ctx, "mph.agent.chat")
+	defer otlp.End(span, &err)
+
 	callCtx, callCancel := context.WithTimeout(ctx, a.chatTimeout)
 	defer callCancel()
 
@@ -568,7 +575,10 @@ type agentSummarizer struct {
 	maxTokens   int
 }
 
-func (s *agentSummarizer) Summarize(ctx context.Context, systemPrompt, renderedHistory string) (string, error) {
+func (s *agentSummarizer) Summarize(ctx context.Context, systemPrompt, renderedHistory string) (_ string, err error) {
+	ctx, span := otlp.Start(ctx, "mph.agent.compact.chat")
+	defer otlp.End(span, &err)
+
 	// Dedicated Chat, not an agent turn: no tools, temperature 0, bounded
 	// input. It never touches the run's conversation slice.
 	callCtx, cancel := context.WithTimeout(ctx, s.chatTimeout)
@@ -646,7 +656,8 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
 		infos = outputHandleInfos(a.store.Handles())
 	}
 
-	compCtx := ctx
+	compCtx, span := otlp.Start(ctx, "mph.agent.compact")
+	defer otlp.End(span, nil)
 
 	start := time.Now()
 	summarizer := &agentSummarizer{krn: a.krn, chatTimeout: a.chatTimeout, maxTokens: cc.MaxSummaryTokens}
