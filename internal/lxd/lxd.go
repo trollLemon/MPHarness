@@ -33,9 +33,10 @@ var (
 )
 
 const (
-	rebootDownTimeout  = 2 * time.Minute
-	rebootPollInterval = 250 * time.Millisecond
-	cloudInitTimeout   = 5 * time.Minute
+	// rebootTimeout bounds the graceful guest shutdown LXD performs as part of
+	// the restart action before it reports the instance would not stop.
+	rebootTimeout    = 2 * time.Minute
+	cloudInitTimeout = 5 * time.Minute
 )
 
 const guestUserSetup = `set -e
@@ -687,13 +688,22 @@ func (c *Client) InstallKernel(ctx context.Context, name, kernelPkg string) (err
 		return fmt.Errorf("failed to update grub: %w", err)
 	}
 
-	c.log.Info().Str("vm", name).Msg("rebooting VM for new kernel")
-	if _, err := c.Exec(ctx, name, "sudo systemctl reboot --no-block"); err != nil {
-		return fmt.Errorf("failed to reboot VM: %w", err)
+	// The restart is driven from the host: an in-guest reboot resets the
+	// machine inside the running QEMU process, so the instance never leaves
+	// the running state and there is no transition to wait for.
+	c.log.Info().Str("vm", name).Msg("restarting VM for new kernel")
+	op, err := c.server.UpdateInstanceState(name, api.InstanceStatePut{
+		Action:  "restart",
+		Timeout: int(rebootTimeout.Seconds()),
+	}, "")
+	if err != nil {
+		return fmt.Errorf("restart VM %q for new kernel: %w", name, err)
 	}
-
-	if err := c.waitForVMDown(ctx, name); err != nil {
-		return fmt.Errorf("VM did not shut down for reboot: %w", err)
+	if err := waitOperationContext(ctx, op); err != nil {
+		if ctx.Err() != nil {
+			return err
+		}
+		return fmt.Errorf("restart VM %q for new kernel: %w", name, err)
 	}
 
 	if err := c.waitForVMReady(ctx, name); err != nil {
@@ -712,38 +722,6 @@ func (c *Client) InstallKernel(ctx context.Context, name, kernelPkg string) (err
 
 	c.log.Info().Str("vm", name).Str("kernel", runningKernel).Msg("kernel installed and verified")
 	return nil
-}
-
-// waitForVMDown polls the instance state until the guest has left the running
-// state after a reboot request.
-func (c *Client) waitForVMDown(ctx context.Context, name string) error {
-	deadline := time.Now().Add(rebootDownTimeout)
-	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
-		deadline = ctxDeadline
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		state, _, err := c.server.GetInstanceState(name)
-		if err != nil {
-			return fmt.Errorf("get VM %q state: %w", name, err)
-		}
-		if state.StatusCode != api.Running {
-			return nil
-		}
-		if !time.Now().Before(deadline) {
-			return fmt.Errorf("timeout waiting for VM %s to leave the running state", name)
-		}
-
-		if err := sleepContext(ctx, rebootPollInterval); err != nil {
-			return err
-		}
-	}
 }
 
 // waitForVMReady polls a root exec until the guest answers.

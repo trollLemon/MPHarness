@@ -68,24 +68,16 @@ Timeout values accept **Go duration strings** (`"60s"`, `"10m"`, `"1h"`, `"300s"
 output:
   enabled: true
   mode: auto               # auto = capture only over the inline cutoff; always = capture every command
-  inline_max_size: 0       # 0 = use the derived tool-result budget
-  max_command_size: 64MiB
-  max_total_size: 512MiB
-  search_max_matches: 200
 ```
 
 | Key | Default | Effect |
 |-----|---------|--------|
 | `enabled` | `true` | `false` disables the capture tools; output is returned inline. |
 | `mode` | `auto` | `always` captures every command to a handle. In `auto`, output is returned inline until it exceeds the inline cutoff, then it is captured automatically. |
-| `inline_max_size` | `0` | Inline cutoff. Not yet consulted; the derived tool-result budget is used. |
-| `max_command_size` | `64MiB` | Per-capture ceiling. Not yet enforced by the in-memory store. |
-| `max_total_size` | `512MiB` | Per-run cumulative ceiling. Not yet enforced by the in-memory store. |
-| `search_max_matches` | `200` | Cap on matches returned by `output_search`; `0` = unlimited. Not yet enforced by the in-memory store. |
 
 A capture is held in host memory for the run. `output_search` runs a Go RE2 regex over the stored content and returns the matching lines; `output_read` returns the bytes between two offsets. A search with an empty `matches` list means the capture has no matching line.
 
-Sizes accept a unit string such as `64MiB`, `512MiB`, or `1GiB`, a bare byte count such as `1024` (integer or quoted), or the empty string as zero. Unit strings need no quotes because YAML already reads them as strings.
+Older configs may still set `inline_max_size`, `max_command_size`, `max_total_size`, or `search_max_matches`. Those keys were removed and are now ignored, so such a config still loads unchanged.
 
 ## Conversation compaction
 

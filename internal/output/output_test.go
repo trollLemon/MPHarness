@@ -11,11 +11,8 @@ import (
 
 func testCfg() config.OutputConfig {
 	return config.OutputConfig{
-		Enabled:          true,
-		Mode:             "always",
-		MaxCommandSize:   5,
-		MaxTotalSize:     512 * 1024 * 1024,
-		SearchMaxMatches: 200,
+		Enabled: true,
+		Mode:    "always",
 	}
 }
 

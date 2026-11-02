@@ -50,7 +50,6 @@ func TestToolSpecs(t *testing.T) {
 			cfg := config.Config{Output: config.OutputConfig{Enabled: tt.enabled}}
 			if tt.enabled {
 				cfg.Output.Mode = "auto"
-				cfg.Output.SearchMaxMatches = 200
 			}
 			var found *agent.Spec
 			for _, s := range agent.Specs(cfg) {
@@ -163,7 +162,6 @@ func TestCallVMExecCapture(t *testing.T) {
 				Prompt: "p",
 				Output: config.OutputConfig{
 					Enabled: true, Mode: tt.mode,
-					MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200,
 				},
 			}
 			cli := newScriptedTestClient(t, func(command string) (string, int) {
@@ -251,7 +249,6 @@ func TestCallOutputSearchAndReadRoundTrip(t *testing.T) {
 				Prompt: "p",
 				Output: config.OutputConfig{
 					Enabled: true, Mode: "always",
-					MaxCommandSize: 5, MaxTotalSize: 1 << 26, SearchMaxMatches: 200,
 				},
 			}
 			cli := newScriptedTestClient(t, func(command string) (string, int) {

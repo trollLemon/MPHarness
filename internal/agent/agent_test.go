@@ -1355,7 +1355,6 @@ func TestAgentLoopCompactionWithOutputHandles(t *testing.T) {
 			compaction: config.CompactionConfig{Enabled: true, Threshold: threshold, MaxSummaryTokens: 512, MaxAttempts: 3},
 			output: config.OutputConfig{
 				Enabled: true, Mode: "always",
-				MaxCommandSize: 1 << 20, MaxTotalSize: 1 << 26, SearchMaxMatches: 200,
 			},
 			scripted: func(command string) (string, int) {
 				if command == "echo hi" {
@@ -1682,7 +1681,6 @@ func TestAgentLoopCaptureAttribution(t *testing.T) {
 			agent: config.AgentConfig{MaxOutputBytes: 4096},
 			output: config.OutputConfig{
 				Enabled: true, Mode: "always",
-				MaxCommandSize: 5, MaxTotalSize: 1 << 26, SearchMaxMatches: 200,
 			},
 			scripted: func(command string) (string, int) {
 				if command == "echo hi" {
@@ -1981,7 +1979,6 @@ func TestAgentLoopOversizedResultGuidance(t *testing.T) {
 			agent:         config.AgentConfig{MaxOutputBytes: budget},
 			output: config.OutputConfig{
 				Enabled: true, Mode: "always",
-				MaxCommandSize: 5, MaxTotalSize: 1 << 26, SearchMaxMatches: 200,
 			},
 			chatFunc: func(_ context.Context, req model.D) (model.ChatResponse, error) {
 				captured = append(captured, req)
@@ -2041,7 +2038,6 @@ func TestAgentLoopOversizedResultGuidance(t *testing.T) {
 			agent:         config.AgentConfig{MaxOutputBytes: budget},
 			output: config.OutputConfig{
 				Enabled: true, Mode: "always",
-				MaxCommandSize: 5, MaxTotalSize: 1 << 26, SearchMaxMatches: 200,
 			},
 			chatFunc: func(_ context.Context, req model.D) (model.ChatResponse, error) {
 				captured = append(captured, req)
