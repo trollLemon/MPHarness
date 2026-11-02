@@ -8,11 +8,11 @@
 ## The contract
 | Tool | What the model must supply | What it returns |
 |------|----------------------------|-----------------|
-| `vm_exec` | `command` (string), optional `capture` (bool) | combined stdout/stderr, or a capture handle (`output_id`, path, line counts) when `capture: true` |
+| `vm_exec` | `command` (string) | combined stdout/stderr, or a capture handle (`output_id`, `total_bytes`) when the output exceeds the inline budget (or in `always` mode) |
 | `vm_info` | n/a | raw LXD instance JSON (`GetInstanceFull`) |
 | `task_status` | `status` (`Completed`, `Failed`, `Error`), `reason` (string) | nothing to the model; the harness reads `{completed_status, reason}` and ends the run |
-| `output_search` | `output_id`, `pattern` | matching line numbers in a captured output |
-| `output_read` | `output_id`, optional `offset`/`limit` | a slice of a captured output |
+| `output_search` | `output_id`, `pattern` | matching lines from a captured output |
+| `output_read` | `output_id`, optional `offset`/`limit` | a byte range of a captured output |
 
 For `vm_exec`, the `command` string can be several commands at once (such as `cat /proc/uptime | grep ...`), the input command is parsed into a shell AST and each command is validated against the allow list.
 

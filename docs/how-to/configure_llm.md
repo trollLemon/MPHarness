@@ -67,7 +67,7 @@ Timeout values accept **Go duration strings** (`"60s"`, `"10m"`, `"1h"`, `"300s"
 ```yaml
 output:
   enabled: true
-  mode: auto               # auto = model opts in per call; always = every capture
+  mode: auto               # auto = capture only over the inline cutoff; always = capture every command
   inline_max_size: 0       # 0 = use the derived tool-result budget
   max_command_size: 64MiB
   max_total_size: 512MiB
@@ -76,14 +76,14 @@ output:
 
 | Key | Default | Effect |
 |-----|---------|--------|
-| `enabled` | `true` | `false` restores exactly today's behaviour. |
-| `mode` | `auto` | `always` captures every command to a file. In `auto` the model sees uncaptured output inline until it exceeds the per-result context budget; that result is then rejected with `FAILED`, so the model retries with `capture: true` or a narrower command. |
-| `inline_max_size` | `0` | Inline cutoff; `0` = derived tool-result budget. |
-| `max_command_size` | `64MiB` | Per-capture ceiling. |
-| `max_total_size` | `512MiB` | Per-run cumulative ceiling. |
-| `search_max_matches` | `200` | Cap on line numbers returned by `output_search`; `0` = unlimited. |
+| `enabled` | `true` | `false` disables the capture tools; output is returned inline. |
+| `mode` | `auto` | `always` captures every command to a handle. In `auto`, output is returned inline until it exceeds the inline cutoff, then it is captured automatically. |
+| `inline_max_size` | `0` | Inline cutoff. Not yet consulted; the derived tool-result budget is used. |
+| `max_command_size` | `64MiB` | Per-capture ceiling. Not yet enforced by the in-memory store. |
+| `max_total_size` | `512MiB` | Per-run cumulative ceiling. Not yet enforced by the in-memory store. |
+| `search_max_matches` | `200` | Cap on matches returned by `output_search`; `0` = unlimited. Not yet enforced by the in-memory store. |
 
-A capture is written to a single raw file. `output_search` greps that file directly, so every returned match is an absolute line number and nothing is hidden behind a chunk boundary. A search with an empty `matches` list means the capture has no such line.
+A capture is held in host memory for the run. `output_search` runs a Go RE2 regex over the stored content and returns the matching lines; `output_read` returns the bytes between two offsets. A search with an empty `matches` list means the capture has no matching line.
 
 Sizes accept a unit string such as `64MiB`, `512MiB`, or `1GiB`, a bare byte count such as `1024` (integer or quoted), or the empty string as zero. Unit strings need no quotes because YAML already reads them as strings.
 
