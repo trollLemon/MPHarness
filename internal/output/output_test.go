@@ -5,9 +5,109 @@ import (
 	"strings"
 	"testing"
 
+	"pgregory.net/rapid"
+
 	"github.com/trollLemon/MPHarness/v2/internal/config"
 	. "github.com/trollLemon/MPHarness/v2/internal/output"
 )
+
+// autoCaptureMachine models the whole point of auto mode: a command's output
+// comes back inline unless it is larger than the inline cutoff, and only then
+// comes back as a handle carrying the entire output. A cutoff of 0 disables
+// capture by size. The model is the cutoff plus every handle minted so far,
+// and the sequence matters: capturing one output must not disturb an earlier
+// one.
+type autoCaptureMachine struct {
+	store    *Store
+	cutoff   int
+	captured map[string]string
+}
+
+func newAutoCaptureMachine(t *rapid.T) *autoCaptureMachine {
+	cutoff := rapid.OneOf(rapid.Just(0), rapid.IntRange(1, 512)).Draw(t, "cutoff")
+	return &autoCaptureMachine{
+		store:    NewStore(config.OutputConfig{Enabled: true, Mode: "auto"}, int64(cutoff)),
+		cutoff:   cutoff,
+		captured: map[string]string{},
+	}
+}
+
+// Capture runs one command output through the store and checks which side of
+// the contract it came back on.
+func (m *autoCaptureMachine) Capture(t *rapid.T) {
+	// Sizes cluster on the cutoff, where an off-by-one would hide, and also
+	// range well past it.
+	size := rapid.OneOf(
+		rapid.Just(0),
+		rapid.IntRange(max(m.cutoff-2, 0), m.cutoff+2),
+		rapid.IntRange(0, 1024),
+	).Draw(t, "size")
+	out := commandOutput(size)
+
+	res, err := m.store.Capture(out)
+	if err != nil {
+		t.Fatalf("Capture(%d bytes): %v", size, err)
+	}
+
+	switch {
+	case size == 0:
+		if res.Handle != nil {
+			t.Fatalf("empty output captured to %s, want the %q sentinel", res.Handle.ID, NoOutput)
+		}
+		if res.Inline != NoOutput {
+			t.Fatalf("empty output inline = %q, want %q", res.Inline, NoOutput)
+		}
+	case m.cutoff > 0 && size > m.cutoff:
+		if res.Handle == nil {
+			t.Fatalf("%d bytes over the %d-byte cutoff came back inline", size, m.cutoff)
+		}
+		if res.Handle.Content != out {
+			t.Fatalf("handle holds %d bytes, want the %d captured", len(res.Handle.Content), size)
+		}
+		if res.Handle.TotalBytes != int64(size) {
+			t.Fatalf("handle total_bytes = %d, want %d", res.Handle.TotalBytes, size)
+		}
+		m.captured[res.Handle.ID] = out
+	default:
+		if res.Handle != nil {
+			t.Fatalf("%d bytes within the %d-byte cutoff was captured to %s", size, m.cutoff, res.Handle.ID)
+		}
+		if res.Inline != out {
+			t.Fatalf("inline output = %d bytes, want the %d produced", len(res.Inline), size)
+		}
+	}
+}
+
+// Check holds every handle this run minted to its exact bytes, so a later
+// capture cannot evict or rewrite an earlier one.
+func (m *autoCaptureMachine) Check(t *rapid.T) {
+	for id, want := range m.captured {
+		got, err := m.store.Read(id, 0, len(want))
+		if err != nil {
+			t.Fatalf("handle %s no longer readable: %v", id, err)
+		}
+		if got != want {
+			t.Fatalf("handle %s read back %d bytes, want %d", id, len(got), len(want))
+		}
+	}
+}
+
+func TestAutoModeReturnsHandleOnlyForOversizedOutput(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		t.Repeat(rapid.StateMachineActions(newAutoCaptureMachine(t)))
+	})
+}
+
+// commandOutput builds exactly n bytes of newline-separated text, so a drawn
+// size is an exact byte count while the content still looks like output.
+func commandOutput(n int) string {
+	const line = "command output line\n"
+	var b strings.Builder
+	for b.Len() < n {
+		b.WriteString(line)
+	}
+	return b.String()[:n]
+}
 
 func testCfg() config.OutputConfig {
 	return config.OutputConfig{
