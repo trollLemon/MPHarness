@@ -293,7 +293,7 @@ func run() int {
 		Str("total_to", time.Duration(cfg.Agent.TotalTimeout).String()).
 		Bool("otel", otelCfg.Enabled).
 		Bool("out_on", cfg.Output.Enabled).
-		Str("out_mode", cfg.Output.Mode).
+		Str("out_mode", string(cfg.Output.Mode)).
 		Bool("compact", cfg.Compaction.Enabled).
 		Float64("compact_thr", cfg.Compaction.Threshold).
 		Msg("loaded config")

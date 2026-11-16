@@ -158,11 +158,32 @@ type Agent struct {
 	compactionAttempts int           // Failed compactions; budget for the current one.
 	compactionsApplied int           // Compactions that succeeded this run.
 	toolResultBudget   int           // Byte cutoff between inline output and a handle.
-	done               bool          // Set when the agent should stop looping.
-	taskStatusNudged   bool          // Set after prompting a model that stopped without task_status.
+	phase              runPhase      // Current point in the run; terminal phases end the loop.
 	totals             runTotals     // Per-run aggregate for the run_summary event.
 
 	finalRunStatus TaskStatusOutcome // final status of the run.
+}
+
+func (a *Agent) finish(status TaskStatusOutcome) {
+	a.finalRunStatus = status
+	if status == (TaskStatusOutcome{}) {
+		a.phase = phaseStopped
+		return
+	}
+	a.phase = phaseCompleted
+}
+
+func (a *Agent) abort() {
+	a.finalRunStatus = TaskStatusOutcome{}
+	a.phase = phaseMalformed
+}
+
+func (a *Agent) hasIteration() bool {
+	return a.iteration < a.maxIterations
+}
+
+func (a *Agent) hasNextIteration() bool {
+	return a.iteration+1 < a.maxIterations
 }
 
 // Options carries the per-run bounds NewAgent needs.
@@ -196,8 +217,8 @@ func NewAgent(log zerolog.Logger, krn Kronk, opts Options) *Agent {
 func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *lxd.Client) (_ *TaskStatusOutcome, err error) {
 	start := time.Now()
 	defer func() {
-		exhausted := a.iteration >= a.maxIterations && !a.done
-		a.logRunSummary(ctx, classifyOutcome(ctx, err, exhausted, a.finalRunStatus), time.Since(start))
+		exhausted := !a.hasIteration() && !a.phase.terminal()
+		a.logRunSummary(ctx, classifyOutcome(ctx, err, exhausted, a.phase, a.finalRunStatus), time.Since(start))
 	}()
 
 	ctx, cancel := context.WithTimeout(ctx, a.totalTimeout)
@@ -215,7 +236,7 @@ func (a *Agent) Execute(ctx context.Context, conf config.Config, cli *lxd.Client
 	a.log.Info().Int("tools", len(a.toolDocs)).Msg("tool documents built")
 	a.log.Info().Str("run", a.runID).Msg("Starting inference")
 
-	for ; a.iteration < a.maxIterations && !a.done; a.iteration++ {
+	for ; a.hasIteration() && !a.phase.terminal(); a.iteration++ {
 		// Counted before the round runs, so an iteration that aborts the run is
 		// still tallied and cannot disagree with outcome="error".
 		a.totals.Iterations++
@@ -281,7 +302,7 @@ func (a *Agent) runIteration(ctx context.Context, cli *lxd.Client, conf config.C
 
 	msg, finishReason, shouldBreak := a.extractAssistantMessage(resp)
 	if shouldBreak {
-		a.done = true
+		a.abort()
 		return nil
 	}
 
@@ -311,8 +332,7 @@ func (a *Agent) runIteration(ctx context.Context, cli *lxd.Client, conf config.C
 		return nil
 	}
 
-	if len(toolCalls) == 0 && a.iteration+1 < a.maxIterations && a.finalRunStatus == (TaskStatusOutcome{}) {
-		a.taskStatusNudged = true
+	if len(toolCalls) == 0 && a.hasNextIteration() {
 		otlp.LogEvent(iterCtx, iterLog, zerolog.WarnLevel, "finished without task_status, injecting nudge and continuing", map[string]any{
 			"iter":   iter + 1,
 			"finish": finishReason,
@@ -321,8 +341,13 @@ func (a *Agent) runIteration(ctx context.Context, cli *lxd.Client, conf config.C
 		return nil
 	}
 
+	if len(toolCalls) == 0 && finishReason == model.FinishReasonTool {
+		a.abort()
+		return nil
+	}
+
 	if a.shouldTerminateWithoutToolCalls(toolCalls, finishReason, iter) {
-		a.done = true
+		a.finish(TaskStatusOutcome{})
 		return nil
 	}
 
@@ -495,8 +520,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 			var status TaskStatusOutcome
 			status, err = parseTaskStatus(tc.Function.Arguments)
 			if err == nil {
-				a.finalRunStatus = status
-				a.done = true
+				a.finish(status)
 			}
 
 		} else {
@@ -567,7 +591,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, cli *lxd.Client, cfg confi
 
 		toolResponses = append(toolResponses, buildToolResponseMessage(tc, content))
 
-		if a.done {
+		if a.phase.terminal() {
 			break
 		}
 	}
@@ -657,7 +681,7 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
 	win := compactionWindow{Size: window, FixedOverhead: int(overhead)}
 
 	heartbeatLog := a.log.With().Ctx(compCtx).Str("run", a.runID).Int("iter", a.iteration+1).Str("phase", "compaction").Logger()
-	newConv, outcome, summaryLen, compactErr := func() ([]model.D, string, int, error) {
+	newConv, outcome, summaryLen, compactErr := func() ([]model.D, compactionOutcome, int, error) {
 		cancel := heartbeatWithCancel(heartbeatLog, "still compacting")
 		defer cancel()
 		return compactConversation(compCtx, a.conversation, cc.MaxSummaryTokens, a.toolResultBudget, win, summarizer, a.compactionsApplied)
@@ -666,7 +690,7 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
 
 	after := before
 	summaryBytes := summaryLen
-	if outcome == "applied" && len(newConv) == 2 {
+	if outcome == compactionApplied {
 		after = overhead
 		for _, m := range newConv {
 			if c, _ := m["content"].(string); c != "" {
@@ -680,7 +704,7 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
 	a.logCompaction(compCtx, compLog, cc, before, after, summaryBytes, duration, outcome, compactErr)
 
 	switch outcome {
-	case "applied":
+	case compactionApplied:
 		// Rewriting history invalidates the inference prefix cache. Accepted:
 		// one re-prefill of a small prompt buys back thousands of tokens.
 		a.totals.ReclaimedTokens += before - after
@@ -697,14 +721,16 @@ func (a *Agent) maybeCompact(ctx context.Context, cfg config.Config) {
 		})
 
 		return
+	case compactionFailed:
+		a.compactionAttempts++
+		return
 	default:
-		// "failed": the summarizer could not produce an acceptable handover.
 		a.compactionAttempts++
 		return
 	}
 }
 
-func (a *Agent) logCompaction(ctx context.Context, log zerolog.Logger, cc config.CompactionConfig, before, after int64, summaryBytes int, duration time.Duration, outcome string, compactErr error) {
+func (a *Agent) logCompaction(ctx context.Context, log zerolog.Logger, cc config.CompactionConfig, before, after int64, summaryBytes int, duration time.Duration, outcome compactionOutcome, compactErr error) {
 	fields := map[string]any{
 		"event": eventContextCompaction,
 		"iter":  a.iteration + 1, "outcome": outcome, "tok_before": before, "tok_after": after,

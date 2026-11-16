@@ -28,6 +28,13 @@ Rules:
 
 const minSummaryBytes = 64
 
+type compactionOutcome string
+
+const (
+	compactionApplied compactionOutcome = "applied"
+	compactionFailed  compactionOutcome = "failed"
+)
+
 // errEmptySummary marks a summarizer reply that carried no content, so
 // compaction can retry it with a corrective prompt instead of treating it like
 // a transport failure.
@@ -126,26 +133,26 @@ func taskText(conversation []model.D) string {
 // only reaches this after shouldCompact confirms a positive context size, so
 // conversation is always non-empty: Execute seeds it with a system and user
 // message before the first call.
-func compactConversation(ctx context.Context, conversation []model.D, maxSummaryTokens, budget int, win compactionWindow, s summarizer, compactionsApplied int) ([]model.D, string, int, error) {
+func compactConversation(ctx context.Context, conversation []model.D, maxSummaryTokens, budget int, win compactionWindow, s summarizer, compactionsApplied int) ([]model.D, compactionOutcome, int, error) {
 	system := conversation[0]
 	task := taskText(conversation)
 
 	rendered := renderHistory(conversation)
 	summary, err := s.Summarize(ctx, compactionSystemPrompt, rendered)
 	if err != nil && !errors.Is(err, errEmptySummary) {
-		return conversation, "failed", 0, fmt.Errorf("summarize: %w", err)
+		return conversation, compactionFailed, 0, fmt.Errorf("summarize: %w", err)
 	}
 	if reason := summaryRejection(err, summary); reason != nil {
 		summary, err = repairSummary(ctx, s, conversation, reason)
 		if err != nil {
-			return conversation, "failed", 0, fmt.Errorf("summary repair: %w", err)
+			return conversation, compactionFailed, 0, fmt.Errorf("summary repair: %w", err)
 		}
 		if reason := summaryRejection(nil, summary); reason != nil {
-			return conversation, "failed", 0, fmt.Errorf("summary rejected after repair: %w", reason)
+			return conversation, compactionFailed, 0, fmt.Errorf("summary rejected after repair: %w", reason)
 		}
 	}
 	userMsg := model.D{"role": "user", "content": buildUserMessage(task, summary, compactionsApplied)}
-	return []model.D{system, userMsg}, "applied", len(summary), nil
+	return []model.D{system, userMsg}, compactionApplied, len(summary), nil
 }
 
 func summaryRejection(err error, summary string) error {

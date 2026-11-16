@@ -1,6 +1,6 @@
 module github.com/trollLemon/MPHarness/v2
 
-go 1.27.2
+go 1.27.4
 
 require (
 	github.com/ardanlabs/kronk v1.32.6
@@ -85,7 +85,7 @@ require (
 	github.com/hybridgroup/yzma v1.26.2-0.20260906172259-ece48906649f // indirect
 	github.com/jupiterrider/ffi v0.7.0 // indirect
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51 // indirect
-	github.com/klauspost/compress v1.20.1 // indirect
+	github.com/klauspost/compress v1.20.2 // indirect
 	github.com/knadh/koanf/maps v0.1.2 // indirect
 	github.com/kr/fs v0.1.0 // indirect
 	github.com/mattn/go-colorable v0.1.16 // indirect

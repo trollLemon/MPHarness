@@ -16,7 +16,18 @@ import (
 
 // minOverflowReclaimBytes stops the repair loop once replacing a result no
 // longer frees enough context to be worth losing it.
-const minOverflowReclaimBytes = 256
+const (
+	minOverflowReclaimBytes = 256
+	maxOverflowRepairs      = 8
+)
+
+type overflowOutcome string
+
+const (
+	overflowRecovered overflowOutcome = "recovered"
+	overflowAbandoned overflowOutcome = "abandoned"
+	overflowExhausted overflowOutcome = "exhausted"
+)
 
 var (
 	contextOverflowPattern = regexp.MustCompile(`input tokens \[(\d+)\] exceed context window \[(\d+)\]`)
@@ -77,8 +88,8 @@ func buildContextOverflowContent(tool string, bytes, budget int) string {
 }
 
 // discardLargestToolResult rewrites the largest tool result with a short error
-// envelope and reports what it reclaimed. A replacement always shrinks the
-// conversation, so repeated calls make progress without a retry counter.
+// envelope and reports what it reclaimed. Every replacement shrinks the
+// conversation; chatWithOverflowRecovery caps how many it will attempt.
 func (a *Agent) discardLargestToolResult() (tool string, bytes, reclaimed int, ok bool) {
 	bestIdx := -1
 	var bestContent, bestName, bestReplacement string
@@ -122,6 +133,7 @@ func (a *Agent) chatWithOverflowRecovery(ctx context.Context, iter int, log zero
 		replaced  int
 		reclaimed int
 		dur       time.Duration
+		exhausted bool
 	)
 	for {
 		start := time.Now()
@@ -134,28 +146,41 @@ func (a *Agent) chatWithOverflowRecovery(ctx context.Context, iter int, log zero
 		if first == nil {
 			first = overflow
 		}
+		if replaced >= maxOverflowRepairs {
+			exhausted = true
+			err = overflowFailure(overflow, replaced, reclaimed)
+			break
+		}
 		_, _, gained, ok := a.discardLargestToolResult()
 		if !ok {
-			err = fmt.Errorf("context overflow: discarded %d tool results (%d bytes), request still exceeds the model window: %w", replaced, reclaimed, overflow)
-			logContextOverflow(ctx, log, iter, first, err, replaced, reclaimed, true)
-			return resp, dur, err
+			exhausted = true
+			err = overflowFailure(overflow, replaced, reclaimed)
+			break
 		}
 		replaced++
 		reclaimed += gained
 	}
 	if first != nil {
-		logContextOverflow(ctx, log, iter, first, err, replaced, reclaimed, false)
+		outcome := overflowRecovered
+		if err != nil {
+			outcome = overflowAbandoned
+			if exhausted {
+				outcome = overflowExhausted
+			}
+		}
+		logContextOverflow(ctx, log, iter, first, err, replaced, reclaimed, outcome)
 	}
 	return resp, dur, err
 }
 
-func logContextOverflow(ctx context.Context, log zerolog.Logger, iter int, first *contextOverflowError, final error, replaced, reclaimed int, exhausted bool) {
-	outcome, level := "recovered", zerolog.WarnLevel
-	if final != nil {
-		outcome, level = "abandoned", zerolog.ErrorLevel
-		if exhausted {
-			outcome = "exhausted"
-		}
+func overflowFailure(cause error, replaced, reclaimed int) error {
+	return fmt.Errorf("context overflow: discarded %d tool results (%d bytes), request still exceeds the model window: %w", replaced, reclaimed, cause)
+}
+
+func logContextOverflow(ctx context.Context, log zerolog.Logger, iter int, first *contextOverflowError, final error, replaced, reclaimed int, outcome overflowOutcome) {
+	level := zerolog.WarnLevel
+	if outcome != overflowRecovered {
+		level = zerolog.ErrorLevel
 	}
 	fields := map[string]any{
 		"event":           eventContextOverflow,

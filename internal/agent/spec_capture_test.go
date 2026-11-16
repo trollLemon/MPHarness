@@ -49,7 +49,7 @@ func TestToolSpecs(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := config.Config{Output: config.OutputConfig{Enabled: tt.enabled}}
 			if tt.enabled {
-				cfg.Output.Mode = "auto"
+				cfg.Output.Mode = config.OutputModeAuto
 			}
 			var found *agent.Spec
 			for _, s := range agent.Specs(cfg) {
@@ -114,7 +114,7 @@ func TestTaskStatusSpec(t *testing.T) {
 func TestCallVMExecCapture(t *testing.T) {
 	tests := []struct {
 		name        string
-		mode        string
+		mode        config.OutputMode
 		cutoff      int64
 		vmOutput    string
 		wantCapture bool
@@ -122,7 +122,7 @@ func TestCallVMExecCapture(t *testing.T) {
 	}{
 		{
 			name:        "auto mode small output below cutoff returns inline",
-			mode:        "auto",
+			mode:        config.OutputModeAuto,
 			cutoff:      100,
 			vmOutput:    "hello\n",
 			wantCapture: false,
@@ -130,7 +130,7 @@ func TestCallVMExecCapture(t *testing.T) {
 		},
 		{
 			name:        "auto mode output over cutoff automatically returns handle",
-			mode:        "auto",
+			mode:        config.OutputModeAuto,
 			cutoff:      5,
 			vmOutput:    "line1\nline2\nline3\n",
 			wantCapture: true,
@@ -138,7 +138,7 @@ func TestCallVMExecCapture(t *testing.T) {
 		},
 		{
 			name:        "always mode captures even small output",
-			mode:        "always",
+			mode:        config.OutputModeAlways,
 			cutoff:      1000,
 			vmOutput:    "hi\n",
 			wantCapture: true,
@@ -146,7 +146,7 @@ func TestCallVMExecCapture(t *testing.T) {
 		},
 		{
 			name:        "empty output returns NoOutput sentinel",
-			mode:        "auto",
+			mode:        config.OutputModeAuto,
 			cutoff:      100,
 			vmOutput:    "",
 			wantCapture: false,
@@ -248,7 +248,7 @@ func TestCallOutputSearchAndReadRoundTrip(t *testing.T) {
 				Model:  "m",
 				Prompt: "p",
 				Output: config.OutputConfig{
-					Enabled: true, Mode: "always",
+					Enabled: true, Mode: config.OutputModeAlways,
 				},
 			}
 			cli := newScriptedTestClient(t, func(command string) (string, int) {
