@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.27'
+          go-version: '1.27.4'
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@9fae48acfc02a90574d7c304a1758ef9895495fa # v7
         with:
@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.27'
+          go-version: '1.27.4'
       - name: Run tests
         run: make test-cover
 
@@ -41,8 +41,34 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: '1.27'
+          go-version: '1.27.4'
       - name: Run govulncheck
+        id: govulncheck
         uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1
+        continue-on-error: true
         with:
           go-package: ./...
+          go-version-input: '1.27.4'
+          repo-checkout: false
+          output-format: json
+          output-file: govulncheck.json
+      - name: Check govulncheck findings
+        env:
+          GOVULNCHECK_OUTCOME: ${{ steps.govulncheck.outcome }}
+        run: |
+          if [ "$GOVULNCHECK_OUTCOME" != "success" ]; then
+            echo "govulncheck failed"
+            exit 1
+          fi
+          # The vuln DB cannot parse LXD pseudo-versions, so every advisory
+          # against github.com/canonical/lxd (e.g. GO-2026-5306) is likely a false positive
+          # and will need to be analysed manually.
+          jq -e -s '
+            any(.[]; has("SBOM")) and
+            ([ .[]
+               | select(has("finding"))
+               | .finding
+               | select((.trace | length) > 1)
+               | select(.trace[0].module != "github.com/canonical/lxd")
+             ] | length == 0)
+          ' govulncheck.json
