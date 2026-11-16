@@ -26,7 +26,7 @@ type autoCaptureMachine struct {
 func newAutoCaptureMachine(t *rapid.T) *autoCaptureMachine {
 	cutoff := rapid.OneOf(rapid.Just(0), rapid.IntRange(1, 512)).Draw(t, "cutoff")
 	return &autoCaptureMachine{
-		store:    NewStore(config.OutputConfig{Enabled: true, Mode: "auto"}, int64(cutoff)),
+		store:    NewStore(config.OutputConfig{Enabled: true, Mode: config.OutputModeAuto}, int64(cutoff)),
 		cutoff:   cutoff,
 		captured: map[string]string{},
 	}
@@ -112,7 +112,7 @@ func commandOutput(n int) string {
 func testCfg() config.OutputConfig {
 	return config.OutputConfig{
 		Enabled: true,
-		Mode:    "always",
+		Mode:    config.OutputModeAlways,
 	}
 }
 
@@ -136,7 +136,7 @@ func TestCapture(t *testing.T) {
 		{
 			name: "auto mode small output below cutoff returns inline",
 			cfg: config.OutputConfig{
-				Enabled: true, Mode: "auto",
+				Enabled: true, Mode: config.OutputModeAuto,
 			},
 			cutoff:     100,
 			out:        "hello\n",
@@ -145,7 +145,7 @@ func TestCapture(t *testing.T) {
 		{
 			name: "auto mode output over cutoff creates handle",
 			cfg: config.OutputConfig{
-				Enabled: true, Mode: "auto",
+				Enabled: true, Mode: config.OutputModeAuto,
 			},
 			cutoff:     5,
 			out:        "line1\nline2\nline3\n",
@@ -155,7 +155,7 @@ func TestCapture(t *testing.T) {
 		{
 			name: "always mode captures even small output",
 			cfg: config.OutputConfig{
-				Enabled: true, Mode: "always",
+				Enabled: true, Mode: config.OutputModeAlways,
 			},
 			cutoff:     1000,
 			out:        "hi\n",
@@ -352,8 +352,8 @@ func TestRead(t *testing.T) {
 			wantErrSub: "beyond the captured output",
 		},
 		{
-			name:       "unknown output_id error lists active handles",
-			captured:   "first\n",
+			name:         "unknown output_id error lists active handles",
+			captured:     "first\n",
 			useInvalidID: true,
 			offset:       0,
 			limit:        5,

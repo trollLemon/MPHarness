@@ -65,7 +65,7 @@ func (s *Store) Capture(out string) (Result, error) {
 		return Result{Inline: NoOutput}, nil
 	}
 
-	if s.cfg.Mode == "always" || (s.inlineCutoff > 0 && size > s.inlineCutoff) {
+	if s.cfg.Mode == config.OutputModeAlways || (s.inlineCutoff > 0 && size > s.inlineCutoff) {
 		id := uuid.NewV7().String()
 
 		handle := &Handle{

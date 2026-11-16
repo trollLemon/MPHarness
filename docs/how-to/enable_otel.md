@@ -111,7 +111,7 @@ Every run panel is a LogQL query over structured log events. Each dashboard-faci
 | `context_compaction_applied` | `iter`, `compacted` (the rewritten conversation) |
 | `run_summary` | `outcome`, `status`, `reason`, `iterations`, `compactions`, `dur_ms`, `avg_iter_ms`, `prompt_tokens`, `completion_tokens`, `reclaimed_tokens`, `tool_calls`, `tool_failures`, `ctx_window` |
 
-`outcome` is one of `ok`, `failed`, `error`, `budget_exhausted`, or `timeout`. `status` and `reason` are the agent's terminal `task_status` values.
+`outcome` is one of `ok`, `failed`, `error`, `stopped`, `budget_exhausted`, or `timeout`. `stopped` means the run ended cleanly on a final text-only turn without calling `task_status`. `status` and `reason` are the agent's terminal `task_status` values.
 
 For example, prompt tokens per iteration of one run:
 

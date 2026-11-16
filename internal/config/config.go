@@ -334,19 +334,28 @@ type OtelConfig struct {
 	ResourceAttributes map[string]string `yaml:"resource_attributes"`
 }
 
+type OutputMode string
+
+const (
+	OutputModeAuto   OutputMode = "auto"
+	OutputModeAlways OutputMode = "always"
+)
+
 type OutputConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Mode    string `yaml:"mode"`
+	Enabled bool       `yaml:"enabled"`
+	Mode    OutputMode `yaml:"mode"`
 }
 
 func (o OutputConfig) Validate() error {
 	if !o.Enabled {
 		return nil
 	}
-	if o.Mode != "auto" && o.Mode != "always" {
+	switch o.Mode {
+	case OutputModeAuto, OutputModeAlways:
+		return nil
+	default:
 		return fmt.Errorf("output.mode must be auto or always, got %q", o.Mode)
 	}
-	return nil
 }
 
 type CompactionConfig struct {
@@ -685,14 +694,14 @@ func applyDefaults(k *koanf.Koanf, cfg *Config) {
 	defaultIfNotPositive(&cfg.Truncation.Nudge, DefaultNudgeBytes)
 
 	if !k.Exists("output") {
-		cfg.Output = OutputConfig{Enabled: true, Mode: "auto"}
+		cfg.Output = OutputConfig{Enabled: true, Mode: OutputModeAuto}
 	} else {
 		// A present block without `enabled:` opts in; only an explicit
 		// `enabled: false` opts out.
 		if !k.Exists("output.enabled") {
 			cfg.Output.Enabled = true
 		}
-		defaultIfZero(&cfg.Output.Mode, "auto")
+		defaultIfZero(&cfg.Output.Mode, OutputModeAuto)
 	}
 
 	if !k.Exists("compaction") {

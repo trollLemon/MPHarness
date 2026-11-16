@@ -45,6 +45,9 @@ graphify-out/
 # Local scratch notes
 notes/
 
+# Local run artifacts
+/out.json
+
 # Superpowers design specs (drafts, reviewed before committing)
 docs/superpowers/
 

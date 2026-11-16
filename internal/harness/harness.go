@@ -19,35 +19,62 @@ import (
 	"github.com/trollLemon/MPHarness/v2/internal/validation"
 )
 
-const commandHistoryFlushTimeout = 30 * time.Second
-
-var (
-	errInvalidInput      = errors.New("invalid input")
-	errVMShouldNotBeUsed = errors.New("VM already exists and shouldn't be used")
-	errPromptRead        = errors.New("could not read answer")
+const (
+	commandHistoryFlushTimeout = 30 * time.Second
+	maxPromptAttempts          = 10
 )
 
-func promptExistingVM(r *bufio.Reader, w io.Writer, name string) error {
+var (
+	errVMShouldNotBeUsed      = errors.New("VM already exists and shouldn't be used")
+	errPromptRead             = errors.New("could not read answer")
+	errPromptAttemptsExceeded = errors.New("too many invalid answers for existing VM prompt")
+)
+
+type promptDecision uint8
+
+const (
+	promptAccept promptDecision = iota
+	promptReject
+	promptRetry
+)
+
+func promptExistingVM(r *bufio.Reader, w io.Writer, name string) (promptDecision, error) {
 	_, _ = fmt.Fprintf(w, "VM with name %s already exists, continue with the current VM? [y/n] ", name)
 
 	input, err := r.ReadString('\n')
 	if err != nil {
 		if !errors.Is(err, io.EOF) {
-			return fmt.Errorf("%w: %w", errPromptRead, err)
+			return promptRetry, fmt.Errorf("%w: %w", errPromptRead, err)
 		}
 		if strings.TrimSpace(input) == "" {
-			return fmt.Errorf("%w: no answer", errPromptRead)
+			return promptRetry, fmt.Errorf("%w: no answer", errPromptRead)
 		}
 	}
 
 	switch strings.TrimSpace(strings.ToLower(input)) {
 	case "y", "yes":
-		return nil
+		return promptAccept, nil
 	case "n", "no":
-		return errVMShouldNotBeUsed
+		return promptReject, nil
 	default:
-		return errInvalidInput
+		return promptRetry, nil
 	}
+}
+
+func confirmExistingVM(r *bufio.Reader, w io.Writer, name string, maxAttempts int) error {
+	for i := 0; i < maxAttempts; i++ {
+		decision, err := promptExistingVM(r, w, name)
+		if err != nil {
+			return err
+		}
+		switch decision {
+		case promptAccept:
+			return nil
+		case promptReject:
+			return errVMShouldNotBeUsed
+		}
+	}
+	return errPromptAttemptsExceeded
 }
 
 // Options carries the run flags that change VM lifecycle behaviour.
@@ -90,10 +117,20 @@ func Start(ctx context.Context, agt *agent.Agent, client *lxd.Client, cfg config
 	ctx, span := otlp.Start(ctx, "mph.run")
 	defer otlp.End(span, &err)
 
+	cleanup := false
+	defer func() {
+		if cleanup && !opts.Keep && err != nil {
+			if delErr := client.Delete(context.WithoutCancel(ctx), cfg.VM.Name, true); delErr != nil {
+				log.Warn().Err(delErr).Msg("delete VM after failed run failed")
+			}
+		}
+	}()
+
 	_, infoErr := client.Info(ctx, cfg.VM.Name)
 	existing := infoErr == nil
 	switch {
 	case errors.Is(infoErr, lxd.ErrInstanceNotFound):
+		cleanup = true
 		if err := client.Launch(ctx, cfg.VM); err != nil {
 			return nil, err
 		}
@@ -107,16 +144,7 @@ func Start(ctx context.Context, agt *agent.Agent, client *lxd.Client, cfg config
 		return nil, fmt.Errorf("failed to check if VM exists: %w", infoErr)
 	case !opts.IgnoreExisting:
 		reader := bufio.NewReader(os.Stdin)
-		for {
-			err := promptExistingVM(reader, os.Stdout, cfg.VM.Name)
-			if err == nil {
-				break
-			}
-
-			if errors.Is(err, errInvalidInput) {
-				continue
-			}
-
+		if err := confirmExistingVM(reader, os.Stdout, cfg.VM.Name, maxPromptAttempts); err != nil {
 			return nil, err
 		}
 	}
@@ -159,6 +187,7 @@ func Start(ctx context.Context, agt *agent.Agent, client *lxd.Client, cfg config
 	}
 
 	if !opts.Keep {
+		cleanup = false
 		if err := client.Delete(ctx, cfg.VM.Name, true); err != nil {
 			return nil, err
 		}

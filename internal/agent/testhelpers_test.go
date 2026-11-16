@@ -30,6 +30,21 @@ const (
 	eventRunSummary               = "run_summary"
 )
 
+const (
+	outcomeOK              = "ok"
+	outcomeFailed          = "failed"
+	outcomeError           = "error"
+	outcomeStopped         = "stopped"
+	outcomeBudgetExhausted = "budget_exhausted"
+	outcomeTimeout         = "timeout"
+
+	compactionApplied = "applied"
+	compactionFailed  = "failed"
+
+	overflowRecovered = "recovered"
+	overflowExhausted = "exhausted"
+)
+
 // testBytesPerToken mirrors the agent's conservative estimate. If production
 // changes its accounting, this constant must move with it or token-pressure
 // scenarios stop describing the same run.

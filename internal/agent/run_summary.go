@@ -19,11 +19,25 @@ const (
 	outcomeOK              runOutcome = "ok"
 	outcomeFailed          runOutcome = "failed"
 	outcomeError           runOutcome = "error"
+	outcomeStopped         runOutcome = "stopped"
 	outcomeBudgetExhausted runOutcome = "budget_exhausted"
 	outcomeTimeout         runOutcome = "timeout"
 )
 
-func classifyOutcome(ctx context.Context, err error, exhausted bool, status TaskStatusOutcome) runOutcome {
+type runPhase uint8
+
+const (
+	phaseRunning runPhase = iota
+	phaseStopped
+	phaseMalformed
+	phaseCompleted
+)
+
+func (p runPhase) terminal() bool {
+	return p == phaseStopped || p == phaseMalformed || p == phaseCompleted
+}
+
+func classifyOutcome(ctx context.Context, err error, exhausted bool, phase runPhase, status TaskStatusOutcome) runOutcome {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return outcomeTimeout
 	}
@@ -32,6 +46,12 @@ func classifyOutcome(ctx context.Context, err error, exhausted bool, status Task
 	}
 	if exhausted {
 		return outcomeBudgetExhausted
+	}
+	if phase == phaseMalformed {
+		return outcomeError
+	}
+	if phase == phaseStopped {
+		return outcomeStopped
 	}
 	switch status.CompletedStatus {
 	case TaskStatusCompleted:

@@ -671,13 +671,46 @@ func TestAgentLoopNoChoicesEndsRun(t *testing.T) {
 		if got := run.summary["iterations"]; got != float64(1) {
 			t.Errorf("iterations = %v, want 1", got)
 		}
-		if got := run.summary["outcome"]; got != "error" {
+		if got := run.summary["outcome"]; got != outcomeError {
 			t.Errorf("outcome = %v, want error", got)
 		}
 		if run.mock.agentCalls != 1 {
 			t.Errorf("chat calls = %d, want 1", run.mock.agentCalls)
 		}
 	})
+}
+
+func TestAgentLoopTextOnlyFinalTurnStops(t *testing.T) {
+	run := runScenario(t, loopScenario{
+		maxIterations: 1,
+		window:        8192,
+		responses:     []loopResponse{{content: "finished", finishReason: model.FinishReasonStop, usage: totalUsage(100)}},
+		llm:           defaultLLMConfig(),
+	})
+	if run.err != nil {
+		t.Fatalf("Execute: %v", run.err)
+	}
+	if run.status == nil || *run.status != (agent.TaskStatusOutcome{}) {
+		t.Fatalf("status = %+v, want an empty outcome", run.status)
+	}
+	if got := run.summary["outcome"]; got != outcomeStopped {
+		t.Errorf("outcome = %v, want stopped", got)
+	}
+}
+
+func TestAgentLoopToolFinishWithoutCallsIsError(t *testing.T) {
+	run := runScenario(t, loopScenario{
+		maxIterations: 1,
+		window:        8192,
+		responses:     []loopResponse{{finishReason: model.FinishReasonTool, usage: totalUsage(100)}},
+		llm:           defaultLLMConfig(),
+	})
+	if run.err != nil {
+		t.Fatalf("Execute: %v", run.err)
+	}
+	if got := run.summary["outcome"]; got != outcomeError {
+		t.Errorf("outcome = %v, want error", got)
+	}
 }
 
 func TestAgentLoopMaxIterationsInvariant(t *testing.T) {
@@ -720,7 +753,7 @@ func TestAgentLoopTerminatesAtMaxIterations(t *testing.T) {
 		if got := run.summary["iterations"]; got != float64(maxIter) {
 			t.Errorf("iterations = %v, want %d", got, maxIter)
 		}
-		if got := run.summary["outcome"]; got != "budget_exhausted" {
+		if got := run.summary["outcome"]; got != outcomeBudgetExhausted {
 			t.Errorf("outcome = %v, want budget_exhausted", got)
 		}
 		if run.mock.agentCalls != maxIter {
@@ -788,9 +821,9 @@ func TestAgentLoopTerminatesOnTaskStatus(t *testing.T) {
 			t.Errorf("summary reason = %v, want %q", got, reason)
 		}
 		wantOutcome := map[string]string{
-			agent.TaskStatusCompleted: "ok",
-			agent.TaskStatusFailed:    "failed",
-			agent.TaskStatusError:     "error",
+			agent.TaskStatusCompleted: outcomeOK,
+			agent.TaskStatusFailed:    outcomeFailed,
+			agent.TaskStatusError:     outcomeError,
 		}[status]
 		if got := run.summary["outcome"]; got != wantOutcome {
 			t.Errorf("outcome = %v, want %q", got, wantOutcome)
@@ -972,26 +1005,30 @@ func TestAgentLoopRunSummary(t *testing.T) {
 
 		outcome, _ := run.summary["outcome"].(string)
 		switch outcome {
-		case "timeout":
+		case outcomeTimeout:
 			if run.err == nil || !errors.Is(run.err, context.DeadlineExceeded) {
 				t.Errorf("outcome = timeout with err %v", run.err)
 			}
-		case "error":
+		case outcomeError:
 			if wantStatus == agent.TaskStatusCompleted || wantStatus == agent.TaskStatusFailed {
 				t.Errorf("outcome = error with status %q", wantStatus)
 			}
-		case "ok":
+		case outcomeOK:
 			if run.err != nil || wantStatus != agent.TaskStatusCompleted {
 				t.Errorf("outcome = ok with err %v and status %q", run.err, wantStatus)
 			}
-		case "failed":
+		case outcomeFailed:
 			if run.err != nil || wantStatus != agent.TaskStatusFailed {
 				t.Errorf("outcome = failed with err %v and status %q", run.err, wantStatus)
 			}
-		case "budget_exhausted":
+		case outcomeBudgetExhausted:
 			if run.err != nil || wantStatus != "" || iterations != float64(sc.maxIterations) {
 				t.Errorf("outcome = budget_exhausted with err %v, status %q, iterations %v/%d",
 					run.err, wantStatus, iterations, sc.maxIterations)
+			}
+		case outcomeStopped:
+			if run.err != nil || wantStatus != "" {
+				t.Errorf("outcome = stopped with err %v and status %q", run.err, wantStatus)
 			}
 		default:
 			t.Errorf("unknown outcome %q", outcome)
@@ -1023,8 +1060,8 @@ func TestAgentLoopRunSummaryTimeoutAndBackendError(t *testing.T) {
 		wantOutcome string
 		wantTimeout bool
 	}{
-		{"timeout", context.DeadlineExceeded, "timeout", true},
-		{"backend error", errors.New("backend down"), "error", false},
+		{"timeout", context.DeadlineExceeded, outcomeTimeout, true},
+		{"backend error", errors.New("backend down"), outcomeError, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1107,7 +1144,7 @@ func TestAgentLoopCompaction(t *testing.T) {
 				t.Errorf("compactions = %v, want 0 after a failed handover", got)
 			}
 			events := eventsOf(run.events, eventContextCompaction)
-			if len(events) != 1 || events[0]["outcome"] != "failed" {
+			if len(events) != 1 || events[0]["outcome"] != compactionFailed {
 				t.Errorf("context_compaction events = %v, want one failed", events)
 			}
 			if _, ok := events[0]["error"]; !ok {
@@ -1124,7 +1161,7 @@ func TestAgentLoopCompaction(t *testing.T) {
 				t.Errorf("compactions = %v, want 1", got)
 			}
 			events := eventsOf(run.events, eventContextCompaction)
-			if len(events) != 1 || events[0]["outcome"] != "applied" {
+			if len(events) != 1 || events[0]["outcome"] != compactionApplied {
 				t.Fatalf("context_compaction events = %v, want one applied", events)
 			}
 			if got, want := run.summary["reclaimed_tokens"], events[0]["reclaimed"]; got != want {
@@ -1232,9 +1269,9 @@ func TestAgentLoopCompactionFailuresDoNotEndRun(t *testing.T) {
 		} else if got := run.summary["reclaimed_tokens"]; got != float64(0) {
 			t.Errorf("reclaimed_tokens = %v, want 0 when compaction failed", got)
 		}
-		wantOutcome := "failed"
+		wantOutcome := compactionFailed
 		if wantApplied {
-			wantOutcome = "applied"
+			wantOutcome = compactionApplied
 		}
 		if events[0]["outcome"] != wantOutcome {
 			t.Errorf("context_compaction outcome = %v, want %q", events[0]["outcome"], wantOutcome)
@@ -1289,7 +1326,7 @@ func TestAgentLoopCompactionHandoverShapes(t *testing.T) {
 				t.Errorf("handover calls = %d, want 2 (summary and repair)", handovers)
 			}
 			events := eventsOf(run.events, eventContextCompaction)
-			if len(events) != 1 || events[0]["outcome"] != "failed" {
+			if len(events) != 1 || events[0]["outcome"] != compactionFailed {
 				t.Fatalf("context_compaction events = %v, want one failed", events)
 			}
 			if _, ok := events[0]["error"]; !ok {
@@ -1354,7 +1391,7 @@ func TestAgentLoopCompactionWithOutputHandles(t *testing.T) {
 			},
 			compaction: config.CompactionConfig{Enabled: true, Threshold: threshold, MaxSummaryTokens: 512, MaxAttempts: 3},
 			output: config.OutputConfig{
-				Enabled: true, Mode: "always",
+				Enabled: true, Mode: config.OutputModeAlways,
 			},
 			scripted: func(command string) (string, int) {
 				if command == "echo hi" {
@@ -1510,7 +1547,7 @@ func TestAgentLoopOverflowRecovery(t *testing.T) {
 			if run.status == nil || run.status.CompletedStatus != agent.TaskStatusCompleted {
 				t.Fatalf("status = %+v, want Completed", run.status)
 			}
-			if event["outcome"] != "recovered" {
+			if event["outcome"] != overflowRecovered {
 				t.Errorf("overflow outcome = %v, want recovered", event["outcome"])
 			}
 			if event["replaced"] != float64(1) {
@@ -1532,7 +1569,7 @@ func TestAgentLoopOverflowRecovery(t *testing.T) {
 			if !strings.Contains(string(retry), "was discarded") {
 				t.Errorf("retry request is missing the replacement error: %s", retry)
 			}
-			if got := run.summary["outcome"]; got != "ok" {
+			if got := run.summary["outcome"]; got != outcomeOK {
 				t.Errorf("outcome = %v, want ok", got)
 			}
 		} else {
@@ -1548,7 +1585,7 @@ func TestAgentLoopOverflowRecovery(t *testing.T) {
 			if run.status != nil {
 				t.Errorf("status = %+v, want nil", run.status)
 			}
-			if event["outcome"] != "exhausted" {
+			if event["outcome"] != overflowExhausted {
 				t.Errorf("overflow outcome = %v, want exhausted", event["outcome"])
 			}
 			if event["replaced"] != float64(0) {
@@ -1557,11 +1594,63 @@ func TestAgentLoopOverflowRecovery(t *testing.T) {
 			if run.mock.agentCalls != 2 {
 				t.Errorf("chat calls = %d, want 2 (initial, overflow)", run.mock.agentCalls)
 			}
-			if got := run.summary["outcome"]; got != "error" {
+			if got := run.summary["outcome"]; got != outcomeError {
 				t.Errorf("outcome = %v, want error", got)
 			}
 		}
 	})
+}
+
+func TestAgentLoopOverflowRepairBound(t *testing.T) {
+	const (
+		results = 9
+		window  = 8192
+	)
+	var calls int
+	chat := func(context.Context, model.D) (model.ChatResponse, error) {
+		calls++
+		switch calls {
+		case 1:
+			var toolCalls []model.ResponseToolCall
+			for i := 0; i < results; i++ {
+				toolCalls = append(toolCalls, vmExecCall(fmt.Sprintf("c%d", i), fmt.Sprintf("big%d", i)))
+			}
+			return chatResp("", "", model.FinishReasonTool, toolCalls, totalUsage(100)), nil
+		case 2, 3, 4, 5, 6, 7, 8, 9, 10:
+			return model.ChatResponse{}, overflowErr(9000, window)
+		default:
+			return chatResp("", "", model.FinishReasonTool, []model.ResponseToolCall{taskStatusCall("ts", agent.TaskStatusCompleted, "done")}, totalUsage(100)), nil
+		}
+	}
+	run := runScenario(t, loopScenario{
+		maxIterations: 3,
+		window:        window,
+		chatFunc:      chat,
+		agent:         config.AgentConfig{MaxOutputBytes: 1024 * 1024},
+		scripted: func(command string) (string, int) {
+			switch {
+			case strings.HasPrefix(command, "id -u"), strings.HasPrefix(command, "id -g"):
+				return "1000\n", 0
+			case strings.HasPrefix(command, "getent passwd"):
+				return "ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n", 0
+			case strings.HasPrefix(command, "big"):
+				return strings.Repeat("x", 1024), 0
+			default:
+				return "", 0
+			}
+		},
+		llm: defaultLLMConfig(),
+	})
+	if run.err == nil {
+		t.Fatal("persistent overflow must fail the run")
+	}
+	event := onlyEvent(t, run.events, eventContextOverflow)
+	if event["outcome"] != overflowExhausted {
+		t.Errorf("overflow outcome = %v, want exhausted", event["outcome"])
+	}
+	if got := event["replaced"]; got != float64(8) {
+		t.Errorf("replaced = %v, want 8 (the repair bound)", got)
+	}
 }
 
 func TestAgentLoopOverflowClassification(t *testing.T) {
@@ -1592,11 +1681,11 @@ func TestAgentLoopOverflowClassification(t *testing.T) {
 			}
 			if tt.wantOverflow {
 				event := onlyEvent(t, run.events, eventContextOverflow)
-				if event["outcome"] != "exhausted" {
+				if event["outcome"] != overflowExhausted {
 					t.Errorf("overflow outcome = %v, want exhausted", event["outcome"])
 				}
 			}
-			if got := run.summary["outcome"]; got != "error" {
+			if got := run.summary["outcome"]; got != outcomeError {
 				t.Errorf("outcome = %v, want error", got)
 			}
 		})
@@ -1680,7 +1769,7 @@ func TestAgentLoopCaptureAttribution(t *testing.T) {
 			},
 			agent: config.AgentConfig{MaxOutputBytes: 4096},
 			output: config.OutputConfig{
-				Enabled: true, Mode: "always",
+				Enabled: true, Mode: config.OutputModeAlways,
 			},
 			scripted: func(command string) (string, int) {
 				if command == "echo hi" {
@@ -1776,7 +1865,7 @@ func TestAgentLoopChatTimeout(t *testing.T) {
 	if !errors.Is(run.err, context.DeadlineExceeded) {
 		t.Errorf("error = %v, want a context deadline cause", run.err)
 	}
-	if got := run.summary["outcome"]; got != "timeout" {
+	if got := run.summary["outcome"]; got != outcomeTimeout {
 		t.Errorf("outcome = %v, want timeout", got)
 	}
 	if run.status != nil {
@@ -1898,7 +1987,7 @@ func TestAgentLoopOverflowDiscardsLargestFirst(t *testing.T) {
 	}
 
 	event := onlyEvent(t, run.events, eventContextOverflow)
-	if event["outcome"] != "recovered" || event["replaced"] != float64(1) {
+	if event["outcome"] != overflowRecovered || event["replaced"] != float64(1) {
 		t.Fatalf("overflow outcome/replaced = %v/%v, want recovered/1", event["outcome"], event["replaced"])
 	}
 
@@ -1978,7 +2067,7 @@ func TestAgentLoopOversizedResultGuidance(t *testing.T) {
 			window:        8192,
 			agent:         config.AgentConfig{MaxOutputBytes: budget},
 			output: config.OutputConfig{
-				Enabled: true, Mode: "always",
+				Enabled: true, Mode: config.OutputModeAlways,
 			},
 			chatFunc: func(_ context.Context, req model.D) (model.ChatResponse, error) {
 				captured = append(captured, req)
@@ -2037,7 +2126,7 @@ func TestAgentLoopOversizedResultGuidance(t *testing.T) {
 			window:        8192,
 			agent:         config.AgentConfig{MaxOutputBytes: budget},
 			output: config.OutputConfig{
-				Enabled: true, Mode: "always",
+				Enabled: true, Mode: config.OutputModeAlways,
 			},
 			chatFunc: func(_ context.Context, req model.D) (model.ChatResponse, error) {
 				captured = append(captured, req)

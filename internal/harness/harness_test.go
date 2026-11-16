@@ -4,17 +4,21 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 
 	lxdclient "github.com/canonical/lxd/client"
+	"github.com/canonical/lxd/shared/api"
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
+	"github.com/trollLemon/MPHarness/v2/internal/agent"
 	"github.com/trollLemon/MPHarness/v2/internal/config"
 	. "github.com/trollLemon/MPHarness/v2/internal/harness"
 	"github.com/trollLemon/MPHarness/v2/internal/lxd"
@@ -30,11 +34,13 @@ type fakeServer struct {
 func TestPromptExistingVMReadsEveryAnswer(t *testing.T) {
 	in := bufio.NewReader(strings.NewReader("bogus\ny\n"))
 
-	if err := PromptExistingVM(in, io.Discard, "vm"); err != ErrInvalidInput {
-		t.Fatalf("first pass want ErrInvalidInput, got %v", err)
+	decision, err := PromptExistingVM(in, io.Discard, "vm")
+	if err != nil || decision != PromptRetry {
+		t.Fatalf("first pass = (%v, %v), want retry", decision, err)
 	}
-	if err := PromptExistingVM(in, io.Discard, "vm"); err != nil {
-		t.Fatalf("second pass want consent, got %v", err)
+	decision, err = PromptExistingVM(in, io.Discard, "vm")
+	if err != nil || decision != PromptAccept {
+		t.Fatalf("second pass = (%v, %v), want accept", decision, err)
 	}
 }
 
@@ -42,20 +48,24 @@ func TestPromptExistingVMReadsEveryAnswer(t *testing.T) {
 func TestPromptExistingVMReadFailureIsNotConsent(t *testing.T) {
 	in := bufio.NewReader(strings.NewReader(""))
 
-	err := PromptExistingVM(in, io.Discard, "vm")
+	decision, err := PromptExistingVM(in, io.Discard, "vm")
 	if err == nil {
 		t.Fatal("EOF must not be treated as consent")
 	}
-	if errors.Is(err, ErrVMShouldNotBeUsed) || errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("read failure should be its own error, got %v", err)
+	if decision != PromptRetry {
+		t.Fatalf("decision = %v, want retry", decision)
+	}
+	if errors.Is(err, ErrVMShouldNotBeUsed) {
+		t.Fatalf("read failure should not be a rejection, got %v", err)
 	}
 }
 
 func TestPromptExistingVMRejection(t *testing.T) {
 	in := bufio.NewReader(strings.NewReader("n\n"))
 
-	if err := PromptExistingVM(in, io.Discard, "vm"); !errors.Is(err, ErrVMShouldNotBeUsed) {
-		t.Fatalf("want ErrVMShouldNotBeUsed, got %v", err)
+	decision, err := PromptExistingVM(in, io.Discard, "vm")
+	if err != nil || decision != PromptReject {
+		t.Fatalf("want reject, got (%v, %v)", decision, err)
 	}
 }
 
@@ -64,14 +74,39 @@ func TestPromptExistingVMRejection(t *testing.T) {
 func TestPromptExistingVMEmptyLineRetries(t *testing.T) {
 	in := bufio.NewReader(strings.NewReader("\n \n"))
 
-	if err := PromptExistingVM(in, io.Discard, "vm"); err != ErrInvalidInput {
-		t.Fatalf("bare Enter want ErrInvalidInput, got %v", err)
+	for i := 0; i < 2; i++ {
+		decision, err := PromptExistingVM(in, io.Discard, "vm")
+		if err != nil || decision != PromptRetry {
+			t.Fatalf("pass %d = (%v, %v), want retry", i, decision, err)
+		}
 	}
-	if err := PromptExistingVM(in, io.Discard, "vm"); err != ErrInvalidInput {
-		t.Fatalf("whitespace-only want ErrInvalidInput, got %v", err)
+	decision, err := PromptExistingVM(in, io.Discard, "vm")
+	if !errors.Is(err, ErrPromptRead) || decision != PromptRetry {
+		t.Fatalf("exhausted input = (%v, %v), want retry with ErrPromptRead", decision, err)
 	}
-	if err := PromptExistingVM(in, io.Discard, "vm"); !errors.Is(err, ErrPromptRead) {
-		t.Fatalf("exhausted input want ErrPromptRead, got %v", err)
+}
+
+func TestConfirmExistingVMAcceptsAfterInvalid(t *testing.T) {
+	in := bufio.NewReader(strings.NewReader("bogus\ny\n"))
+
+	if err := ConfirmExistingVM(in, io.Discard, "vm", 3); err != nil {
+		t.Fatalf("ConfirmExistingVM: %v", err)
+	}
+}
+
+func TestConfirmExistingVMRejects(t *testing.T) {
+	in := bufio.NewReader(strings.NewReader("n\n"))
+
+	if err := ConfirmExistingVM(in, io.Discard, "vm", 3); !errors.Is(err, ErrVMShouldNotBeUsed) {
+		t.Fatalf("want ErrVMShouldNotBeUsed, got %v", err)
+	}
+}
+
+func TestConfirmExistingVMIsBounded(t *testing.T) {
+	in := bufio.NewReader(strings.NewReader(strings.Repeat("bogus\n", 20)))
+
+	if err := ConfirmExistingVM(in, io.Discard, "vm", 3); !errors.Is(err, ErrPromptAttemptsExceeded) {
+		t.Fatalf("want ErrPromptAttemptsExceeded, got %v", err)
 	}
 }
 
@@ -182,5 +217,85 @@ func TestStartRootSpan(t *testing.T) {
 	}
 	if spans[1].Status.Code != codes.Error {
 		t.Fatalf("mph.run status = %v, want Error", spans[1].Status.Code)
+	}
+}
+
+type cleanupOperation struct {
+	lxdclient.Operation
+}
+
+func (cleanupOperation) WaitContext(context.Context) error { return nil }
+func (cleanupOperation) Cancel() error                     { return nil }
+
+type cleanupServer struct {
+	lxdclient.InstanceServer
+	deleted         []string
+	notFound        bool
+	failGetInstance bool
+	failGetProfile  bool
+}
+
+func (s *cleanupServer) GetInstanceFull(name string) (*api.InstanceFull, string, error) {
+	if s.notFound {
+		return nil, "", api.StatusErrorf(http.StatusNotFound, "Instance not found")
+	}
+	return &api.InstanceFull{
+		Instance: api.Instance{Name: name, Type: string(api.InstanceTypeVM), StatusCode: api.Running},
+	}, "", nil
+}
+
+func (s *cleanupServer) GetProfile(string) (*api.Profile, string, error) {
+	if s.failGetProfile {
+		return nil, "", errors.New("profile read failed")
+	}
+	return &api.Profile{}, "", nil
+}
+
+func (s *cleanupServer) GetInstance(name string) (*api.Instance, string, error) {
+	if s.failGetInstance {
+		return nil, "", errors.New("instance check failed")
+	}
+	return &api.Instance{Name: name, Type: string(api.InstanceTypeVM), StatusCode: api.Running}, "", nil
+}
+
+func (s *cleanupServer) DeleteInstance(name string, _ bool) (lxdclient.Operation, error) {
+	s.deleted = append(s.deleted, name)
+	return cleanupOperation{}, nil
+}
+
+func TestStartCleansUpVMOnFailure(t *testing.T) {
+	for _, keep := range []bool{false, true} {
+		t.Run(fmt.Sprintf("keep=%v", keep), func(t *testing.T) {
+			server := &cleanupServer{notFound: true, failGetProfile: true}
+			client := lxd.NewWithServer(server, zerolog.Nop(), nil)
+			agt := agent.NewAgent(zerolog.Nop(), nil, agent.Options{})
+			cfg := config.Config{VM: config.VMConfig{Name: "vm", CPU: 1, RAM: "1G", Disk: "5G"}, Prompt: "task"}
+
+			if _, err := Start(context.Background(), agt, client, cfg, Options{Keep: keep}); err == nil {
+				t.Fatal("Start expected Launch to fail")
+			}
+
+			want := 0
+			if !keep {
+				want = 1
+			}
+			if len(server.deleted) != want {
+				t.Fatalf("deletes = %v, want %d", server.deleted, want)
+			}
+		})
+	}
+}
+
+func TestStartKeepsExistingVMAfterFailure(t *testing.T) {
+	server := &cleanupServer{failGetInstance: true}
+	client := lxd.NewWithServer(server, zerolog.Nop(), nil)
+	agt := agent.NewAgent(zerolog.Nop(), nil, agent.Options{})
+	cfg := config.Config{VM: config.VMConfig{Name: "vm"}, Prompt: "task"}
+
+	if _, err := Start(context.Background(), agt, client, cfg, Options{IgnoreExisting: true}); err == nil {
+		t.Fatal("Start expected EnsureRunning to fail")
+	}
+	if len(server.deleted) != 0 {
+		t.Fatalf("deletes = %v, want none for a pre-existing VM", server.deleted)
 	}
 }

@@ -701,8 +701,28 @@ func TestParseIgnoresRemovedOutputKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("legacy output keys must not fail the load: %v", err)
 	}
-	if !cfg.Output.Enabled || cfg.Output.Mode != "always" {
+	if !cfg.Output.Enabled || cfg.Output.Mode != OutputModeAlways {
 		t.Fatalf("output = %+v, want enabled with mode always", cfg.Output)
+	}
+}
+
+func TestOutputConfigModeValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		mode    OutputMode
+		wantErr bool
+	}{
+		{"auto", OutputModeAuto, false},
+		{"always", OutputModeAlways, false},
+		{"unknown", OutputMode("bogus"), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := OutputConfig{Enabled: true, Mode: tt.mode}.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("Validate() = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -717,7 +737,7 @@ func TestParseOutputCompaction(t *testing.T) {
 			name: "absent blocks take defaults",
 			yaml: base,
 			check: func(t *testing.T, cfg Config) {
-				if !cfg.Output.Enabled || cfg.Output.Mode != "auto" {
+				if !cfg.Output.Enabled || cfg.Output.Mode != OutputModeAuto {
 					t.Errorf("output defaults: %+v", cfg.Output)
 				}
 				if !cfg.Compaction.Enabled || cfg.Compaction.Threshold != 0.8 || cfg.Compaction.MaxSummaryTokens != 2048 {
@@ -741,7 +761,7 @@ func TestParseOutputCompaction(t *testing.T) {
 			name: "block without enabled opts in",
 			yaml: base + "output:\n  mode: always\ncompaction:\n  threshold: 0.7\n",
 			check: func(t *testing.T, cfg Config) {
-				if !cfg.Output.Enabled || cfg.Output.Mode != "always" {
+				if !cfg.Output.Enabled || cfg.Output.Mode != OutputModeAlways {
 					t.Errorf("output: %+v", cfg.Output)
 				}
 				if !cfg.Compaction.Enabled || cfg.Compaction.Threshold != 0.7 {
@@ -854,7 +874,7 @@ compaction:
 		{"otel.endpoint", cfg.Otel.Endpoint, "host:4317"},
 		{"otel.service_name", cfg.Otel.ServiceName, "svc"},
 		{"output.enabled", cfg.Output.Enabled, true},
-		{"output.mode", cfg.Output.Mode, "always"},
+		{"output.mode", cfg.Output.Mode, OutputModeAlways},
 		{"compaction.enabled", cfg.Compaction.Enabled, true},
 		{"compaction.threshold", cfg.Compaction.Threshold, 0.7},
 	}
